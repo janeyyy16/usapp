@@ -74,17 +74,17 @@
    below, the most common hardcoded Tailwind dark utility classes so existing
    components flip without per-component edits. */
 :root[data-theme="light"] {
-  --background: #d8d6d6;
+  --background: #ede3cf;
   --foreground: oklch(0.22 0.03 260);
-  --card: #e0dede;
+  --card: #fdf8f0;
   --card-foreground: oklch(0.22 0.03 260);
-  --popover: #e0dede;
+  --popover: #fdf8f0;
   --popover-foreground: oklch(0.22 0.03 260);
   --primary: oklch(0.55 0.22 255);
   --primary-foreground: oklch(0.99 0 0);
-  --secondary: #d0cccc;
+  --secondary: #f7efdf;
   --secondary-foreground: oklch(0.22 0.03 260);
-  --muted: #d0cccc;
+  --muted: #f7efdf;
   --muted-foreground: oklch(0.45 0.02 260);
   --accent: oklch(0.55 0.22 255);
   --accent-foreground: oklch(0.99 0 0);
@@ -93,7 +93,7 @@
   --border: oklch(0.22 0.03 260 / 0.15);
   --input: oklch(0.22 0.03 260 / 0.06);
   --ring: oklch(0.55 0.22 255);
-  --panel: #e0dede;
+  --panel: #fdf8f0;
   --panel-border: oklch(0.22 0.03 260 / 0.12);
 }
 
@@ -117,7 +117,7 @@
     background:
       radial-gradient(1200px 600px at 10% -10%, oklch(0.85 0.10 180 / 0.20), transparent 60%),
       radial-gradient(900px 500px at 100% 0%, oklch(0.85 0.08 175 / 0.15), transparent 60%),
-      linear-gradient(180deg, #e0dede 0%, #d0cccc 100%);
+      linear-gradient(180deg, #fdf8f0 0%, #ede3cf 100%);
     background-attachment: fixed;
   }
   h1, h2, h3, h4 { font-family: var(--font-display); letter-spacing: -0.01em; }
@@ -1692,9 +1692,9 @@
    editing each one. Scoped under [data-theme="light"] so dark mode is untouched. */
 :root[data-theme="light"] {
   /* Surfaces */
-  --lt-surface: #e0dede;
-  --lt-surface-2: #d0cccc;
-  --lt-surface-3: #bfbbbb;
+  --lt-surface: #fdf8f0;
+  --lt-surface-2: #f7efdf;
+  --lt-surface-3: #ede3cf;
   --lt-text: #1e293b;
   --lt-text-2: #475569;
   --lt-text-3: #64748b;
@@ -1764,14 +1764,14 @@
 
 /* Glass inputs in light mode */
 :root[data-theme="light"] .glass-input {
-  background-color: #e0dede !important;
+  background-color: #fdf8f0 !important;
   border-color: var(--lt-border) !important;
   color: var(--lt-text) !important;
 }
 
 /* Panels get a solid light surface */
 :root[data-theme="light"] .panel {
-  background: rgba(224, 222, 222, 0.90) !important;
+  background: rgba(253, 248, 240, 0.90) !important;
   border-color: var(--lt-border) !important;
 }
 
@@ -1907,7 +1907,7 @@
   border-color: var(--lt-border) !important;
 }
 :root[data-theme="light"] .hover\:bg-\[rgba\(255\2c 255\2c 255\2c 0\.12\)\]:hover {
-  background-color: #d0cccc !important;
+  background-color: #f7efdf !important;
 }
 
 /* Card icon tiles using bg-white/10 already covered; ensure their icon ink is dark */
@@ -2023,11 +2023,33 @@
   color: #1e40af !important;            /* blue-800 on hover */
 }
 
+/* ─── LIGHT THEME — White logo visibility ────────────────────────────────────
+   The logo PNG is white and disappears on light backgrounds. In light mode,
+   wrap it in a dark rounded pill so it stays visible without editing the asset.
+   The padding scales relative to the img size via em units. */
+:root[data-theme="light"] .logo-img {
+  background-color: #1e293b !important;
+  border-radius: 10px !important;
+  padding: 5px !important;
+  box-sizing: content-box !important;
+  display: inline-block !important;
+}
+
+/* Fallback: catch the logo img even without the logo-img class,
+   by targeting any small img directly inside the header link */
+:root[data-theme="light"] header img,
+:root[data-theme="light"] header a > img {
+  background-color: #1e293b !important;
+  border-radius: 10px !important;
+  padding: 5px !important;
+  box-sizing: content-box !important;
+}
+
 /* ─── LIGHT THEME — App header background ────────────────────────────────────
    The sticky header uses bg-[oklch(0.16_0.04_260/0.7)] (dark navy) which
    doesn't match any Tailwind class selector sweep. Target the header element
-   directly so it picks up the #DFFFFD surface tint in light mode. */
+   directly so it picks up the warm ivory surface tint in light mode. */
 :root[data-theme="light"] header.sticky {
-  background-color: rgba(224, 222, 222, 0.85) !important;
+  background-color: rgba(253, 248, 240, 0.85) !important;
   border-bottom-color: rgba(15, 23, 42, 0.10) !important;
 }

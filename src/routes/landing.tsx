@@ -146,7 +146,7 @@ function Landing() {
       <header className="sticky top-0 z-30 backdrop-blur-md bg-background/40 border-b border-white/10">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <img src={logo} alt="Admin Hub Solutions" className="h-9 w-9 object-contain" />
+            <img src={logo} alt="Admin Hub Solutions" className="logo-img h-9 w-9 object-contain" />
             <span className="font-display font-semibold text-lg">Admin Hub Solutions</span>
           </div>
           <nav className="flex items-center gap-3">
@@ -167,7 +167,7 @@ function Landing() {
       {/* Hero */}
       <section className="relative overflow-hidden">
         <div className="max-w-5xl mx-auto px-6 pt-20 pb-28 text-center">
-          <img src={logo} alt="" className="h-24 w-24 mx-auto object-contain drop-shadow-2xl" />
+          <img src={logo} alt="" className="logo-img h-24 w-24 mx-auto object-contain drop-shadow-2xl" />
           <h1 className="mt-8 font-display font-bold tracking-tight text-5xl sm:text-7xl">
             Admin Hub Solutions
           </h1>

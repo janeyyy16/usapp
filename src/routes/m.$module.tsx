@@ -59,23 +59,9 @@ function ModuleIndex() {
     "daily-activity": ClipboardList,
   };
 
-  const dashboardCardStyles: Record<string, string> = {
-    "overall-status": "bg-[rgba(255,255,255,0.08)] text-white border border-[rgba(255,255,255,0.15)] backdrop-blur-md hover:-translate-y-1 hover:bg-[rgba(255,255,255,0.12)] hover:border-[rgba(91,126,255,0.5)]",
-    "repair-forecast": "bg-[rgba(255,255,255,0.08)] text-white border border-[rgba(255,255,255,0.15)] backdrop-blur-md hover:-translate-y-1 hover:bg-[rgba(255,255,255,0.12)] hover:border-[rgba(91,126,255,0.5)]",
-    "daily-activity": "bg-[rgba(255,255,255,0.08)] text-white border border-[rgba(255,255,255,0.15)] backdrop-blur-md hover:-translate-y-1 hover:bg-[rgba(255,255,255,0.12)] hover:border-[rgba(91,126,255,0.5)]",
-  };
-
-  const dashboardCardIconStyles: Record<string, string> = {
-    "overall-status": "bg-white/10 text-white border border-white/10 shadow-[0_10px_30px_rgba(0,0,0,0.18)]",
-    "repair-forecast": "bg-white/10 text-white border border-white/10 shadow-[0_10px_30px_rgba(0,0,0,0.18)]",
-    "daily-activity": "bg-white/10 text-white border border-white/10 shadow-[0_10px_30px_rgba(0,0,0,0.18)]",
-  };
-
-  const dashboardCardMetaStyles: Record<string, string> = {
-    "overall-status": "text-white/45",
-    "repair-forecast": "text-white/45",
-    "daily-activity": "text-white/45",
-  };
+  const CARD_STYLE = "bg-[rgba(255,255,255,0.08)] text-white border border-[rgba(255,255,255,0.15)] backdrop-blur-md hover:-translate-y-1 hover:bg-[rgba(255,255,255,0.12)] hover:border-[rgba(91,126,255,0.5)]";
+  const ICON_STYLE = "bg-white/10 text-white border border-white/10 shadow-[0_10px_30px_rgba(0,0,0,0.18)]";
+  const META_STYLE = "text-white/45";
 
   const partsLandingOrder = [
     "part-pickup",
@@ -182,9 +168,9 @@ function ModuleIndex() {
           <div className="grid gap-5 lg:grid-cols-3">
             {submodules.map((s: SubModuleDef, index) => {
               const Icon = dashboardIcons[s.slug] ?? ArrowRight;
-              const cardStyle = dashboardCardStyles[s.slug] ?? dashboardCardStyles["repair-forecast"];
-              const iconStyle = dashboardCardIconStyles[s.slug] ?? dashboardCardIconStyles["repair-forecast"];
-              const metaStyle = dashboardCardMetaStyles[s.slug] ?? dashboardCardMetaStyles["repair-forecast"];
+              const cardStyle = CARD_STYLE;
+              const iconStyle = ICON_STYLE;
+              const metaStyle = META_STYLE;
               return (
                 <Link
                   key={s.slug}
