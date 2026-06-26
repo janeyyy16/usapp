@@ -11,6 +11,7 @@ import {
   type Ticket 
 } from "@/lib/ticketData";
 import { getCompanyTickets } from "@/lib/supabase/tickets";
+import { ServicePowerSyncButton } from "@/components/ServicePowerSyncButton";
 
 // Use the centralized Ticket interface
 interface TicketItem extends Ticket {}
@@ -24,6 +25,7 @@ const TICKET_COLUMNS = [
   { key: "customer", label: "Cx Name" },
   { key: "city", label: "City" },
   { key: "location", label: "Loc" },
+  { key: "product", label: "Product" },
   { key: "model", label: "Model" },
   { key: "internalNote", label: "Internal Note" },
   { key: "repair", label: "Repair" },
@@ -34,6 +36,7 @@ const TICKET_COLUMNS = [
   { key: "phone", label: "Phone" },
   { key: "redo", label: "Redo" },
   { key: "aging", label: "Aging" },
+  { key: "statusSpend", label: "Status Spend" },
   { key: "calls", label: "Calls" },
   { key: "partOrder", label: "Part Order" },
   { key: "posting", label: "Posting" },
@@ -60,6 +63,31 @@ function loadVisibleColumns(): Record<string, boolean> {
 const LOCATION_STORAGE_KEY = "ahs:location-management:locations";
 const STATUS_LOG_KEY = "ahs:ticket:status-log";
 const TICKET_VISITS_KEY = "ahs:ticket:visits"; // Track who visited which tickets
+
+// Compact acronym for the Wty column (mirrors ticket detail header ribbon).
+//   In warranty -> IW, Out-of-warranty -> OOW, Service Contract -> SC, etc.
+// If the value already looks like a short acronym (<= 4 upper-case chars) we
+// pass it through unchanged.
+function warrantyAcronym(value: string | null | undefined): string {
+  const v = (value || "").trim();
+  if (!v) return "";
+  if (v.length <= 4 && v === v.toUpperCase()) return v;
+  const lower = v.toLowerCase();
+  if (lower === "in warranty") return "IW";
+  if (lower.includes("out of warranty") || lower.includes("out-of-warranty")) return "OOW";
+  if (lower === "concession l") return "CL";
+  if (lower === "concession lp") return "CLP";
+  if (lower === "concession p") return "CP";
+  if (lower.includes("ext labor")) return "ELW";
+  if (lower.includes("ext part")) return "EPW";
+  if (lower.includes("ext wty")) return "EW";
+  if (lower.includes("labor only")) return "LOW";
+  if (lower.includes("part only")) return "POW";
+  if (lower.includes("special part")) return "SP5";
+  if (lower.includes("service contract")) return "SC";
+  if (lower === "unknown") return "UNK";
+  return v.toUpperCase();
+}
 
 // Per-status color for the Status cell in the ticket list. Falls back to the
 // default blue for any status not listed here. Matching is case-insensitive
@@ -89,6 +117,31 @@ interface TicketVisit {
   ticketNo: string;
   visitedBy: string;
   visitedAt: string; // ISO string
+}
+
+// Best-effort product/appliance label for a ticket. Uses an explicit
+// productType when present, otherwise infers a common appliance from the
+// model string (e.g. "dryer", "washer", "refrigerator").
+function productLabel(ticket: { productType?: string; model?: string }): string {
+  const explicit = (ticket.productType || "").trim();
+  if (explicit) return explicit;
+  const model = (ticket.model || "").toLowerCase();
+  const guesses: Array<[RegExp, string]> = [
+    [/dryer/, "Dryer"],
+    [/washer|washing/, "Washer"],
+    [/refrig|fridge/, "Refrigerator"],
+    [/freezer/, "Freezer"],
+    [/dishwash/, "Dishwasher"],
+    [/range|stove|oven|cooktop/, "Range/Oven"],
+    [/microwave/, "Microwave"],
+    [/ice\s*maker/, "Ice Maker"],
+    [/disposal/, "Disposal"],
+    [/water\s*heater/, "Water Heater"],
+  ];
+  for (const [re, label] of guesses) {
+    if (re.test(model)) return label;
+  }
+  return "—";
 }
 
 function loadStatusLog(): StatusLogEntry[] {
@@ -130,6 +183,28 @@ function daysAgo(isoString: string): number {
   return Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
 }
 
+// Days since a ticket was created (total time the ticket has been open).
+// Accepts ISO, MM/DD/YY and MM/DD/YYYY formats.
+function daysSinceCreated(created: string | undefined): number {
+  if (!created) return 0;
+  const raw = String(created).trim();
+  let createdDate: Date | null = null;
+  const slash = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (slash) {
+    const mm = parseInt(slash[1], 10) - 1;
+    const dd = parseInt(slash[2], 10);
+    let yy = parseInt(slash[3], 10);
+    if (yy < 100) yy += 2000;
+    createdDate = new Date(yy, mm, dd);
+  } else {
+    const parsed = new Date(raw);
+    if (!isNaN(parsed.getTime())) createdDate = parsed;
+  }
+  if (!createdDate || isNaN(createdDate.getTime())) return 0;
+  const ms = Date.now() - createdDate.getTime();
+  return Math.max(0, Math.floor(ms / (1000 * 60 * 60 * 24)));
+}
+
 function fmtTimestamp(iso: string): string {
   return new Date(iso).toLocaleString("en-US", { month: "2-digit", day: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
@@ -169,6 +244,19 @@ export function TicketList({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) 
   const [tickets, setTickets] = useState<TicketItem[]>([]);
   const [ticketsLoading, setTicketsLoading] = useState(true);
 
+  const reloadTickets = useCallback(async () => {
+    try {
+      setTicketsLoading(true);
+      const rows = await getCompanyTickets();
+      setTickets(rows as TicketItem[]);
+    } catch (err) {
+      console.error("Failed to load tickets:", err);
+      setTickets([]);
+    } finally {
+      setTicketsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
@@ -188,7 +276,7 @@ export function TicketList({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) 
   }, []);
 
   const SAMPLE_TICKETS: TicketItem[] = tickets;
-  const { email } = useAuth();
+  const { email, allowedLocations } = useAuth();
   const [searchQuery, setSearchQuery] = useState("");
   const [repairStatusFilter, setRepairStatusFilter] = useState("");
   const [startDateFilter, setStartDateFilter] = useState("");
@@ -281,14 +369,17 @@ export function TicketList({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) 
   const filteredItems = useMemo(() => {
     const query = searchQuery.toLowerCase();
     return SAMPLE_TICKETS.filter((ticket) => {
-      const matchesSearch = !query || [ticket.ticketNo, ticket.customer, ticket.city, ticket.phone, ticket.model, ticket.location, ticket.status, ticket.ticketSource || ""].some((value) => value.toLowerCase().includes(query));
+      // Work-plan location restriction: if allowedLocations is set (non-null),
+      // only show tickets whose location is in the allowed set.
+      const matchesAccess = !allowedLocations || !Array.isArray(allowedLocations) || allowedLocations.includes(ticket.location);
+      const matchesSearch = !query || [ticket.ticketNo, ticket.customer, ticket.city, ticket.phone, ticket.model, ticket.location, ticket.status, ticket.ticketSource || ""].some((value) => (value ?? "").toString().toLowerCase().includes(query));
       const matchesRepairStatus = !repairStatusFilter || ticket.status === repairStatusFilter;
       const matchesDate = (!startDateFilter && !endDateFilter) || isWithinDateRange(ticket.schedule, startDateFilter, endDateFilter);
       const matchesLocation = !locationFilter || ticket.location === locationFilter;
       const matchesSource = !ticketSourceFilter || (ticket.ticketSource || "") === ticketSourceFilter;
-      return matchesSearch && matchesRepairStatus && matchesDate && matchesLocation && matchesSource;
+      return matchesAccess && matchesSearch && matchesRepairStatus && matchesDate && matchesLocation && matchesSource;
     });
-  }, [endDateFilter, locationFilter, repairStatusFilter, searchQuery, startDateFilter, ticketSourceFilter, tickets]);
+  }, [endDateFilter, locationFilter, repairStatusFilter, searchQuery, startDateFilter, ticketSourceFilter, tickets, allowedLocations]);
 
   const toggleItemSelection = (ticketNo: string) => {
     const newSelected = new Set(selectedItems);
@@ -319,6 +410,10 @@ export function TicketList({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) 
           </div>
           <h1 className="text-4xl font-display font-bold tracking-tight mb-2">{sub.title}</h1>
           <p className="text-lg text-muted-foreground">{sub.description}</p>
+        </div>
+
+        <div className="mb-6">
+          <ServicePowerSyncButton onSynced={reloadTickets} />
         </div>
 
         <div className="panel">
@@ -392,30 +487,32 @@ export function TicketList({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) 
           </div>
 
           {/* Ticket Table */}
-          <div className="overflow-x-auto border border-white/10 rounded-lg">
-            <table className="w-full text-xs leading-tight">
+          <div className="border border-white/10 rounded-lg overflow-hidden">
+            <table className="w-full text-[11px] leading-tight table-fixed">
               <thead>
                 <tr className="bg-blue-900/50 border-b border-blue-500/30">
-                  <th className="px-2 py-1.5 text-center font-semibold text-blue-300 w-12">✓</th>
-                  {isColVisible("ticketNo") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300">Ticket No</th>}
-                  {isColVisible("warranty") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300">Wty</th>}
-                  {isColVisible("ticketSource") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300">Ticket Source</th>}
-                  {isColVisible("customer") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300">Cx Name</th>}
-                  {isColVisible("city") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300">City</th>}
-                  {isColVisible("location") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300">Loc</th>}
-                  {isColVisible("model") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300">Model</th>}
-                  {isColVisible("internalNote") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300">Internal Note</th>}
-                  {isColVisible("repair") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300">Repair</th>}
-                  {isColVisible("technician") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300">Technician</th>}
-                  {isColVisible("customerPref") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300">Cx Prefer</th>}
-                  {isColVisible("schedule") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300">Schedule</th>}
-                  {isColVisible("status") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300">Status</th>}
-                  {isColVisible("phone") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300">Phone</th>}
-                  {isColVisible("redo") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300">Redo</th>}
+                  <th className="px-2 py-1.5 text-center font-semibold text-blue-300">✓</th>
+                  {isColVisible("ticketNo") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Ticket No</th>}
+                  {isColVisible("warranty") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Wty</th>}
+                  {isColVisible("ticketSource") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Ticket Source</th>}
+                  {isColVisible("customer") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Cx Name</th>}
+                  {isColVisible("city") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">City</th>}
+                  {isColVisible("location") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Loc</th>}
+                  {isColVisible("product") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Product</th>}
+                  {isColVisible("model") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Model</th>}
+                  {isColVisible("internalNote") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Internal Note</th>}
+                  {isColVisible("repair") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Repair</th>}
+                  {isColVisible("technician") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Technician</th>}
+                  {isColVisible("customerPref") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Cx Prefer</th>}
+                  {isColVisible("schedule") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Schedule</th>}
+                  {isColVisible("status") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Status</th>}
+                  {isColVisible("phone") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Phone</th>}
+                  {isColVisible("redo") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Redo</th>}
                   {isColVisible("aging") && <th className="px-2 py-1.5 text-center font-semibold text-blue-300">Aging</th>}
+                  {isColVisible("statusSpend") && <th className="px-2 py-1.5 text-center font-semibold text-blue-300">Status Spend</th>}
                   {isColVisible("calls") && <th className="px-2 py-1.5 text-center font-semibold text-blue-300">Calls</th>}
-                  {isColVisible("partOrder") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300">Part Order</th>}
-                  {isColVisible("posting") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300">Posting</th>}
+                  {isColVisible("partOrder") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Part Order</th>}
+                  {isColVisible("posting") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Posting</th>}
                 </tr>
               </thead>
               <tbody>
@@ -450,25 +547,35 @@ export function TicketList({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) 
                       </a>
                     </td>
                     )}
-                    {isColVisible("warranty") && <td className="px-2 py-1.5 text-slate-300">{ticket.warranty}</td>}
-                    {isColVisible("ticketSource") && <td className="px-2 py-1.5 text-slate-300 max-w-[90px] truncate" title={ticket.ticketSource || ticket.manufacturer}>{ticket.ticketSource || ticket.manufacturer}</td>}
-                    {isColVisible("customer") && <td className="px-2 py-1.5 text-slate-300 max-w-[110px] truncate" title={ticket.customer}>{ticket.customer}</td>}
+                    {isColVisible("warranty") && <td className="px-2 py-1.5 text-slate-300 truncate">{warrantyAcronym(ticket.warranty)}</td>}
+                    {isColVisible("ticketSource") && <td className="px-2 py-1.5 text-slate-300 max-w-[110px] truncate" title={ticket.ticketSource || ticket.manufacturer}>{ticket.ticketSource || ticket.manufacturer}</td>}
+                    {isColVisible("customer") && <td className="px-2 py-1.5 text-slate-300 max-w-[120px] truncate" title={ticket.customer}>{ticket.customer}</td>}
                     {isColVisible("city") && <td className="px-2 py-1.5 text-slate-300 max-w-[90px] truncate" title={ticket.city}>{ticket.city}</td>}
-                    {isColVisible("location") && <td className="px-2 py-1.5 text-slate-300">{ticket.location}</td>}
-                    {isColVisible("model") && <td className="px-2 py-1.5 font-mono text-xs text-slate-300">{ticket.model}</td>}
+                    {isColVisible("location") && <td className="px-2 py-1.5 text-slate-300 truncate">{ticket.location}</td>}
+                    {isColVisible("product") && <td className="px-2 py-1.5 text-slate-300 max-w-[120px] truncate" title={productLabel(ticket)}>{productLabel(ticket)}</td>}
+                    {isColVisible("model") && <td className="px-2 py-1.5 font-mono text-[11px] text-slate-300 max-w-[90px] truncate" title={ticket.model}>{ticket.model}</td>}
                     {isColVisible("internalNote") && (
                     <td className="px-2 py-1.5 text-slate-400 text-xs max-w-xs truncate" title={ticket.internalNote}>
                       {ticket.internalNote || "—"}
                     </td>
                     )}
-                    {isColVisible("repair") && <td className="px-2 py-1.5 text-slate-300">{ticket.diagnosed}</td>}
-                    {isColVisible("technician") && <td className="px-2 py-1.5 text-slate-300">{ticket.technician || "—"}</td>}
-                    {isColVisible("customerPref") && <td className="px-2 py-1.5 text-center text-slate-300">{ticket.customerPref}</td>}
-                    {isColVisible("schedule") && <td className="px-2 py-1.5 text-slate-300">{ticket.schedule}</td>}
-                    {isColVisible("status") && <td className={`px-2 py-1.5 font-semibold text-sm ${statusColorClass(ticket.status)}`}>{ticket.status}</td>}
-                    {isColVisible("phone") && <td className="px-2 py-1.5 text-slate-300">{ticket.phone}</td>}
-                    {isColVisible("redo") && <td className="px-2 py-1.5 text-center text-slate-300">{ticket.redo}</td>}
+                    {isColVisible("repair") && <td className="px-2 py-1.5 text-slate-300 truncate">{ticket.diagnosed}</td>}
+                    {isColVisible("technician") && <td className="px-2 py-1.5 text-slate-300 truncate">{ticket.technician || "—"}</td>}
+                    {isColVisible("customerPref") && <td className="px-2 py-1.5 text-center text-slate-300 truncate">{ticket.customerPref}</td>}
+                    {isColVisible("schedule") && <td className="px-2 py-1.5 text-slate-300 truncate">{ticket.schedule}</td>}
+                    {isColVisible("status") && <td className={`px-2 py-1.5 font-semibold text-xs max-w-[130px] truncate ${statusColorClass(ticket.status)}`} title={ticket.status}>{ticket.status}</td>}
+                    {isColVisible("phone") && <td className="px-2 py-1.5 text-slate-300 truncate">{ticket.phone}</td>}
+                    {isColVisible("redo") && <td className="px-2 py-1.5 text-center text-slate-300 truncate">{ticket.redo}</td>}
                     {isColVisible("aging") && (
+                    <td className="px-2 py-1.5 text-center">
+                      {(() => {
+                        const days = daysSinceCreated(ticket.created);
+                        const color = days <= 3 ? "text-green-400" : days <= 7 ? "text-yellow-400" : days <= 14 ? "text-orange-400" : "text-red-400";
+                        return <span className={`font-bold text-sm ${color}`}>{days}d</span>;
+                      })()}
+                    </td>
+                    )}
+                    {isColVisible("statusSpend") && (
                     <td className="px-2 py-1.5 text-center">
                       <button
                         onClick={() => setAgingModal({ ticketNo: ticket.ticketNo, status: ticket.status })}
@@ -488,9 +595,9 @@ export function TicketList({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) 
                       </button>
                     </td>
                     )}
-                    {isColVisible("calls") && <td className="px-2 py-1.5 text-center text-slate-300">{ticket.calls}</td>}
-                    {isColVisible("partOrder") && <td className="px-2 py-1.5 text-slate-300">{ticket.partOrder}</td>}
-                    {isColVisible("posting") && <td className="px-2 py-1.5 text-slate-300">{ticket.created}</td>}
+                    {isColVisible("calls") && <td className="px-2 py-1.5 text-center text-slate-300 truncate">{ticket.calls}</td>}
+                    {isColVisible("partOrder") && <td className="px-2 py-1.5 text-slate-300 truncate">{ticket.partOrder}</td>}
+                    {isColVisible("posting") && <td className="px-2 py-1.5 text-slate-300 truncate">{ticket.created}</td>}
                   </tr>
                 ))}
               </tbody>

@@ -4,7 +4,8 @@ import { useAuth } from "@/lib/auth";
 import logo from "@/assets/Admin Hub Solutions Logo no Text.png";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Footer } from "@/components/Footer";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, Sun, Moon } from "lucide-react";
+import { useTheme } from "@/lib/theme";
 
 export const Route = createFileRoute("/landing")({
   head: () => ({ meta: [{ title: "Sign in — Admin Hub Solutions" }] }),
@@ -13,6 +14,7 @@ export const Route = createFileRoute("/landing")({
 
 function Landing() {
   const { login, logout, email, role, ready, loading, companyId } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const [form, setForm] = useState({ 
     emailOrUsername: "jdage7@gmail.com", 
@@ -148,6 +150,15 @@ function Landing() {
             <span className="font-display font-semibold text-lg">Admin Hub Solutions</span>
           </div>
           <nav className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={toggleTheme}
+              className="grid h-9 w-9 place-items-center rounded-full border border-[var(--color-panel-border)] bg-[oklch(0.98_0.005_250/0.05)] text-muted-foreground transition-colors hover:bg-[oklch(0.98_0.005_250/0.1)] hover:text-foreground"
+              title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+              aria-label="Toggle theme"
+            >
+              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </button>
             <button onClick={() => setOpen(true)} className="btn btn-primary">Login</button>
           </nav>
         </div>
