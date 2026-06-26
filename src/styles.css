@@ -2009,6 +2009,42 @@
   background-color: #2563eb !important;
 }
 
+/* ─── LIGHT THEME — Team Messenger chat bubbles ──────────────────────────────
+   The broad bg-blue-5* sweep above turns sent bubbles solid vivid blue.
+   The bg-slate-950* sweep turns received bubbles white-on-white.
+   Re-assert proper light-mode bubble colors for both. */
+
+/* Sent bubble (isMe): soft blue tint, dark readable text */
+:root[data-theme="light"] .rounded-2xl[class*="bg-blue-500"] {
+  background-color: #dbeafe !important; /* blue-100 */
+  border-color: #93c5fd !important;     /* blue-300 */
+  color: #1e3a5f !important;            /* deep navy text */
+}
+
+/* Sender/timestamp label inside sent bubble */
+:root[data-theme="light"] .rounded-2xl[class*="bg-blue-500"] .text-slate-400 {
+  color: #3b6ea5 !important;
+}
+
+/* Received bubble: light grey surface, dark text */
+:root[data-theme="light"] .rounded-2xl[class*="bg-slate-950"] {
+  background-color: #f1f0ee !important; /* warm off-white */
+  border-color: #d6d3cd !important;
+  color: #1e293b !important;
+}
+
+/* Sender/timestamp label inside received bubble */
+:root[data-theme="light"] .rounded-2xl[class*="bg-slate-950"] .text-slate-400 {
+  color: #64748b !important;
+}
+
+/* System message bubble */
+:root[data-theme="light"] .rounded-2xl[class*="bg-white\/5"] {
+  background-color: #e8e6e1 !important;
+  border-color: #d1cec8 !important;
+  color: #475569 !important;
+}
+
 /* ─── LIGHT THEME — Inline ticket number chips in Team Messenger ─────────────
    The chip uses bg-blue-500/20 (near-transparent on light) + text-blue-300
    (too pale to read on white). Override both to a legible light-mode chip. */
