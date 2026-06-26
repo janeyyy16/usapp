@@ -74,17 +74,17 @@
    below, the most common hardcoded Tailwind dark utility classes so existing
    components flip without per-component edits. */
 :root[data-theme="light"] {
-  --background: #d4fefb;
+  --background: #d8d6d6;
   --foreground: oklch(0.22 0.03 260);
-  --card: #dffffd;
+  --card: #e0dede;
   --card-foreground: oklch(0.22 0.03 260);
-  --popover: #dffffd;
+  --popover: #e0dede;
   --popover-foreground: oklch(0.22 0.03 260);
   --primary: oklch(0.55 0.22 255);
   --primary-foreground: oklch(0.99 0 0);
-  --secondary: #c8fdfb;
+  --secondary: #d0cccc;
   --secondary-foreground: oklch(0.22 0.03 260);
-  --muted: #c8fdfb;
+  --muted: #d0cccc;
   --muted-foreground: oklch(0.45 0.02 260);
   --accent: oklch(0.55 0.22 255);
   --accent-foreground: oklch(0.99 0 0);
@@ -93,7 +93,7 @@
   --border: oklch(0.22 0.03 260 / 0.15);
   --input: oklch(0.22 0.03 260 / 0.06);
   --ring: oklch(0.55 0.22 255);
-  --panel: #dffffd;
+  --panel: #e0dede;
   --panel-border: oklch(0.22 0.03 260 / 0.12);
 }
 
@@ -117,7 +117,7 @@
     background:
       radial-gradient(1200px 600px at 10% -10%, oklch(0.85 0.10 180 / 0.20), transparent 60%),
       radial-gradient(900px 500px at 100% 0%, oklch(0.85 0.08 175 / 0.15), transparent 60%),
-      linear-gradient(180deg, #dffffd 0%, #c8fdfb 100%);
+      linear-gradient(180deg, #e0dede 0%, #d0cccc 100%);
     background-attachment: fixed;
   }
   h1, h2, h3, h4 { font-family: var(--font-display); letter-spacing: -0.01em; }
@@ -1692,9 +1692,9 @@
    editing each one. Scoped under [data-theme="light"] so dark mode is untouched. */
 :root[data-theme="light"] {
   /* Surfaces */
-  --lt-surface: #dffffd;
-  --lt-surface-2: #c8fdfb;
-  --lt-surface-3: #b0fbf8;
+  --lt-surface: #e0dede;
+  --lt-surface-2: #d0cccc;
+  --lt-surface-3: #bfbbbb;
   --lt-text: #1e293b;
   --lt-text-2: #475569;
   --lt-text-3: #64748b;
@@ -1764,14 +1764,14 @@
 
 /* Glass inputs in light mode */
 :root[data-theme="light"] .glass-input {
-  background-color: #dffffd !important;
+  background-color: #e0dede !important;
   border-color: var(--lt-border) !important;
   color: var(--lt-text) !important;
 }
 
 /* Panels get a solid light surface */
 :root[data-theme="light"] .panel {
-  background: rgba(223, 255, 253, 0.90) !important;
+  background: rgba(224, 222, 222, 0.90) !important;
   border-color: var(--lt-border) !important;
 }
 
@@ -1907,7 +1907,7 @@
   border-color: var(--lt-border) !important;
 }
 :root[data-theme="light"] .hover\:bg-\[rgba\(255\2c 255\2c 255\2c 0\.12\)\]:hover {
-  background-color: #c8fdfb !important;
+  background-color: #d0cccc !important;
 }
 
 /* Card icon tiles using bg-white/10 already covered; ensure their icon ink is dark */
@@ -2028,6 +2028,6 @@
    doesn't match any Tailwind class selector sweep. Target the header element
    directly so it picks up the #DFFFFD surface tint in light mode. */
 :root[data-theme="light"] header.sticky {
-  background-color: rgba(223, 255, 253, 0.85) !important;
+  background-color: rgba(224, 222, 222, 0.85) !important;
   border-bottom-color: rgba(15, 23, 42, 0.10) !important;
 }
