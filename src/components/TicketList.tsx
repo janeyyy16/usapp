@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect, useCallback } from "react";
 import { lookupZip } from "@/lib/zipCoverage";
 import { useAuth } from "@/lib/auth";
 import { Link } from "@tanstack/react-router";
-import { ChevronLeft, Clock, History, X, User, Columns3 } from "lucide-react";
+import { ChevronLeft, Clock, History, X, User, Columns3, Filter, Search } from "lucide-react";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 import { LOCATIONS, mergeLocationOptions } from "@/lib/locations";
 import { 
@@ -239,6 +239,91 @@ function isWithinDateRange(value: string, startDate: string, endDate: string) {
   return true;
 }
 
+// ── Per-column filter dropdown (funnel → search + Select All + checkboxes) ──
+function ColumnFilter({
+  field, label, options, selected, onChange,
+}: {
+  field: string;
+  label: string;
+  options: string[];
+  selected: Set<string>;
+  onChange: (next: Set<string>) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+
+  const visible = useMemo(
+    () => options.filter((o) => !search || o.toLowerCase().includes(search.toLowerCase())),
+    [options, search]
+  );
+  // selected empty = ALL selected (no filter applied)
+  const allChecked = selected.size === 0 || selected.size === options.length;
+  const active = selected.size > 0 && selected.size < options.length;
+
+  const toggle = (opt: string) => {
+    const base = selected.size === 0 ? new Set(options) : new Set(selected);
+    if (base.has(opt)) base.delete(opt); else base.add(opt);
+    onChange(base.size === options.length ? new Set() : base);
+  };
+  const toggleAll = () => {
+    if (allChecked) onChange(new Set(["__none__"]));
+    else onChange(new Set());
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      const el = document.getElementById(`colfilter-${field}`);
+      if (el && !el.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open, field]);
+
+  return (
+    <span id={`colfilter-${field}`} className="relative inline-flex items-center">
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
+        className={`ml-1 inline-grid h-4 w-4 place-items-center rounded ${active ? "text-blue-200" : "text-blue-400/60"} hover:text-white`}
+        title={`Filter by ${label}`}
+      >
+        <Filter className="h-3 w-3" fill={active ? "currentColor" : "none"} />
+      </button>
+      {open && (
+        <div className="absolute left-0 top-6 z-50 w-60 rounded-lg border border-white/15 bg-slate-900 shadow-2xl p-2 text-left normal-case">
+          <div className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Filter by {label}</div>
+          <div className="relative mb-1">
+            <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search..."
+              className="w-full rounded border border-white/15 bg-slate-800 pl-7 pr-2 py-1.5 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-blue-500"
+            />
+          </div>
+          <div className="max-h-56 overflow-y-auto">
+            <label className="flex items-center gap-2 px-1 py-1 text-xs text-white cursor-pointer hover:bg-white/5 rounded">
+              <input type="checkbox" checked={allChecked} onChange={toggleAll} className="accent-blue-500 h-3.5 w-3.5" />
+              <span className="font-semibold">(Select All)</span>
+            </label>
+            {visible.map((opt) => {
+              const checked = selected.size === 0 || selected.size === options.length || selected.has(opt);
+              return (
+                <label key={opt} className="flex items-center gap-2 px-1 py-1 text-xs text-slate-200 cursor-pointer hover:bg-white/5 rounded">
+                  <input type="checkbox" checked={checked} onChange={() => toggle(opt)} className="accent-blue-500 h-3.5 w-3.5" />
+                  <span className="truncate">{opt || "(blank)"}</span>
+                </label>
+              );
+            })}
+            {visible.length === 0 && <div className="px-1 py-2 text-xs text-slate-500">No matches</div>}
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
 export function TicketList({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) {
   // Load tickets from Supabase (company-scoped via RLS).
   const [tickets, setTickets] = useState<TicketItem[]>([]);
@@ -283,6 +368,10 @@ export function TicketList({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) 
   const [endDateFilter, setEndDateFilter] = useState("");
   const [locationFilter, setLocationFilter] = useState("");
   const [ticketSourceFilter, setTicketSourceFilter] = useState("");
+  // Per-column checkbox filters: field -> Set of selected values (empty = all)
+  const [colFilters, setColFilters] = useState<Record<string, Set<string>>>({});
+  const setColFilter = (field: string, next: Set<string>) =>
+    setColFilters((prev) => ({ ...prev, [field]: next }));
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
   const [statusLog, setStatusLog] = useState<StatusLogEntry[]>([]);
   // Column visibility (persisted). `visibleColumns[key] === false` hides a column.
@@ -366,6 +455,34 @@ export function TicketList({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) 
   );
   const ticketSourceOptions = useMemo(() => Array.from(new Set(SAMPLE_TICKETS.map((ticket) => ticket.ticketSource || "").filter(Boolean))).sort((a, b) => a.localeCompare(b)), []);
 
+  // Value extractor for any filterable column.
+  const colValue = useCallback((ticket: any, field: string): string => {
+    switch (field) {
+      case "ticketSource": return ticket.ticketSource || ticket.manufacturer || "";
+      case "warranty": return ticket.warranty || "";
+      case "customer": return ticket.customer || "";
+      case "city": return ticket.city || "";
+      case "location": return ticket.location || "";
+      case "product": return (ticket.productType || ticket.product || "");
+      case "technician": return ticket.technician || "";
+      case "status": return ticket.status || "";
+      case "customerPref": return ticket.customerPref || "";
+      case "redo": return ticket.redo || "";
+      case "partOrder": return ticket.partOrder || "";
+      default: return (ticket[field] ?? "").toString();
+    }
+  }, []);
+
+  // Build option lists for each filterable column from the data.
+  const FILTERABLE = ["ticketSource","warranty","customer","city","location","product","technician","customerPref","schedule","status","redo","partOrder"];
+  const columnOptions = useMemo(() => {
+    const map: Record<string, string[]> = {};
+    for (const f of FILTERABLE) {
+      map[f] = Array.from(new Set(SAMPLE_TICKETS.map((t) => colValue(t, f)).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+    }
+    return map;
+  }, [SAMPLE_TICKETS, colValue]);
+
   const filteredItems = useMemo(() => {
     const query = searchQuery.toLowerCase();
     return SAMPLE_TICKETS.filter((ticket) => {
@@ -377,9 +494,15 @@ export function TicketList({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) 
       const matchesDate = (!startDateFilter && !endDateFilter) || isWithinDateRange(ticket.schedule, startDateFilter, endDateFilter);
       const matchesLocation = !locationFilter || ticket.location === locationFilter;
       const matchesSource = !ticketSourceFilter || (ticket.ticketSource || "") === ticketSourceFilter;
-      return matchesAccess && matchesSearch && matchesRepairStatus && matchesDate && matchesLocation && matchesSource;
+      // Per-column checkbox filters
+      const matchesColumns = Object.entries(colFilters).every(([field, sel]) => {
+        if (!sel || sel.size === 0) return true; // empty = all
+        if (sel.has("__none__")) return false;   // explicit none
+        return sel.has(colValue(ticket, field));
+      });
+      return matchesAccess && matchesSearch && matchesRepairStatus && matchesDate && matchesLocation && matchesSource && matchesColumns;
     });
-  }, [endDateFilter, locationFilter, repairStatusFilter, searchQuery, startDateFilter, ticketSourceFilter, tickets, allowedLocations]);
+  }, [endDateFilter, locationFilter, repairStatusFilter, searchQuery, startDateFilter, ticketSourceFilter, tickets, allowedLocations, colFilters, colValue]);
 
   const toggleItemSelection = (ticketNo: string) => {
     const newSelected = new Set(selectedItems);
@@ -493,25 +616,25 @@ export function TicketList({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) 
                 <tr className="bg-blue-900/50 border-b border-blue-500/30">
                   <th className="px-2 py-1.5 text-center font-semibold text-blue-300">✓</th>
                   {isColVisible("ticketNo") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Ticket No</th>}
-                  {isColVisible("warranty") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Wty</th>}
-                  {isColVisible("ticketSource") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Ticket Source</th>}
-                  {isColVisible("customer") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Cx Name</th>}
-                  {isColVisible("city") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">City</th>}
-                  {isColVisible("location") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Loc</th>}
-                  {isColVisible("product") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Product</th>}
+                  {isColVisible("warranty") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300"><span className="inline-flex items-center">Wty<ColumnFilter field="warranty" label="Wty" options={columnOptions["warranty"] || []} selected={colFilters["warranty"] || new Set()} onChange={(n) => setColFilter("warranty", n)} /></span></th>}
+                  {isColVisible("ticketSource") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300"><span className="inline-flex items-center">Ticket Source<ColumnFilter field="ticketSource" label="Ticket Source" options={columnOptions["ticketSource"] || []} selected={colFilters["ticketSource"] || new Set()} onChange={(n) => setColFilter("ticketSource", n)} /></span></th>}
+                  {isColVisible("customer") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300"><span className="inline-flex items-center">Cx Name<ColumnFilter field="customer" label="Cx Name" options={columnOptions["customer"] || []} selected={colFilters["customer"] || new Set()} onChange={(n) => setColFilter("customer", n)} /></span></th>}
+                  {isColVisible("city") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300"><span className="inline-flex items-center">City<ColumnFilter field="city" label="City" options={columnOptions["city"] || []} selected={colFilters["city"] || new Set()} onChange={(n) => setColFilter("city", n)} /></span></th>}
+                  {isColVisible("location") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300"><span className="inline-flex items-center">Loc<ColumnFilter field="location" label="Loc" options={columnOptions["location"] || []} selected={colFilters["location"] || new Set()} onChange={(n) => setColFilter("location", n)} /></span></th>}
+                  {isColVisible("product") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300"><span className="inline-flex items-center">Product<ColumnFilter field="product" label="Product" options={columnOptions["product"] || []} selected={colFilters["product"] || new Set()} onChange={(n) => setColFilter("product", n)} /></span></th>}
                   {isColVisible("model") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Model</th>}
                   {isColVisible("internalNote") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Internal Note</th>}
                   {isColVisible("repair") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Repair</th>}
-                  {isColVisible("technician") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Technician</th>}
-                  {isColVisible("customerPref") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Cx Prefer</th>}
+                  {isColVisible("technician") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300"><span className="inline-flex items-center">Technician<ColumnFilter field="technician" label="Technician" options={columnOptions["technician"] || []} selected={colFilters["technician"] || new Set()} onChange={(n) => setColFilter("technician", n)} /></span></th>}
+                  {isColVisible("customerPref") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300"><span className="inline-flex items-center">Cx Prefer<ColumnFilter field="customerPref" label="Cx Prefer" options={columnOptions["customerPref"] || []} selected={colFilters["customerPref"] || new Set()} onChange={(n) => setColFilter("customerPref", n)} /></span></th>}
                   {isColVisible("schedule") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Schedule</th>}
-                  {isColVisible("status") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Status</th>}
+                  {isColVisible("status") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300"><span className="inline-flex items-center">Status<ColumnFilter field="status" label="Status" options={columnOptions["status"] || []} selected={colFilters["status"] || new Set()} onChange={(n) => setColFilter("status", n)} /></span></th>}
                   {isColVisible("phone") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Phone</th>}
-                  {isColVisible("redo") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Redo</th>}
+                  {isColVisible("redo") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300"><span className="inline-flex items-center">Redo<ColumnFilter field="redo" label="Redo" options={columnOptions["redo"] || []} selected={colFilters["redo"] || new Set()} onChange={(n) => setColFilter("redo", n)} /></span></th>}
                   {isColVisible("aging") && <th className="px-2 py-1.5 text-center font-semibold text-blue-300">Aging</th>}
                   {isColVisible("statusSpend") && <th className="px-2 py-1.5 text-center font-semibold text-blue-300">Status Spend</th>}
                   {isColVisible("calls") && <th className="px-2 py-1.5 text-center font-semibold text-blue-300">Calls</th>}
-                  {isColVisible("partOrder") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Part Order</th>}
+                  {isColVisible("partOrder") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300"><span className="inline-flex items-center">Part Order<ColumnFilter field="partOrder" label="Part Order" options={columnOptions["partOrder"] || []} selected={colFilters["partOrder"] || new Set()} onChange={(n) => setColFilter("partOrder", n)} /></span></th>}
                   {isColVisible("posting") && <th className="px-2 py-1.5 text-left font-semibold text-blue-300 truncate">Posting</th>}
                 </tr>
               </thead>

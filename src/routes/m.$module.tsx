@@ -60,19 +60,19 @@ function ModuleIndex() {
   };
 
   const dashboardCardStyles: Record<string, string> = {
-    "overall-status": "bg-white text-slate-900 border border-slate-200 shadow-[0_14px_34px_rgba(15,23,42,0.14)] hover:-translate-y-1 hover:border-blue-500/40 hover:shadow-[0_18px_42px_rgba(37,99,235,0.18)]",
+    "overall-status": "bg-[rgba(255,255,255,0.08)] text-white border border-[rgba(255,255,255,0.15)] backdrop-blur-md hover:-translate-y-1 hover:bg-[rgba(255,255,255,0.12)] hover:border-[rgba(91,126,255,0.5)]",
     "repair-forecast": "bg-[rgba(255,255,255,0.08)] text-white border border-[rgba(255,255,255,0.15)] backdrop-blur-md hover:-translate-y-1 hover:bg-[rgba(255,255,255,0.12)] hover:border-[rgba(91,126,255,0.5)]",
     "daily-activity": "bg-[rgba(255,255,255,0.08)] text-white border border-[rgba(255,255,255,0.15)] backdrop-blur-md hover:-translate-y-1 hover:bg-[rgba(255,255,255,0.12)] hover:border-[rgba(91,126,255,0.5)]",
   };
 
   const dashboardCardIconStyles: Record<string, string> = {
-    "overall-status": "bg-blue-50 text-blue-700 border border-blue-100 shadow-none",
+    "overall-status": "bg-white/10 text-white border border-white/10 shadow-[0_10px_30px_rgba(0,0,0,0.18)]",
     "repair-forecast": "bg-white/10 text-white border border-white/10 shadow-[0_10px_30px_rgba(0,0,0,0.18)]",
     "daily-activity": "bg-white/10 text-white border border-white/10 shadow-[0_10px_30px_rgba(0,0,0,0.18)]",
   };
 
   const dashboardCardMetaStyles: Record<string, string> = {
-    "overall-status": "text-slate-500",
+    "overall-status": "text-white/45",
     "repair-forecast": "text-white/45",
     "daily-activity": "text-white/45",
   };
@@ -198,12 +198,12 @@ function ModuleIndex() {
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-start gap-3">
-                        <h3 className={`text-sm font-semibold uppercase tracking-[0.18em] ${s.slug === "overall-status" ? "text-slate-900" : "text-white/95"}`}>
+                        <h3 className={`text-sm font-semibold uppercase tracking-[0.18em] text-white/95`}>
                           {s.title}
                         </h3>
-                        <ArrowRight className={`ml-auto h-4 w-4 shrink-0 opacity-60 transition-transform group-hover:translate-x-1 ${s.slug === "overall-status" ? "text-slate-700" : "text-white"}`} />
+                        <ArrowRight className={`ml-auto h-4 w-4 shrink-0 opacity-60 transition-transform group-hover:translate-x-1 text-white`} />
                       </div>
-                      <p className={`mt-3 text-sm leading-6 ${s.slug === "overall-status" ? "text-slate-600" : "text-white/75"}`}>
+                      <p className={`mt-3 text-sm leading-6 text-white/75`}>
                         {s.description}
                       </p>
                       <p className={`mt-5 text-[0.72rem] font-medium uppercase tracking-[0.18em] ${metaStyle}`}>
