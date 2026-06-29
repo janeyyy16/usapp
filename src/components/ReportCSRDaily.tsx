@@ -4,6 +4,7 @@ import { Link } from "@tanstack/react-router";
 import { ChevronLeft, AlertTriangle, Search, X } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend, LineChart, Line } from "recharts";
 import { csrReportData } from "@/lib/reportData";
+import { CSR_AGENTS } from "@/lib/csrDashboardData";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 
 const ALL_DATES=Object.keys(csrReportData).sort();
@@ -57,7 +58,7 @@ export function ReportCSRDaily({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
   // Top-bar filters
   const [date,setDate]=useState(ALL_DATES[ALL_DATES.length-1]);
   const [teamFilter,setTeamFilter]=useState("");
-  const [taskFilter,setTaskFilter]=useState("");
+  const [locationFilter,setLocationFilter]=useState("");
   const [mistakeFilter,setMistakeFilter]=useState("");
   const [warningFilter,setWarningFilter]=useState("");
 
@@ -67,17 +68,21 @@ export function ReportCSRDaily({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
   const [tblDateFrom,setTblDateFrom]=useState("");
   const [tblDateTo,setTblDateTo]=useState("");
 
-  const allAgents:any[]=useMemo(()=>(csrReportData as any)[date]?.agents||[],[date]);
+  const allAgents:any[]=useMemo(()=>{
+    // Rich dummy CSR roster (offline demo); total derived from schedule+attempt.
+    void date;
+    return CSR_AGENTS.map((a)=>({...a, total: a.schedule + a.attempt}));
+  },[date]);
 
   // Primary filtered list (top-bar filters)
   const primaryFiltered=useMemo(()=>{
     let a=allAgents;
     if(teamFilter) a=a.filter((x:any)=>x.team===teamFilter);
-    if(taskFilter) a=a.filter((x:any)=>x.task&&x.task.toLowerCase().includes(taskFilter.toLowerCase()));
+    if(locationFilter) a=a.filter((x:any)=>Array.isArray(x.locations)&&x.locations.some((l:string)=>l.toLowerCase().includes(locationFilter.toLowerCase())));
     if(mistakeFilter==="has") a=a.filter((x:any)=>x.mistake&&x.mistake!=='null');
     if(warningFilter==="has") a=a.filter((x:any)=>x.warning&&x.warning>0);
     return a;
-  },[allAgents,teamFilter,taskFilter,mistakeFilter,warningFilter]);
+  },[allAgents,teamFilter,locationFilter,mistakeFilter,warningFilter]);
 
   // Table-level filters applied on top of primary
   const filtered=useMemo(()=>{
@@ -117,12 +122,10 @@ export function ReportCSRDaily({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
     return{date:fmtDate(dt),totalGH:ta.reduce((s:number,a:any)=>s+(Number(a.gh)||0),0),schedule:ta.reduce((s:number,a:any)=>s+(Number(a.schedule)||0),0)};
   });
 
-  const taskColor=(t:string|null)=>{if(!t)return'';if(t==='In')return'bg-green-500/20 text-green-300';if(t==='Out')return'bg-blue-500/20 text-blue-300';if(t==='Absent')return'bg-red-500/20 text-red-300';return'bg-purple-500/20 text-purple-300';};
-
   const handleExportCSV=()=>{
     exportToCSV("csr_daily_report",
-      ["Team","Name","Start Date","Task","GH","Total","Schedule","Attempt","Update","Mistake","Warning"],
-      filtered.map((a:any)=>[a.team,a.name,a.startDate,a.task,a.gh,a.total,a.schedule,a.attempt,a.update,a.mistake,a.warning])
+      ["Team","Position","Name","Start Date","Locations","Schedule","Attempt","Update","Mistake","Warning"],
+      filtered.map((a:any)=>[a.team,a.position,a.name,a.startDate,(a.locations||[]).join('; '),a.schedule,a.attempt,a.update,a.mistake,a.warning])
     );
   };
 
@@ -139,14 +142,19 @@ export function ReportCSRDaily({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
           <select value={date} onChange={e=>setDate(e.target.value)} className="glass-input text-sm py-1.5 px-3 rounded-md">{ALL_DATES.map(d=><option key={d} value={d}>{fmtDate(d)}</option>)}</select></div>
         <div className="flex flex-col gap-1"><label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Team</label>
           <select value={teamFilter} onChange={e=>setTeamFilter(e.target.value)} className="glass-input text-sm py-1.5 px-3 rounded-md"><option value="">All Teams</option>{ALL_TEAMS.map(t=><option key={t} value={t}>{t}</option>)}</select></div>
-        <div className="flex flex-col gap-1"><label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Task</label>
-          <select value={taskFilter} onChange={e=>setTaskFilter(e.target.value)} className="glass-input text-sm py-1.5 px-3 rounded-md"><option value="">All</option><option value="In">In</option><option value="Out">Out</option><option value="Absent">Absent</option></select></div>
+        <div className="flex flex-col gap-1"><label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Location</label>
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none"/>
+            <input value={locationFilter} onChange={e=>setLocationFilter(e.target.value)} placeholder="Search location…"
+              className="glass-input text-sm py-1.5 pl-8 pr-3 rounded-md w-44"/>
+          </div>
+        </div>
         <div className="flex flex-col gap-1"><label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Mistakes</label>
           <select value={mistakeFilter} onChange={e=>setMistakeFilter(e.target.value)} className="glass-input text-sm py-1.5 px-3 rounded-md"><option value="">All</option><option value="has">Has Mistakes</option></select></div>
         <div className="flex flex-col gap-1"><label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Warnings</label>
           <select value={warningFilter} onChange={e=>setWarningFilter(e.target.value)} className="glass-input text-sm py-1.5 px-3 rounded-md"><option value="">All</option><option value="has">Has Warnings</option></select></div>
-        {(teamFilter||taskFilter||mistakeFilter||warningFilter)&&
-          <button onClick={()=>{setTeamFilter("");setTaskFilter("");setMistakeFilter("");setWarningFilter("");}} className="btn text-sm px-3 mb-0.5">Clear</button>}
+        {(teamFilter||locationFilter||mistakeFilter||warningFilter)&&
+          <button onClick={()=>{setTeamFilter("");setLocationFilter("");setMistakeFilter("");setWarningFilter("");}} className="btn text-sm px-3 mb-0.5">Clear</button>}
         <span className="text-sm text-muted-foreground mb-0.5">{primaryFiltered.length} of {allAgents.length} agents</span>
       </div></div>
 
@@ -157,7 +165,7 @@ export function ReportCSRDaily({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
             <p className="text-xs font-semibold mb-2" style={{color:TEAM_COLORS[s.team]||"#94a3b8"}}>{s.team}</p>
             <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
               <span className="text-muted-foreground">Agents</span><span className="text-right font-medium">{s.count}</span>
-              <span className="text-muted-foreground">GH Total</span><span className="text-right text-blue-300 font-semibold">{s.totalGH}</span>
+              
               <span className="text-muted-foreground">Schedule</span><span className="text-right text-green-300">{s.totalSchedule}</span>
               <span className="text-muted-foreground">Attempt</span><span className="text-right">{s.totalAttempt}</span>
               <span className="text-muted-foreground">Update</span><span className="text-right">{s.totalUpdate}</span>
@@ -175,19 +183,19 @@ export function ReportCSRDaily({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
           <ResponsiveContainer width="100%" height={220}>
             <BarChart data={teamBarData} margin={{left:-10}}>
               <XAxis dataKey="name" tick={{fill:"#94a3b8",fontSize:11}}/><YAxis tick={{fill:"#94a3b8",fontSize:11}}/>
-              <Tooltip contentStyle={{background:"#1e293b",border:"1px solid rgba(255,255,255,0.1)",borderRadius:6}}/><Legend wrapperStyle={{fontSize:11,color:"#94a3b8"}}/>
-              <Bar dataKey="GH" fill="#3b82f6" radius={[4,4,0,0]}/><Bar dataKey="Schedule" fill="#34d399" radius={[4,4,0,0]}/>
+              <Tooltip contentStyle={{background:"var(--card)",border:"1px solid var(--border)",borderRadius:6,color:"var(--foreground)",fontSize:12}}/><Legend wrapperStyle={{fontSize:11,color:"#94a3b8"}}/>
+              <Bar dataKey="Schedule" fill="#34d399" radius={[4,4,0,0]}/>
               <Bar dataKey="Attempt" fill="#a78bfa" radius={[4,4,0,0]}/><Bar dataKey="Update" fill="#fb923c" radius={[4,4,0,0]}/>
             </BarChart>
           </ResponsiveContainer>
         </div>
         <div className="panel p-4">
-          <p className="text-sm font-semibold mb-4">GH Trend — Last 10 Days</p>
+          <p className="text-sm font-semibold mb-4">Schedule Trend — Last 10 Days</p>
           <ResponsiveContainer width="100%" height={220}>
             <LineChart data={trendData} margin={{left:-10}}>
               <XAxis dataKey="date" tick={{fill:"#94a3b8",fontSize:10}}/><YAxis tick={{fill:"#94a3b8",fontSize:11}}/>
-              <Tooltip contentStyle={{background:"#1e293b",border:"1px solid rgba(255,255,255,0.1)",borderRadius:6}}/><Legend wrapperStyle={{fontSize:11,color:"#94a3b8"}}/>
-              <Line type="monotone" dataKey="totalGH" stroke="#3b82f6" strokeWidth={2} dot={{r:3}} name="Total GH"/>
+              <Tooltip contentStyle={{background:"var(--card)",border:"1px solid var(--border)",borderRadius:6,color:"var(--foreground)",fontSize:12}}/><Legend wrapperStyle={{fontSize:11,color:"#94a3b8"}}/>
+              
               <Line type="monotone" dataKey="schedule" stroke="#34d399" strokeWidth={2} dot={{r:3}} name="Schedule"/>
             </LineChart>
           </ResponsiveContainer>
@@ -195,12 +203,12 @@ export function ReportCSRDaily({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
       </div>
 
       {agentBarData.length>0&&<div className="panel p-4 mb-4">
-        <p className="text-sm font-semibold mb-4">Agent — GH & Schedule (top 12)</p>
+        <p className="text-sm font-semibold mb-4">Agent — Schedule & Attempt (top 12)</p>
         <ResponsiveContainer width="100%" height={180}>
           <BarChart data={agentBarData} margin={{left:-10}}>
             <XAxis dataKey="name" tick={{fill:"#94a3b8",fontSize:10}}/><YAxis tick={{fill:"#94a3b8",fontSize:11}}/>
-            <Tooltip contentStyle={{background:"#1e293b",border:"1px solid rgba(255,255,255,0.1)",borderRadius:6}}/><Legend wrapperStyle={{fontSize:11,color:"#94a3b8"}}/>
-            <Bar dataKey="total" fill="#3b82f6" radius={[4,4,0,0]} name="GH"/>
+            <Tooltip contentStyle={{background:"var(--card)",border:"1px solid var(--border)",borderRadius:6,color:"var(--foreground)",fontSize:12}}/><Legend wrapperStyle={{fontSize:11,color:"#94a3b8"}}/>
+            <Bar dataKey="attempt" fill="#a78bfa" radius={[4,4,0,0]} name="Attempt"/>
             <Bar dataKey="schedule" fill="#34d399" radius={[4,4,0,0]} name="Schedule"/>
           </BarChart>
         </ResponsiveContainer>
@@ -264,13 +272,13 @@ export function ReportCSRDaily({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
 
         <table className="w-full text-sm">
           <thead><tr className="border-b border-white/10 bg-white/5">
-            {["Team","Name","Start Date","Task","GH","Total","Schedule","Attempt","Update","Mistakes","Warning"].map(h=>(
+            {["Team","Position","Name","Start Date","Locations","Schedule","Attempt","Update","Mistakes","Warning"].map(h=>(
               <th key={h} className="px-3 py-2.5 text-left text-xs text-muted-foreground uppercase whitespace-nowrap">{h}</th>
             ))}
           </tr></thead>
           <tbody>
             {filtered.length===0
-              ?<tr><td colSpan={11} className="px-4 py-12 text-center text-muted-foreground">No records match filters.</td></tr>
+              ?<tr><td colSpan={10} className="px-4 py-12 text-center text-muted-foreground">No records match filters.</td></tr>
               :filtered.map((a:any,i:number)=>{
                 const hasMistake=a.mistake&&a.mistake!=='null';
                 const badgeCount=hasMistake?parseMistakeBadges(a.mistake).length:0;
@@ -278,6 +286,7 @@ export function ReportCSRDaily({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
                 return(
                   <tr key={i} className={`border-b border-white/5 hover:bg-white/5 ${i%2!==0?"bg-white/[0.02]":""}`}>
                     <td className="px-3 py-2.5 text-xs whitespace-nowrap" style={{color:TEAM_COLORS[a.team]||"#94a3b8"}}>{a.team||'—'}</td>
+                    <td className="px-3 py-2.5 text-xs whitespace-nowrap text-muted-foreground">{a.position||'CSR Agent'}</td>
                     {/* Clickable name — opens employee mistake detail page */}
                     <td className="px-3 py-2.5 whitespace-nowrap">
                       <a href={`/csr/mistake/${employeeId}`} target="_blank" rel="noopener noreferrer"
@@ -286,9 +295,13 @@ export function ReportCSRDaily({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
                       </a>
                     </td>
                     <td className="px-3 py-2.5 text-xs text-muted-foreground">{a.startDate||'—'}</td>
-                    <td className="px-3 py-2.5"><span className={`px-1.5 py-0.5 rounded text-xs font-medium ${taskColor(a.task)}`}>{a.task||'—'}</span></td>
-                    <td className="px-3 py-2.5 text-right font-semibold text-blue-400">{a.gh??'—'}</td>
-                    <td className="px-3 py-2.5 text-right font-semibold">{a.total??'—'}</td>
+                    <td className="px-3 py-2.5">
+                      <div className="flex flex-wrap gap-1">
+                        {(a.locations&&a.locations.length>0?a.locations:['—']).map((loc:string,li:number)=>(
+                          <span key={li} className="px-1.5 py-0.5 rounded text-xs font-medium bg-blue-500/15 text-blue-300 border border-blue-500/20 whitespace-nowrap">{loc}</span>
+                        ))}
+                      </div>
+                    </td>
                     <td className="px-3 py-2.5 text-right text-green-400">{a.schedule??'—'}</td>
                     <td className="px-3 py-2.5 text-right">{a.attempt??'—'}</td>
                     <td className="px-3 py-2.5 text-right">{a.update??'—'}</td>

@@ -2089,3 +2089,112 @@
   background-color: rgba(253, 248, 240, 0.85) !important;
   border-bottom-color: rgba(15, 23, 42, 0.10) !important;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   LIGHT THEME — COMPREHENSIVE MODAL / POPUP / OVERLAY SWEEP
+   Covers all remaining dark-mode-only surfaces found across the codebase:
+   modals, drawers, sheets, popovers, selects, inner panels, overlays.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* 1. Modal/drawer/sheet OVERLAY (fixed inset-0 bg-black/*)
+      Soften the scrim — full black is too harsh on a light background */
+:root[data-theme="light"] [class*="fixed"][class*="inset-0"][class*="bg-black"] {
+  background-color: rgba(30, 41, 59, 0.45) !important;
+}
+
+/* 2. Shadcn UI primitives — Select dropdown, Popover, Dialog overlay
+      These render as Radix portals on <body> and use bg-slate-950 text-white */
+:root[data-theme="light"] [data-radix-popper-content-wrapper] [class*="bg-slate-950"],
+:root[data-theme="light"] [data-radix-select-viewport],
+:root[data-theme="light"] [role="listbox"],
+:root[data-theme="light"] [role="dialog"] [class*="bg-slate-9"],
+:root[data-theme="light"] [data-radix-select-content] {
+  background-color: var(--lt-surface) !important;
+  color: var(--lt-text) !important;
+  border-color: var(--lt-border) !important;
+}
+
+/* 3. Select item hover state */
+:root[data-theme="light"] [data-radix-select-item]:hover,
+:root[data-theme="light"] [data-radix-select-item][data-highlighted] {
+  background-color: var(--lt-surface-2) !important;
+  color: var(--lt-text) !important;
+}
+
+/* 4. Popover content */
+:root[data-theme="light"] [data-radix-popover-content] {
+  background-color: var(--lt-surface) !important;
+  color: var(--lt-text) !important;
+  border-color: var(--lt-border) !important;
+}
+
+/* 5. Inner modal panels — bg-slate-900 (solid, no opacity suffix)
+      The sweep catches bg-slate-900/* variants but solid bg-slate-900 is also
+      caught by [class*="bg-slate-900"] — should already work. Belt + suspenders
+      for any that slip through via inline style or direct className string. */
+:root[data-theme="light"] .bg-slate-900 {
+  background-color: var(--lt-surface) !important;
+}
+:root[data-theme="light"] .bg-slate-950 {
+  background-color: var(--lt-surface) !important;
+}
+:root[data-theme="light"] .bg-slate-800 {
+  background-color: var(--lt-surface-2) !important;
+}
+
+/* 6. Ticket column filter dropdowns and TicketList inline dropdowns
+      (absolute positioned bg-slate-900 panels) */
+:root[data-theme="light"] .absolute[class*="bg-slate-900"],
+:root[data-theme="light"] .absolute[class*="bg-slate-950"] {
+  background-color: var(--lt-surface) !important;
+  border-color: var(--lt-border) !important;
+  color: var(--lt-text) !important;
+  box-shadow: 0 8px 24px rgba(30,41,59,0.12) !important;
+}
+
+/* 7. AnnouncementBanner (bg-slate-950/95) */
+:root[data-theme="light"] [class*="bg-slate-950"][class*="border-amber"] {
+  background-color: #fffbeb !important;
+  border-color: #fbbf24 !important;
+  color: var(--lt-text) !important;
+}
+
+/* 8. TicketSidebar panel (bg-slate-900/60 backdrop-blur) */
+:root[data-theme="light"] [class*="bg-slate-900"][class*="backdrop-blur"] {
+  background-color: rgba(253, 248, 240, 0.92) !important;
+  border-color: var(--lt-border) !important;
+}
+
+/* 9. TeamMessenger search bar, composer, thread details panels */
+:root[data-theme="light"] [class*="bg-slate-950"][class*="rounded-xl"],
+:root[data-theme="light"] [class*="bg-slate-950"][class*="rounded-2xl"] {
+  background-color: var(--lt-surface) !important;
+  border-color: var(--lt-border) !important;
+  color: var(--lt-text) !important;
+}
+
+/* 10. glass-input inside modals — ensure textarea/inputs are light */
+:root[data-theme="light"] textarea.glass-input,
+:root[data-theme="light"] input.glass-input {
+  background-color: var(--lt-surface) !important;
+  color: var(--lt-text) !important;
+  border-color: var(--lt-border) !important;
+}
+:root[data-theme="light"] textarea.glass-input::placeholder,
+:root[data-theme="light"] input.glass-input::placeholder {
+  color: var(--lt-text-3) !important;
+}
+
+/* 11. bg-white/5, bg-white/[0.02], bg-white/[0.03] system/info panels */
+:root[data-theme="light"] [class*="bg-white/5"],
+:root[data-theme="light"] [class*="bg-white/[0.02]"],
+:root[data-theme="light"] [class*="bg-white/[0.03]"],
+:root[data-theme="light"] [class*="bg-white/[0.04]"] {
+  background-color: var(--lt-surface-2) !important;
+}
+
+/* 12. Select native element option background (browser-rendered) */
+:root[data-theme="light"] select option {
+  background-color: var(--lt-surface) !important;
+  color: var(--lt-text) !important;
+}
