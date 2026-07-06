@@ -34,6 +34,7 @@ interface Team { key: string; name: string; color: string; }
 interface Person { id: string; name: string; isLeaderRole: boolean; }
 
 const firstName = (full: string) => (full || "").trim().split(/\s+/)[0] || "";
+const teamNameFor = (leaderName: string) => `Team ${firstName(leaderName)}`;
 
 export function CsrTeamComposition() {
   const [loading, setLoading] = useState(true);
@@ -83,8 +84,6 @@ export function CsrTeamComposition() {
         { id: id2, name: "Team 2", color: TEAM_COLORS[1], sortOrder: 1 },
       ];
     }
-    setTeams(teamRows.map((t) => ({ key: t.id, name: t.name, color: t.color })));
-
     const nextAssign: Record<string, string> = {};
     for (const p of roster) nextAssign[p.id] = ROSTER;
     const nextLeaders: Record<string, string> = {};
@@ -92,6 +91,22 @@ export function CsrTeamComposition() {
       if (nextAssign[m.profileId] !== undefined) nextAssign[m.profileId] = m.teamId;
       if (m.isLeader) nextLeaders[m.teamId] = m.profileId;
     }
+
+    // Repair any team whose stored name doesn't match its current leader
+    // (e.g. teams created before this rule existed, or a leader change that
+    // never got persisted) so the name always tracks the leader.
+    const rosterById = new Map(roster.map((p) => [p.id, p.name]));
+    const repaired = teamRows.map((t) => {
+      const leaderId = nextLeaders[t.id];
+      const leaderName = leaderId ? rosterById.get(leaderId) : undefined;
+      if (!leaderName) return t;
+      const expected = teamNameFor(leaderName);
+      if (t.name === expected) return t;
+      renameCsrTeam(t.id, expected).catch((err) => console.error("Failed to repair team name:", err));
+      return { ...t, name: expected };
+    });
+
+    setTeams(repaired.map((t) => ({ key: t.id, name: t.name, color: t.color })));
     setAssign(nextAssign);
     setLeaders(nextLeaders);
   };
@@ -114,6 +129,7 @@ export function CsrTeamComposition() {
   const moveTo = (profileId: string, target: string) => {
     setAssign((prev) => (prev[profileId] === target ? prev : { ...prev, [profileId]: target }));
     const isLeaderRole = roleOf[profileId];
+    let newTeamName: string | null = null;
     if (target !== ROSTER && isLeaderRole) {
       setLeaders((prev) => {
         const next = { ...prev };
@@ -122,7 +138,8 @@ export function CsrTeamComposition() {
         return next;
       });
       const name = staff.find((p) => p.id === profileId)?.name || "";
-      setTeams((prev) => prev.map((t) => t.key === target ? { ...t, name: firstName(name) } : t));
+      newTeamName = teamNameFor(name);
+      setTeams((prev) => prev.map((t) => t.key === target ? { ...t, name: newTeamName! } : t));
     } else {
       setLeaders((prev) => {
         const next = { ...prev };
@@ -133,7 +150,10 @@ export function CsrTeamComposition() {
     (async () => {
       try {
         await assignCsrMember(profileId, target === ROSTER ? null : target);
-        if (target !== ROSTER && isLeaderRole) await setCsrTeamLeader(target, profileId);
+        if (target !== ROSTER && isLeaderRole) {
+          await setCsrTeamLeader(target, profileId);
+          if (newTeamName) await renameCsrTeam(target, newTeamName);
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to save assignment.");
       }
@@ -143,13 +163,20 @@ export function CsrTeamComposition() {
   const setLeader = (teamKey: string, profileId: string) => {
     const willUnset = leaders[teamKey] === profileId;
     setLeaders((prev) => ({ ...prev, [teamKey]: willUnset ? "" : profileId }));
+    let newTeamName: string | null = null;
     if (!willUnset) {
       const name = staff.find((p) => p.id === profileId)?.name || "";
-      setTeams((prev) => prev.map((t) => (t.key === teamKey ? { ...t, name: firstName(name) } : t)));
+      newTeamName = teamNameFor(name);
+      setTeams((prev) => prev.map((t) => (t.key === teamKey ? { ...t, name: newTeamName! } : t)));
     }
-    setCsrTeamLeader(teamKey, willUnset ? null : profileId).catch((err) =>
-      setError(err instanceof Error ? err.message : "Failed to save team leader."),
-    );
+    (async () => {
+      try {
+        await setCsrTeamLeader(teamKey, willUnset ? null : profileId);
+        if (newTeamName) await renameCsrTeam(teamKey, newTeamName);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to save team leader.");
+      }
+    })();
   };
 
   const renameTeam = (key: string, name: string) =>

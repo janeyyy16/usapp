@@ -5,7 +5,6 @@ import {
   Bar,
   BarChart,
   Cell,
-  Legend,
   Pie,
   PieChart,
   ResponsiveContainer,
@@ -606,32 +605,48 @@ export function CSRStatusSummary({ sub }: { mod: ModuleDef; sub: SubModuleDef })
                 onClick={() => setShowPieLabels((v) => !v)}
                 className={`text-[10px] uppercase tracking-wide px-2 py-1 rounded border transition-colors ${showPieLabels ? "border-white/20 bg-white/10 text-foreground" : "border-white/10 text-muted-foreground hover:text-foreground hover:bg-white/5"}`}
               >
-                {showPieLabels ? "Hide Labels" : "Show Labels"}
+                {showPieLabels ? "Hide %" : "Show %"}
               </button>
             </div>
-            <ResponsiveContainer width="100%" height={220}>
-              <PieChart>
-                <Pie
-                  data={pieData}
-                  dataKey="value"
-                  nameKey="name"
-                  cx="50%"
-                  cy="50%"
-                  outerRadius={80}
-                  label={showPieLabels ? ({ percent }) => `${((percent ?? 0) * 100).toFixed(0)}%` : false}
-                  labelLine={false}
-                >
-                  {pieData.map((entry, i) => (
-                    <Cell key={i} fill={colorFor(entry.name)} />
-                  ))}
-                </Pie>
-                <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: any, n: any) => [v, n]} />
-                <Legend
-                  wrapperStyle={{ fontSize: 10, color: "var(--foreground)" }}
-                  formatter={(value) => <span style={{ color: "var(--foreground)" }}>{value}</span>}
-                />
-              </PieChart>
-            </ResponsiveContainer>
+            {/* On-slice labels overlap once there are more than a handful of
+                statuses — instead the pie sits label-free on the left and
+                every slice gets its own compact row (name + %) on the right,
+                sized to fit all of them in one view without scrolling. */}
+            <div className="flex gap-3 items-center">
+              <ResponsiveContainer width="55%" height={260}>
+                <PieChart>
+                  <Pie
+                    data={pieData}
+                    dataKey="value"
+                    nameKey="name"
+                    cx="50%"
+                    cy="50%"
+                    outerRadius={95}
+                    label={false}
+                    labelLine={false}
+                  >
+                    {pieData.map((entry, i) => (
+                      <Cell key={i} fill={colorFor(entry.name)} />
+                    ))}
+                  </Pie>
+                  <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: any, n: any) => [v, n]} />
+                </PieChart>
+              </ResponsiveContainer>
+              <div className="flex-1 min-w-0 flex flex-col justify-center gap-0.5">
+                {pieData.map((entry, i) => {
+                  const pct = totalCount > 0 ? (entry.value / totalCount) * 100 : 0;
+                  return (
+                    <div key={i} className="flex items-center gap-1.5 text-[10px] leading-tight">
+                      <span className="h-1.5 w-1.5 rounded-full shrink-0" style={{ background: colorFor(entry.name) }} />
+                      <span className="truncate flex-1" style={{ color: "var(--foreground)" }}>{entry.name}</span>
+                      <span className="text-muted-foreground shrink-0">
+                        {entry.value}{showPieLabels ? ` · ${pct.toFixed(0)}%` : ""}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           </div>
         </div>
 
