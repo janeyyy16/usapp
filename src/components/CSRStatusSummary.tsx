@@ -14,7 +14,8 @@ import {
   YAxis,
 } from "recharts";
 import { exportToCSV } from "@/lib/csvExport";
-import { REPAIR_STATUS_OPTIONS, TICKETS, TICKET_SOURCES, type Ticket } from "@/lib/ticketData";
+import { REPAIR_STATUS_OPTIONS, TICKET_SOURCES, type Ticket } from "@/lib/ticketData";
+import { getCompanyTickets } from "@/lib/supabase/tickets";
 import { LOCATIONS, mergeLocationOptions } from "@/lib/locations";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 
@@ -316,6 +317,28 @@ function ColumnFilter({
 }
 
 export function CSRStatusSummary({ sub }: { mod: ModuleDef; sub: SubModuleDef }) {
+  // Live tickets from Supabase (company-scoped via RLS) — replaces the old
+  // hardcoded dummy TICKETS import.
+  const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [ticketsLoading, setTicketsLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        setTicketsLoading(true);
+        const rows = await getCompanyTickets();
+        if (!cancelled) setTickets(rows);
+      } catch (err) {
+        console.error("Failed to load tickets:", err);
+        if (!cancelled) setTickets([]);
+      } finally {
+        if (!cancelled) setTicketsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   const [repairStatusFilter, setRepairStatusFilter] = useState("");
   const [locationFilter, setLocationFilter] = useState("");
   const [startDateFilter, setStartDateFilter] = useState("");
@@ -342,25 +365,25 @@ export function CSRStatusSummary({ sub }: { mod: ModuleDef; sub: SubModuleDef })
     setVisibleColumns(Object.fromEntries(TICKET_COLUMNS.map((c) => [c.key, true])));
 
   const locationOptions = useMemo(
-    () => mergeLocationOptions(LOCATIONS, TICKETS.map((t) => t.location)),
-    [],
+    () => mergeLocationOptions(LOCATIONS, tickets.map((t) => t.location)),
+    [tickets],
   );
   const ticketSourceOptions = useMemo(
     () =>
       Array.from(
         new Set([
           ...TICKET_SOURCES,
-          ...(TICKETS.map((t) => t.ticketSource).filter(Boolean) as string[]),
+          ...(tickets.map((t) => t.ticketSource).filter(Boolean) as string[]),
         ]),
       ),
-    [],
+    [tickets],
   );
 
   // ── Top-filter the real ticket list ──
   const filteredTickets = useMemo(() => {
     const fromN = parseInputDate(startDateFilter);
     const toN = parseInputDate(endDateFilter);
-    return TICKETS.filter((t) => {
+    return tickets.filter((t) => {
       if (repairStatusFilter && t.status !== repairStatusFilter) return false;
       if (locationFilter && t.location !== locationFilter) return false;
       if (ticketSourceFilter && t.ticketSource !== ticketSourceFilter) return false;
@@ -372,7 +395,7 @@ export function CSRStatusSummary({ sub }: { mod: ModuleDef; sub: SubModuleDef })
       }
       return true;
     });
-  }, [repairStatusFilter, locationFilter, ticketSourceFilter, startDateFilter, endDateFilter]);
+  }, [tickets, repairStatusFilter, locationFilter, ticketSourceFilter, startDateFilter, endDateFilter]);
 
   // ── Group filtered tickets by status (drives cards + charts) ──
   const statusGroups = useMemo(() => {
@@ -623,7 +646,9 @@ export function CSRStatusSummary({ sub }: { mod: ModuleDef; sub: SubModuleDef })
             <p className="text-[9px] text-muted-foreground mt-1 leading-tight uppercase tracking-wide">Total</p>
           </button>
           {statusGroups.length === 0 ? (
-            <p className="col-span-full text-center text-muted-foreground py-6">No tickets match filters.</p>
+            <p className="col-span-full text-center text-muted-foreground py-6">
+              {ticketsLoading ? "Loading tickets…" : "No tickets match filters."}
+            </p>
           ) : (
             statusGroups.map(([status, list]) => (
               <button
@@ -912,7 +937,7 @@ export function CSRStatusSummary({ sub }: { mod: ModuleDef; sub: SubModuleDef })
                 {listTickets.length === 0 ? (
                   <tr>
                     <td colSpan={visibleColCount + 1} className="px-4 py-10 text-center text-muted-foreground">
-                      No tickets match filters.
+                      {ticketsLoading ? "Loading tickets…" : "No tickets match filters."}
                     </td>
                   </tr>
                 ) : (

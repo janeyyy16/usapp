@@ -132,6 +132,40 @@ export function normalizeLocationName(location: string) {
   return String(location || "").trim().replace(/\s*,\s*/g, ", ");
 }
 
+/**
+ * Parse a profile's `branch_access` value into a list of location names.
+ * Stored pipe-delimited ("Jackson, MS|Jackson, TN") so multi-word names that
+ * already contain a comma don't get split into phantom entries; "*" means
+ * every location. Legacy comma-separated values (pre-pipe-delimiter) are
+ * recovered by greedy-matching against the known LOCATIONS list, longest
+ * name first, so "Jackson, MS" is recognized before "Jackson".
+ * Mirrors AdminUserManagementPage.tsx's parseSelectedBranches.
+ */
+export function parseBranchAccess(value: string | null | undefined): string[] {
+  const raw = String(value ?? "").trim();
+  if (!raw) return [];
+  if (raw === "*") return [...LOCATIONS];
+  if (raw.includes("|")) {
+    return raw.split("|").map((s) => s.trim()).filter(Boolean);
+  }
+  const found: string[] = [];
+  const sorted = [...LOCATIONS].sort((a, b) => b.length - a.length);
+  let working = raw;
+  while (working.length > 0) {
+    working = working.replace(/^[\s,]+/, "");
+    if (!working) break;
+    const hit = sorted.find((loc) => working.startsWith(loc));
+    if (!hit) {
+      const next = working.indexOf(",");
+      working = next === -1 ? "" : working.slice(next + 1);
+      continue;
+    }
+    found.push(hit);
+    working = working.slice(hit.length);
+  }
+  return Array.from(new Set(found));
+}
+
 export function mergeLocationOptions(...groups: Array<Iterable<string>>) {
   const seen = new Set<string>();
   const merged: string[] = [];
