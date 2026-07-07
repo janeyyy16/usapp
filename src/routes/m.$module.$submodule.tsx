@@ -93,6 +93,7 @@ import { AttendanceMonitoringPage } from "@/components/AttendanceMonitoringPage"
 import { PayrollCalculationPage } from "@/components/PayrollCalculationPage";
 import { EmployeeSelfServicePage } from "@/components/EmployeeSelfServicePage";
 import { CSRDashboard } from "@/components/CSRDashboard";
+import { CSRTeamLeaderDashboard } from "@/components/CSRTeamLeaderDashboard";
 import { CSRCallTracker } from "@/components/CSRCallTracker";
 import { CSRStatusSummary } from "@/components/CSRStatusSummary";
 
@@ -326,6 +327,8 @@ function SubModule() {
         ? <EmployeeSelfServicePage mod={mod} sub={sub} />
         : (sub as any).custom === "csr-dashboard"
         ? <CSRDashboard mod={mod} sub={sub} />
+        : (sub as any).custom === "csr-team-leader-dashboard"
+        ? <CSRTeamLeaderDashboard mod={mod} sub={sub} />
         : (sub as any).custom === "csr-daily-report"
         ? <ReportCSRDaily mod={mod} sub={sub} />
         : (sub as any).custom === "call-tracker"

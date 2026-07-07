@@ -118,7 +118,7 @@ function ModuleIndex() {
         {m.slug === "dashboard" ? (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {submodules
-              .filter((s: SubModuleDef) => !["csr-daily-report", "call-tracker", "csr-status-summary"].includes(s.slug))
+              .filter((s: SubModuleDef) => !["csr-daily-report", "call-tracker", "csr-status-summary", "csr-team-leader-dashboard"].includes(s.slug))
               .map((s: SubModuleDef) => (
               <Link
                 key={s.slug}

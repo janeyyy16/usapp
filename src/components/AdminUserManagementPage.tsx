@@ -200,9 +200,10 @@ function BranchMultiSelect({ value, onChange, placeholder }: {
     return () => document.removeEventListener("mousedown", onDoc);
   }, []);
   const toggle = (loc: string) => {
-    // Tapping any specific location while "All" is on switches us to a normal
-    // multi-select with just that location ticked.
-    if (isAll) { onChange(loc); return; }
+    // "All" shows every box checked (see `checked` below); unchecking one
+    // materializes it into an explicit list of every location except that
+    // one, since it's no longer literally "all".
+    if (isAll) { onChange(LOCATIONS.filter((l) => l !== loc).join(BRANCH_DELIMITER)); return; }
     const next = selected.includes(loc) ? selected.filter(s => s !== loc) : [...selected, loc];
     onChange(next.join(BRANCH_DELIMITER));
   };
@@ -222,7 +223,10 @@ function BranchMultiSelect({ value, onChange, placeholder }: {
       </button>
       {open && (
         <div className="absolute z-50 mt-1 w-full max-h-56 overflow-y-auto rounded-lg border border-white/10 bg-slate-900 shadow-xl">
-          {/* All Locations sentinel — selecting this clears individual picks. */}
+          {/* All Locations — stored as the compact "*" sentinel (auth.tsx
+              grants full access on branch_access === "*"), but every
+              individual box below renders checked so it's visually clear
+              that everything is included. */}
           <button
             type="button"
             onClick={toggleAll}
@@ -234,10 +238,10 @@ function BranchMultiSelect({ value, onChange, placeholder }: {
             <span className="font-semibold text-blue-300">All Locations</span>
           </button>
           {LOCATIONS.map(loc => {
-            const checked = !isAll && selected.includes(loc);
+            const checked = isAll || selected.includes(loc);
             return (
               <button key={loc} type="button" onClick={() => toggle(loc)}
-                className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] text-left hover:bg-white/10 ${isAll ? "opacity-60" : ""}`}>
+                className="w-full flex items-center gap-2 px-2 py-1.5 text-[11px] text-left hover:bg-white/10">
                 <span className={`h-3.5 w-3.5 rounded border flex items-center justify-center shrink-0 ${checked ? "bg-blue-500 border-blue-500" : "border-white/30"}`}>
                   {checked && <Check className="h-2.5 w-2.5 text-white" />}
                 </span>

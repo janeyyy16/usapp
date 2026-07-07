@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { ChevronLeft, Loader2, Search, X } from "lucide-react";
+import { ChevronLeft, Eye, Loader2, Search, X } from "lucide-react";
 import {
   Bar,
   BarChart,
@@ -24,6 +24,8 @@ const UNASSIGNED = "__unassigned__";
 interface Agent {
   id: string;
   name: string;
+  email: string;
+  username: string;
   role: "Team Leader" | "Agent";
   teamKey: string;
   locations: string[];
@@ -57,6 +59,10 @@ export function ReportCSRDaily({ sub }: { mod: ModuleDef; sub: SubModuleDef }) {
   // Agent table filters
   const [tblNameSearch, setTblNameSearch] = useState("");
   const [tblTeam, setTblTeam] = useState("");
+  // Agents can cover 20-30+ locations, which flooded the table when shown
+  // inline — the Locations column was replaced with a Details button that
+  // opens this agent in a modal instead.
+  const [detailsAgent, setDetailsAgent] = useState<Agent | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -98,6 +104,8 @@ export function ReportCSRDaily({ sub }: { mod: ModuleDef; sub: SubModuleDef }) {
           .map((p) => ({
             id: p.id,
             name: p.display_name || p.username || p.email,
+            email: p.email || "",
+            username: p.username || "",
             role: (p.role === "CSR_TEAM_LEADER" || (p.extra_roles || []).includes("CSR_TEAM_LEADER")) ? "Team Leader" : "Agent",
             teamKey: teamOf.get(p.id) ?? UNASSIGNED,
             locations: branchesOf(p.assigned_branch, p.branch_access),
@@ -430,11 +438,12 @@ export function ReportCSRDaily({ sub }: { mod: ModuleDef; sub: SubModuleDef }) {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-white/10 bg-white/5">
-                {["Team", "Position", "Name", "Locations", "Schedule", "Update"].map((h) => (
-                  <th key={h} className="px-3 py-2.5 text-left text-xs text-muted-foreground uppercase whitespace-nowrap">
-                    {h}
-                  </th>
-                ))}
+                <th className="px-3 py-2.5 text-left text-xs text-muted-foreground uppercase whitespace-nowrap">Team</th>
+                <th className="px-3 py-2.5 text-left text-xs text-muted-foreground uppercase whitespace-nowrap">Position</th>
+                <th className="px-3 py-2.5 text-left text-xs text-muted-foreground uppercase whitespace-nowrap">Name</th>
+                <th className="px-3 py-2.5 text-right text-xs text-muted-foreground uppercase whitespace-nowrap w-24">Schedule</th>
+                <th className="px-3 py-2.5 text-right text-xs text-muted-foreground uppercase whitespace-nowrap w-24">Update</th>
+                <th className="px-3 py-2.5 text-center text-xs text-muted-foreground uppercase whitespace-nowrap w-20">Details</th>
               </tr>
             </thead>
             <tbody>
@@ -457,20 +466,18 @@ export function ReportCSRDaily({ sub }: { mod: ModuleDef; sub: SubModuleDef }) {
                       {a.role === "Team Leader" ? "Team Leader" : "CSR Agent"}
                     </td>
                     <td className="px-3 py-2.5 font-medium whitespace-nowrap">{a.name}</td>
-                    <td className="px-3 py-2.5">
-                      <div className="flex flex-wrap gap-1">
-                        {(a.locations.length > 0 ? a.locations : ["—"]).map((loc, li) => (
-                          <span
-                            key={li}
-                            className="px-1.5 py-0.5 rounded text-xs font-medium bg-blue-500/15 text-blue-300 border border-blue-500/20 whitespace-nowrap"
-                          >
-                            {loc}
-                          </span>
-                        ))}
-                      </div>
+                    <td className="px-3 py-2.5 text-right text-green-400 w-24">{a.schedule}</td>
+                    <td className="px-3 py-2.5 text-right w-24">{a.update}</td>
+                    <td className="px-3 py-2.5 text-center w-20">
+                      <button
+                        type="button"
+                        onClick={() => setDetailsAgent(a)}
+                        title={`View details for ${a.name}`}
+                        className="inline-flex items-center justify-center h-7 w-7 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
+                      >
+                        <Eye className="h-4 w-4" />
+                      </button>
                     </td>
-                    <td className="px-3 py-2.5 text-right text-green-400">{a.schedule}</td>
-                    <td className="px-3 py-2.5 text-right">{a.update}</td>
                   </tr>
                 ))
               )}
@@ -478,6 +485,65 @@ export function ReportCSRDaily({ sub }: { mod: ModuleDef; sub: SubModuleDef }) {
           </table>
         </div>
         </>
+        )}
+
+        {/* ── Agent Details Modal ── */}
+        {detailsAgent && (
+          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => setDetailsAgent(null)}>
+            <div className="bg-slate-900 border border-white/15 rounded-xl w-full max-w-lg max-h-[80vh] flex flex-col shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between px-5 py-4 border-b border-white/10 bg-slate-950 rounded-t-xl">
+                <div className="flex items-center gap-2">
+                  <Eye className="h-4 w-4 text-blue-400" />
+                  <span className="font-semibold">{detailsAgent.name}</span>
+                  <span className="text-xs font-semibold" style={{ color: teamColor(detailsAgent.teamKey) }}>{teamName(detailsAgent.teamKey)}</span>
+                </div>
+                <button onClick={() => setDetailsAgent(null)} className="text-white/30 hover:text-white/70 transition-colors"><X className="h-5 w-5" /></button>
+              </div>
+
+              <div className="px-5 py-4 overflow-y-auto space-y-4">
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div>
+                    <p className="text-xs text-muted-foreground uppercase tracking-wide mb-0.5">Role</p>
+                    <p className="font-medium">{detailsAgent.role === "Team Leader" ? "Team Leader" : "CSR Agent"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground uppercase tracking-wide mb-0.5">Username</p>
+                    <p className="font-medium">{detailsAgent.username || "—"}</p>
+                  </div>
+                  <div className="col-span-2">
+                    <p className="text-xs text-muted-foreground uppercase tracking-wide mb-0.5">Email</p>
+                    <p className="font-medium truncate">{detailsAgent.email || "—"}</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="panel p-3 text-center">
+                    <p className="text-2xl font-bold text-green-300">{detailsAgent.schedule}</p>
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wide mt-0.5">Schedule</p>
+                  </div>
+                  <div className="panel p-3 text-center">
+                    <p className="text-2xl font-bold text-purple-300">{detailsAgent.update}</p>
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wide mt-0.5">Update</p>
+                  </div>
+                </div>
+
+                <div>
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">
+                    Locations <span className="text-muted-foreground/70">({detailsAgent.locations.length})</span>
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {detailsAgent.locations.length === 0 ? (
+                      <span className="text-sm text-muted-foreground">—</span>
+                    ) : detailsAgent.locations.map((loc) => (
+                      <span key={loc} className="px-2 py-0.5 rounded text-xs font-medium bg-blue-500/15 text-blue-300 border border-blue-500/20">
+                        {loc}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         )}
       </main>
     </div>
