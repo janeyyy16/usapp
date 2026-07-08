@@ -194,6 +194,8 @@ export interface EmployeeInfo {
   terminateDate?: string;
   employeeNote?: string;
   attachments?: string[];
+  employmentStatus?: "active" | "inactive" | "terminated" | "resigned";
+  employmentStatusDate?: string;
 }
 
 /** Load the employee_info JSON for a profile (by profile id). */

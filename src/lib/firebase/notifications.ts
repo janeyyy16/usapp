@@ -29,7 +29,8 @@ export type NotifKind =
   | "cross_inventory_request"
   | "tech_eod_reminder"
   | "restock_auto"
-  | "claim_part_tamper";
+  | "claim_part_tamper"
+  | "warning_mistake_issued";
 
 export interface AppNotification {
   id: string;

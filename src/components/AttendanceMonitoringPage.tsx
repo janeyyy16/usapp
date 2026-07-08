@@ -235,7 +235,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
           {activeTab === "daily-attendance" && (
             <>
               <div className="flex items-center justify-between gap-3">
-                <div className="flex-1 bg-gradient-to-br from-slate-800/80 to-slate-900/50 border border-white/10 rounded-lg p-4 backdrop-blur">
+                <div className="flex-1 bg-slate-900/50 border border-white/10 rounded-lg p-4 backdrop-blur">
                   <h2 className="text-sm font-bold text-white mb-2 flex items-center gap-2">
                     <AlertCircle className="h-4 w-4 text-orange-400" />
                     Attendance Alerts

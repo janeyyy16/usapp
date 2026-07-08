@@ -1,15 +1,17 @@
 /**
  * NotificationsMenu — bell icon in AppHeader with a dropdown of recent
- * system notifications.
+ * per-employee notifications.
  *
- * Pulled from the upstream usapp repo. Reads from a localStorage queue
- * (`ahs:offline:notifications`) that any feature can push to via a
- * "ahs-notif-updated" CustomEvent so this menu refreshes without a
- * page reload. Comes seeded with a few demo entries so the panel is
- * never empty during walkthroughs.
+ * Backed by the real Firestore notification feed (notifications/{uid}/items,
+ * see src/lib/firebase/notifications.ts) via subscribeNotifications — this
+ * is the same feed already fed by restock alerts, cross-inventory requests,
+ * and (as of this change) Warning/Mistake Issued notices. Falls back to a
+ * small set of demo entries only when there's no signed-in Firebase uid
+ * (e.g. Firebase isn't configured in this environment), so the panel isn't
+ * permanently broken there — demo and real data are never mixed together.
  */
 import { useState, useEffect } from "react";
-import { Bell, CheckCheck, Package, Clock, ShieldAlert, Wrench } from "lucide-react";
+import { Bell, CheckCheck, Package, Clock, ShieldAlert, Wrench, AlertTriangle } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -18,10 +20,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useAuth } from "@/lib/auth";
+import { subscribeNotifications, markNotificationRead, markAllNotificationsRead, type AppNotification } from "@/lib/firebase/notifications";
 
-interface DemoNotif {
+interface DisplayNotif {
   id: string;
-  kind: "system" | "part_status_change" | "cross_inventory_request" | "tech_eod_reminder" | "restock_auto" | "claim_part_tamper";
+  kind: string;
   title: string;
   body: string;
   ticketNo?: string;
@@ -36,6 +40,7 @@ const KIND_ICON: Record<string, React.ElementType> = {
   tech_eod_reminder: Clock,
   restock_auto: Package,
   claim_part_tamper: ShieldAlert,
+  warning_mistake_issued: AlertTriangle,
 };
 
 const KIND_COLOR: Record<string, string> = {
@@ -45,9 +50,10 @@ const KIND_COLOR: Record<string, string> = {
   tech_eod_reminder: "text-cyan-300 bg-cyan-400/10 border-cyan-400/20",
   restock_auto: "text-green-300 bg-green-400/10 border-green-400/20",
   claim_part_tamper: "text-rose-300 bg-rose-400/10 border-rose-400/20",
+  warning_mistake_issued: "text-amber-300 bg-amber-400/10 border-amber-400/20",
 };
 
-const DEMO_NOTIFS: DemoNotif[] = [
+const DEMO_NOTIFS: DisplayNotif[] = [
   { id: "1", kind: "restock_auto", title: "Part back in stock", body: "Ticket #054822474136 — Drain Pump marked as Restock. Status updated to Back in Stock.", ticketNo: "054822474136", isRead: false, createdAt: new Date(Date.now() - 600000).toISOString() },
   { id: "2", kind: "cross_inventory_request", title: "Cross-branch inventory request", body: "demo@demo.com is attempting to use 'Control Board' from Nashville's inventory. Please locate and ship.", isRead: false, createdAt: new Date(Date.now() - 1800000).toISOString() },
   { id: "3", kind: "tech_eod_reminder", title: "End-of-day checklist reminder", body: "Please make sure all tickets, part statuses, and visit logs are updated before end of day.", isRead: true, createdAt: new Date(Date.now() - 7200000).toISOString() },
@@ -65,47 +71,48 @@ function timeAgo(iso: string) {
 }
 
 export function NotificationsMenu() {
-  const [liveNotifs, setLiveNotifs] = useState<DemoNotif[]>([]);
-  const [demoNotifs, setDemoNotifs] = useState<DemoNotif[]>(DEMO_NOTIFS);
+  const { uid } = useAuth();
+  const [realNotifs, setRealNotifs] = useState<AppNotification[] | null>(null);
+  const [demoNotifs, setDemoNotifs] = useState<DisplayNotif[]>(DEMO_NOTIFS);
   const [open, setOpen] = useState(false);
 
-  // Pull in offline-queue notifications (tamper alerts, EOD reminders, restock)
-  // pushed from anywhere in the app, and refresh on the custom event.
   useEffect(() => {
-    const load = () => {
-      try {
-        const raw = localStorage.getItem("ahs:offline:notifications");
-        setLiveNotifs(raw ? JSON.parse(raw) : []);
-      } catch { setLiveNotifs([]); }
-    };
-    load();
-    window.addEventListener("ahs-notif-updated", load);
-    window.addEventListener("storage", load);
-    return () => {
-      window.removeEventListener("ahs-notif-updated", load);
-      window.removeEventListener("storage", load);
-    };
-  }, []);
+    if (!uid) { setRealNotifs(null); return; }
+    return subscribeNotifications(uid, setRealNotifs);
+  }, [uid]);
 
-  const notifs = [...liveNotifs, ...demoNotifs];
+  // realNotifs stays null until the subscription's first snapshot fires —
+  // only fall back to demo data when there's genuinely no real feed (no
+  // uid), not just while the first snapshot is still in flight... but
+  // showing demo briefly during that flight is preferable to a flash of
+  // an empty menu, so we key off `uid` alone.
+  const isDemo = !uid;
+  const notifs: DisplayNotif[] = isDemo ? demoNotifs : (realNotifs ?? []);
   const unread = notifs.filter(n => !n.isRead).length;
 
-  const markRead = (id: string) => {
-    setDemoNotifs(prev => prev.map(n => n.id === id ? { ...n, isRead: true } : n));
-    setLiveNotifs(prev => {
-      const next = prev.map(n => n.id === id ? { ...n, isRead: true } : n);
-      try { localStorage.setItem("ahs:offline:notifications", JSON.stringify(next)); } catch {}
-      return next;
-    });
+  const markRead = async (id: string) => {
+    if (isDemo) {
+      setDemoNotifs(prev => prev.map(n => n.id === id ? { ...n, isRead: true } : n));
+      return;
+    }
+    try {
+      await markNotificationRead(uid!, id);
+    } catch (err) {
+      console.error("Failed to mark notification read:", err);
+    }
   };
-  const markAll = (e: Event) => {
+
+  const markAll = async (e: Event) => {
     e.preventDefault();
-    setDemoNotifs(prev => prev.map(n => ({ ...n, isRead: true })));
-    setLiveNotifs(prev => {
-      const next = prev.map(n => ({ ...n, isRead: true }));
-      try { localStorage.setItem("ahs:offline:notifications", JSON.stringify(next)); } catch {}
-      return next;
-    });
+    if (isDemo) {
+      setDemoNotifs(prev => prev.map(n => ({ ...n, isRead: true })));
+      return;
+    }
+    try {
+      await markAllNotificationsRead(uid!);
+    } catch (err) {
+      console.error("Failed to mark all notifications read:", err);
+    }
   };
 
   return (
@@ -139,7 +146,9 @@ export function NotificationsMenu() {
           </div>
         </DropdownMenuLabel>
         <DropdownMenuSeparator className="bg-[var(--color-panel-border)]" />
-        {notifs.map(n => {
+        {notifs.length === 0 ? (
+          <div className="px-3 py-6 text-center text-xs text-muted-foreground">No notifications yet.</div>
+        ) : notifs.map(n => {
           const Icon = KIND_ICON[n.kind] ?? Bell;
           const color = KIND_COLOR[n.kind] ?? KIND_COLOR.system;
           return (
@@ -157,8 +166,12 @@ export function NotificationsMenu() {
             </DropdownMenuItem>
           );
         })}
-        <DropdownMenuSeparator className="bg-[var(--color-panel-border)]" />
-        <div className="px-3 pb-1 pt-1.5 text-[11px] text-muted-foreground text-center">Demo mode — notifications are local only.</div>
+        {isDemo && (
+          <>
+            <DropdownMenuSeparator className="bg-[var(--color-panel-border)]" />
+            <div className="px-3 pb-1 pt-1.5 text-[11px] text-muted-foreground text-center">Demo mode — notifications are local only.</div>
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -684,14 +684,16 @@
   }
 
   /* Date input calendar icon styling - white icon */
-  input[type="date"]::-webkit-calendar-picker-indicator {
+  input[type="date"]::-webkit-calendar-picker-indicator,
+  input[type="month"]::-webkit-calendar-picker-indicator {
     filter: brightness(0) invert(1);
     cursor: pointer;
   }
 
   input[type="date"],
   input[type="datetime-local"],
-  input[type="time"] {
+  input[type="time"],
+  input[type="month"] {
     color-scheme: dark;
   }
 
@@ -3009,7 +3011,8 @@
 /* Date inputs back to light color-scheme */
 :root[data-theme="light"] input[type="date"],
 :root[data-theme="light"] input[type="datetime-local"],
-:root[data-theme="light"] input[type="time"] {
+:root[data-theme="light"] input[type="time"],
+:root[data-theme="light"] input[type="month"] {
   color-scheme: light;
 }
 
@@ -3343,7 +3346,8 @@
    mode should show it dark. Clear the invert filter. */
 :root[data-theme="light"] input[type="date"]::-webkit-calendar-picker-indicator,
 :root[data-theme="light"] input[type="datetime-local"]::-webkit-calendar-picker-indicator,
-:root[data-theme="light"] input[type="time"]::-webkit-calendar-picker-indicator {
+:root[data-theme="light"] input[type="time"]::-webkit-calendar-picker-indicator,
+:root[data-theme="light"] input[type="month"]::-webkit-calendar-picker-indicator {
   filter: none !important;
   opacity: 0.85 !important;
 }
@@ -5575,7 +5579,8 @@
    the invert filter in light mode so the calendar icon shows dark. */
 :root[data-theme="light"] input[type="date"]::-webkit-calendar-picker-indicator,
 :root[data-theme="light"] input[type="datetime-local"]::-webkit-calendar-picker-indicator,
-:root[data-theme="light"] input[type="time"]::-webkit-calendar-picker-indicator {
+:root[data-theme="light"] input[type="time"]::-webkit-calendar-picker-indicator,
+:root[data-theme="light"] input[type="month"]::-webkit-calendar-picker-indicator {
   filter: none !important;
   opacity: 0.85 !important;
 }
