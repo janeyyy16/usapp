@@ -18,7 +18,7 @@ import { useAuth } from "@/lib/auth";
 import { getCompanyUsers, getMyProfileId } from "@/lib/supabase/users";
 import { getCompanyTickets, getTicketAuditLog } from "@/lib/supabase/tickets";
 import { getCsrTeamComposition } from "@/lib/supabase/csrTeams";
-import { getAgentNotes, getNotesSubmittedBy, type CsrAgentNoteStatus } from "@/lib/supabase/csrAgentNotes";
+import { getAgentNotes, getNotesSubmittedBy, type CsrAgentNote, type CsrAgentNoteStatus } from "@/lib/supabase/csrAgentNotes";
 import { parseBranchAccess } from "@/lib/locations";
 
 interface Member {
@@ -81,6 +81,8 @@ export function CSRTeamLeaderDashboard({ mod, sub }: { mod: ModuleDef; sub: SubM
   const [myUpdate, setMyUpdate] = useState(0);
   const [myWarnings, setMyWarnings] = useState(0);
   const [myMistakes, setMyMistakes] = useState(0);
+  const [myNotesList, setMyNotesList] = useState<CsrAgentNote[]>([]);
+  const [myNoteTab, setMyNoteTab] = useState<"mistake" | "warning">("mistake");
   const [recent, setRecent] = useState<RecentEntry[]>([]);
   const [locationsExpanded, setLocationsExpanded] = useState(false);
 
@@ -133,6 +135,10 @@ export function CSRTeamLeaderDashboard({ mod, sub }: { mod: ModuleDef; sub: SubM
         });
         setMyWarnings(myNotesInRange.filter((n) => n.type === "warning" && n.status === "approved").length);
         setMyMistakes(myNotesInRange.filter((n) => n.type === "mistake" && n.status === "approved").length);
+        // Full detail (every status, not just approved) for the transparency
+        // log below — an employee should be able to see everything filed
+        // against them, not just what's already official.
+        setMyNotesList(myNotesInRange.sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
 
         const me = profiles.find((p) => p.id === myProfileId);
         if (!me) { setError("Could not find your profile."); setLoading(false); return; }
@@ -322,6 +328,50 @@ export function CSRTeamLeaderDashboard({ mod, sub }: { mod: ModuleDef; sub: SubM
                 <div className="flex justify-center mb-1 text-muted-foreground"><ShieldAlert className="h-4 w-4" /></div>
                 <p className="text-2xl font-bold text-orange-300">{myMistakes}</p>
                 <p className="text-[10px] text-muted-foreground uppercase tracking-wide mt-0.5">Mistakes</p>
+              </div>
+            </div>
+
+            {/* Mistake/Warning Logs — full detail (every status, not just
+                approved) so it's actually transparent, not just a tally. */}
+            <div className="mb-4">
+              <div className="flex items-center gap-1 mb-2 border-b border-white/10">
+                {([
+                  { key: "mistake", label: "Mistake Logs" },
+                  { key: "warning", label: "Warning Logs" },
+                ] as const).map((tab) => (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    onClick={() => setMyNoteTab(tab.key)}
+                    className={`px-3 py-2 text-xs font-semibold uppercase tracking-wide border-b-2 -mb-px transition-colors ${myNoteTab === tab.key ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+              <div className="space-y-2 max-h-64 overflow-y-auto">
+                {myNotesList.filter((n) => n.type === myNoteTab).length === 0 ? (
+                  <p className="text-xs text-muted-foreground py-3 text-center">No {myNoteTab === "warning" ? "warnings" : "mistakes"} on file in this range.</p>
+                ) : myNotesList.filter((n) => n.type === myNoteTab).map((n) => (
+                  <div key={n.id} className="rounded-lg border border-white/10 bg-white/5 p-3">
+                    <div className="flex items-start gap-3">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs">{n.note}</p>
+                        <p className="text-[10px] text-muted-foreground mt-1">
+                          {n.ticketNo && <>Ticket <span className="font-mono text-blue-400">{n.ticketNo}</span> · </>}
+                          Submitted by {n.createdByName || "Unknown"} · {new Date(n.createdAt).toLocaleString()}
+                          {n.managerReviewedByName && <> · Manager: {n.managerReviewedByName}{n.managerReviewedAt ? ` · ${new Date(n.managerReviewedAt).toLocaleString()}` : ""}</>}
+                          {n.status !== "pending" && n.status !== "manager_approved" && n.reviewedByName && (
+                            <> · HR: {n.reviewedByName}{n.reviewedAt ? ` · ${new Date(n.reviewedAt).toLocaleString()}` : ""}</>
+                          )}
+                        </p>
+                      </div>
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 border ${RESOLUTION_BADGE[n.status]}`}>
+                        {RESOLUTION_LABEL[n.status]}
+                      </span>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
 

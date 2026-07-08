@@ -1207,15 +1207,6 @@ const reportMod: ModuleDef = {
   accent: "#34d399",
   submodules: [
     {
-      slug: "report-csr-daily",
-      title: "CSR Daily Report",
-      description: "CSR agent performance — tasks, schedule, attempts, mistakes.",
-      custom: "report-csr-daily" as any,
-      fields: [],
-      count: 0,
-      seed: () => ({}),
-    },
-    {
       slug: "report-claims-daily",
       title: "Claims Daily Report",
       description: "Claims completed vs remaining, brand breakdown and pending types.",
