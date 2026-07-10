@@ -42,6 +42,12 @@ export function normalizeRole(role: string | null | undefined): string {
   return String(role ?? "").trim().toUpperCase().replace(/\s+/g, "_");
 }
 
+/** Roles that can act on Jotform-sourced HR onboarding/candidate submissions. */
+const JOTFORM_HR_ROLES = new Set(["HR", "ADMIN", "SUPERADMIN", "MANAGER"]);
+export function isJotformHrRole(role: string | null | undefined): boolean {
+  return JOTFORM_HR_ROLES.has(normalizeRole(role));
+}
+
 /**
  * CSR Agents and Team Leaders get a narrow slice of the app — their own
  * Dashboard tools and Tickets, nothing else. Everyone else is unrestricted

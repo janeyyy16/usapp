@@ -97,6 +97,7 @@ import { CSRDashboard } from "@/components/CSRDashboard";
 import { CSRTeamLeaderDashboard } from "@/components/CSRTeamLeaderDashboard";
 import { CSRCallTracker } from "@/components/CSRCallTracker";
 import { CSRStatusSummary } from "@/components/CSRStatusSummary";
+import { ClaimsDashboard } from "@/components/ClaimsDashboard";
 
 export const Route = createFileRoute("/m/$module/$submodule")({
   ssr: false,
@@ -378,6 +379,8 @@ function SubModule() {
         ? <RepairStatusesPage />
         : (sub as any).custom === "parts-dashboard"
         ? <PartsDashboard mod={mod} sub={sub} />
+        : (sub as any).custom === "claims-dashboard"
+        ? <ClaimsDashboard mod={mod} sub={sub} />
         : (sub as any).custom === "truck-stock"
         ? <TruckStockPage mod={mod} sub={sub} />
         : sub.custom === "reserved-part-list-custom"

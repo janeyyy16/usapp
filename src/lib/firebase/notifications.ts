@@ -30,7 +30,8 @@ export type NotifKind =
   | "tech_eod_reminder"
   | "restock_auto"
   | "claim_part_tamper"
-  | "warning_mistake_issued";
+  | "warning_mistake_issued"
+  | "jotform_submission";
 
 export interface AppNotification {
   id: string;
@@ -42,6 +43,12 @@ export interface AppNotification {
   ticketNo?: string;     // attach a ticket number for deep-link
   isRead: boolean;
   createdAt: string;     // ISO string
+  // Jotform's "Label: value, Label: value…" summary of every submitted
+  // answer — only present on kind: "jotform_submission" notifications.
+  answers?: string;
+  // Any file-upload answers, re-hosted in Firebase Storage (see
+  // src/lib/server/jotformBridge.ts) — only present on jotform_submission.
+  photos?: string[];
 }
 
 // ─── Write ─────────────────────────────────────────────────────────────────
@@ -52,10 +59,18 @@ export async function sendNotification(
   payload: Omit<AppNotification, "id" | "uid" | "isRead" | "createdAt">
 ): Promise<void> {
   if (!isFirebaseReady() || !db) return;
+  // Firestore rejects a field explicitly set to `undefined` (unlike `null`
+  // or simply omitting it) — strip those out so callers can pass optional
+  // fields like `link`/`ticketNo` as `undefined` without the whole write
+  // failing. Without this, addDoc() throws and the notification never
+  // saves, silently, unless the caller happens to await + catch it.
+  const cleanPayload = Object.fromEntries(
+    Object.entries(payload).filter(([, v]) => v !== undefined)
+  ) as typeof payload;
   await Promise.all(
     recipientUids.map((uid) =>
       addDoc(collection(db!, "notifications", uid, "items"), {
-        ...payload,
+        ...cleanPayload,
         uid,
         isRead: false,
         createdAt: serverTimestamp(),
