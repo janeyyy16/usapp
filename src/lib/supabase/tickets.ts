@@ -151,6 +151,7 @@ function rowToTicket(row: any): Ticket {
     status: row.status ?? "",
     phone: c.phone ?? "",
     redo: row.redo ? "Y" : "N",
+    misdiagnosed: row.misdiagnosed ? "Y" : "N",
     aging: row.aging ?? 0,
     calls: row.calls ?? 0,
     partOrder: row.part_order ?? "",
@@ -383,6 +384,22 @@ export async function updateTicketStatus(ticketNo: string, status: string): Prom
     .eq("ticket_no", ticketNo);
   if (error) {
     console.error("updateTicketStatus error:", error.message);
+    throw new Error(error.message);
+  }
+}
+
+/**
+ * Set/clear a ticket's misdiagnosed flag. Restricted to manager-tier roles
+ * client-side (ticket.$ticketNo.tsx); who changed it and when is captured
+ * by the caller via logTicketAuditEntry, not stored on this column.
+ */
+export async function updateTicketMisdiagnosed(ticketNo: string, misdiagnosed: boolean): Promise<void> {
+  const { error } = await supabase
+    .from("tickets")
+    .update({ misdiagnosed })
+    .eq("ticket_no", ticketNo);
+  if (error) {
+    console.error("updateTicketMisdiagnosed error:", error.message);
     throw new Error(error.message);
   }
 }
@@ -1075,6 +1092,23 @@ export async function addTicketPart(ticketNo: string, part: Partial<UIPartRow>):
   return rowToPart(data);
 }
 
+/**
+ * Get a single part row by id — used where the caller doesn't already have
+ * the full row in memory (e.g. the Truck Stock Requests dashboard, which
+ * only holds the request record, not the ticket's live Part Transaction
+ * state). updateTicketPart() always writes every column from its input, so
+ * a partial-only update would null out every field the caller didn't pass —
+ * callers must read the full row here first, then merge their changes in.
+ */
+export async function getPartById(partId: string): Promise<UIPartRow | null> {
+  const { data, error } = await supabase.from("parts").select("*").eq("id", partId).maybeSingle();
+  if (error) {
+    console.error("getPartById error:", error.message);
+    throw new Error(error.message);
+  }
+  return data ? rowToPart(data) : null;
+}
+
 /** Update an existing part by id. */
 export async function updateTicketPart(partId: string, part: Partial<UIPartRow>): Promise<void> {
   const { error } = await supabase
@@ -1094,6 +1128,85 @@ export async function deleteTicketPart(partId: string): Promise<void> {
     console.error("deleteTicketPart error:", error.message);
     throw new Error(error.message);
   }
+}
+
+export interface PartUsageRow {
+  id: string;
+  ticketId: string;
+  ticketNo: string;
+  status: string;
+  poNo: string;
+  quantity: string;
+  partDist: string;
+  createdAt: string;
+  /** Who pulled this part from Truck Stock, if it was — resolved from the
+   * ticket_audit_log entry the pull itself writes, since parts.created_by /
+   * last_modified_by are never actually populated by any write path. */
+  pulledBy: string;
+}
+
+/**
+ * Every Part Transaction row actually SOURCED FROM TRUCK STOCK (part_dist
+ * starts with "In-House (", the marker Truck Stock Requests approval
+ * stamps on a part row), across every ticket, for a given part number —
+ * feeds the Truck Stock page's "where is this part being used" popup.
+ * Deliberately excludes plain "Need PO" lines: a part still awaiting
+ * approval, or one whose Truck Stock request was rejected and reverted, was
+ * never actually fulfilled from Truck Stock, so listing it here would read
+ * as "this ticket has this part in hand" when it doesn't. `parts.ticket_id`
+ * is a composite FK (ticket_id, company_id) -> tickets(id, company_id), so
+ * the embed needs the constraint name as a hint — a bare column-name hint
+ * only resolves simple single-column FKs.
+ */
+export async function getPartTransactionsByPartNo(partNo: string): Promise<PartUsageRow[]> {
+  const trimmed = partNo.trim();
+  if (!trimmed) return [];
+  const { data, error } = await supabase
+    .from("parts")
+    .select("id, ticket_id, part_dist, status, po_no, quantity, created_at, tickets!parts_ticket_same_company(ticket_no)")
+    .ilike("part_no", trimmed)
+    .ilike("part_dist", "In-House (%")
+    .order("created_at", { ascending: false });
+  if (error) {
+    console.error("getPartTransactionsByPartNo error:", error.message);
+    throw new Error(error.message);
+  }
+  const rows = (data ?? []).map((row: any) => ({
+    id: row.id,
+    ticketId: row.ticket_id,
+    ticketNo: row.tickets?.ticket_no ?? "",
+    status: row.status ?? "",
+    poNo: row.po_no ?? "",
+    quantity: row.quantity != null ? String(row.quantity) : "",
+    partDist: row.part_dist ?? "",
+    createdAt: row.created_at ?? "",
+    pulledBy: "",
+  }));
+  if (rows.length === 0) return rows;
+
+  // Cross-reference the audit trail for "Pulled from Truck Stock" entries on
+  // these same tickets, matching by part number prefix (the entry's
+  // after_value always starts with "<partNo> - Status: ...", see
+  // handleTruckStockBatchConfirm in ticket.$ticketNo.tsx).
+  const ticketIds = Array.from(new Set(rows.map((r) => r.ticketId).filter(Boolean)));
+  const { data: pulls, error: pullsErr } = await supabase
+    .from("ticket_audit_log")
+    .select("ticket_id, after_value, puller:changed_by(display_name, username)")
+    .eq("action", "Pulled from Truck Stock")
+    .in("ticket_id", ticketIds)
+    .ilike("after_value", `${trimmed} - %`)
+    .order("created_at", { ascending: false });
+  if (pullsErr) {
+    console.warn("getPartTransactionsByPartNo: audit lookup failed:", pullsErr.message);
+    return rows;
+  }
+  const pullerByTicket = new Map<string, string>();
+  for (const p of (pulls ?? []) as any[]) {
+    if (pullerByTicket.has(p.ticket_id)) continue; // most recent pull wins (already ordered desc)
+    const name = p.puller?.display_name || p.puller?.username || "";
+    if (name) pullerByTicket.set(p.ticket_id, name);
+  }
+  return rows.map((r) => ({ ...r, pulledBy: pullerByTicket.get(r.ticketId) ?? "" }));
 }
 
 /**
@@ -1387,4 +1500,32 @@ export async function getTicketAuditLog(opts?: { startDate?: string; endDate?: s
     changedBy: r.changed_by,
     createdAt: r.created_at,
   }));
+}
+
+/**
+ * Manually record a ticket audit entry (e.g. a visit edit, an SP status
+ * send) — anything not already covered by the DB trigger's automatic
+ * status/tech/schedule logging on the `tickets` table itself. `changedBy`
+ * must be a real `profiles.id`, not a display name (the column is a FK).
+ */
+export async function logTicketAuditEntry(entry: {
+  ticketId: string;
+  action: string;
+  field: string;
+  beforeValue?: string | null;
+  afterValue?: string | null;
+  changedBy?: string | null;
+}): Promise<void> {
+  const { error } = await supabase.from("ticket_audit_log").insert({
+    ticket_id: entry.ticketId,
+    action: entry.action,
+    field: entry.field,
+    before_value: entry.beforeValue ?? null,
+    after_value: entry.afterValue ?? null,
+    changed_by: entry.changedBy ?? null,
+  });
+  if (error) {
+    console.error("logTicketAuditEntry error:", error.message);
+    throw new Error(error.message);
+  }
 }

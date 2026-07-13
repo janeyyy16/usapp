@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { ChevronLeft } from "lucide-react";
+import { ChevronLeft, Download } from "lucide-react";
+import * as XLSX from "xlsx";
 
 type ReturnRow = {
   raNo: string;
@@ -147,6 +148,30 @@ function loadState() {
 
 function saveState(regular: ReturnRow[], core: ReturnRow[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify({ regular, core }));
+}
+
+/** Export the rows currently on screen (whatever filters/search are active) as a real .xlsx workbook. */
+function exportReturnsToXlsx(rows: ReturnRow[], sheetName: string, filenamePrefix: string) {
+  const data = rows.map((row) => ({
+    "RA No": row.raNo,
+    "PO No": row.poNo,
+    "Unique ID": row.uniqueId,
+    "Part No": row.partNo,
+    "Description": row.description,
+    "Return Type": row.returnType,
+    "Return Reason": row.returnReason,
+    "Status": row.status,
+    "Return Date": row.returnDate,
+    "Returned By": row.returnedBy,
+    "Qty": row.qty,
+    "Unit Price": Number(row.unitPrice || 0),
+    "Core Value": Number(row.coreValue || 0),
+    "Return Label": row.returnLabel,
+  }));
+  const worksheet = XLSX.utils.json_to_sheet(data);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+  XLSX.writeFile(workbook, `${filenamePrefix}_${new Date().toISOString().slice(0, 10)}.xlsx`);
 }
 
 export function PartReturnStatusPage() {
@@ -417,9 +442,6 @@ export function PartReturnStatusPage() {
           .part-info-section-title { font-size: 0.82rem; font-weight: 700; color: #111827; margin: 0.2rem 0 0.4rem; }
           .part-info-section-subtitle { font-size: 0.76rem; color: #4b5563; margin-bottom: 0.35rem; }
           .part-info-empty { padding: 0.7rem; border: 1px dashed #d1d5db; border-radius: 8px; font-size: 0.78rem; color: #6b7280; }
-          .status-footer { padding: 1.5rem 0 0; text-align: center; color: rgba(255, 255, 255, 0.9); }
-          .status-footer p { margin: 0; }
-          .status-footer .status-footer-note { margin-top: 1rem; opacity: 0.7; }
           #partInfoModalOverlay .part-info-modal, #partInfoModalOverlay .part-info-modal th, #partInfoModalOverlay .part-info-modal td, #partInfoModalOverlay .part-info-title, #partInfoModalOverlay .part-info-close, #partInfoModalOverlay .part-info-section-title, #partInfoModalOverlay .part-info-section-subtitle, #partInfoModalOverlay .part-info-empty, #partInfoModalOverlay .part-info-tab-btn { color: #111827 !important; }
           #partInfoModalOverlay .part-info-tab-btn.active { color: #ffffff !important; }
           .back-btn { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.5rem 0.85rem; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.16); background: rgba(255, 255, 255, 0.08); color: #fff; font-weight: 700; transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease; }
@@ -512,7 +534,12 @@ export function PartReturnStatusPage() {
           <div className="panel">
             <div className="meta-row">
               <div id="recordInfo" className="result-info">{filteredRegular.length} records found</div>
-              <input id="resultSearch" className="search-input" type="text" placeholder="search in result" value={resultSearch} onChange={(event) => setResultSearch(event.target.value)} />
+              <div style={{ display: "flex", gap: "0.6rem", alignItems: "center" }}>
+                <input id="resultSearch" className="search-input" type="text" placeholder="search in result" value={resultSearch} onChange={(event) => setResultSearch(event.target.value)} />
+                <button type="button" className="btn" onClick={() => exportReturnsToXlsx(filteredRegular, "Part Return", "part-return-status")}>
+                  <Download className="h-3.5 w-3.5" /> Download XLSX
+                </button>
+              </div>
             </div>
 
             <div id="regularTableWrap" className="table-wrap" ref={regularTableWrapRef}>
@@ -584,7 +611,12 @@ export function PartReturnStatusPage() {
           <div className="panel">
             <div className="meta-row">
               <div id="coreRecordInfo" className="result-info">{filteredCore.length} records found</div>
-              <input id="coreResultSearch" className="search-input" type="text" placeholder="search in result" value={coreResultSearch} onChange={(event) => setCoreResultSearch(event.target.value)} />
+              <div style={{ display: "flex", gap: "0.6rem", alignItems: "center" }}>
+                <input id="coreResultSearch" className="search-input" type="text" placeholder="search in result" value={coreResultSearch} onChange={(event) => setCoreResultSearch(event.target.value)} />
+                <button type="button" className="btn" onClick={() => exportReturnsToXlsx(filteredCore, "Core Part Return", "core-part-return-status")}>
+                  <Download className="h-3.5 w-3.5" /> Download XLSX
+                </button>
+              </div>
             </div>
 
             <div id="coreTableWrap" className="table-wrap" ref={coreTableWrapRef}>
@@ -652,11 +684,6 @@ export function PartReturnStatusPage() {
           </div>
         </div>
       </main>
-
-      <footer id="contact" className="status-footer">
-        <p>For any questions or support, contact us at <a href="mailto:support@adminhubsolutions.com">support@adminhubsolutions.com</a></p>
-        <p className="status-footer-note">© 2026 Admin Hub Solutions. All rights reserved.</p>
-      </footer>
 
       <div id="partInfoModalOverlay" className={`part-info-modal-overlay ${modalPartNo ? "is-open" : ""}`} onClick={(event) => { if (event.target === event.currentTarget) setModalPartNo(""); }}>
         <div className="part-info-modal" role="dialog" aria-modal="true" aria-labelledby="partInfoTitle">

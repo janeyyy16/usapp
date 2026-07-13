@@ -19,7 +19,7 @@ export interface SubModuleDef {
   // Custom seed generator; receives index
   seed: (i: number) => Record<string, unknown>;
   count?: number;
-  custom?: "part-return" | "part-return-status" | "claims-pipeline" | "work-map" | "part-order" | "part-receive" | "return-pickup" | "repair-statuses" | "ticket-list" | "user-management" | "account-management" | "location-management" | "csr-daily-report" | "call-tracker" | "csr-status-summary" | "csr-team-leader-dashboard" | "reserved-part-list-custom" | "parts-dashboard" | "truck-stock" | "claims-dashboard"; // hook for special pages
+  custom?: "part-return" | "part-return-status" | "claims-pipeline" | "work-map" | "part-order" | "part-receive" | "return-pickup" | "repair-statuses" | "ticket-list" | "user-management" | "account-management" | "location-management" | "csr-daily-report" | "call-tracker" | "csr-status-summary" | "csr-team-leader-dashboard" | "reserved-part-list-custom" | "parts-dashboard" | "claims-dashboard"; // hook for special pages
 }
 export interface ModuleDef {
   slug: string;
@@ -503,14 +503,6 @@ const partsMod: ModuleDef = {
       fields: [],
       seed: () => ({}),
       custom: "reserved-part-list-custom",
-    },
-    {
-      slug: "truck-stock",
-      title: "Truck Stock",
-      description: "Parts in-house per branch with cross-branch availability — checked by the Marcone Lookup button before placing a PO.",
-      fields: [],
-      seed: () => ({}),
-      custom: "truck-stock",
     },
   ],
 };

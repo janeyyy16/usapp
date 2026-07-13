@@ -363,3 +363,41 @@ export async function getCompanyTimecardWarnings(
 
   return rows.sort((a, b) => b.totalWarnings - a.totalWarnings);
 }
+
+/** Raw per-day timecard entry for one profile, used by company-wide reports. */
+export interface CompanyTimecardEntry {
+  profileId: string;
+  workDate: string; // "YYYY-MM-DD"
+  checkIn: string;
+  checkOut: string;
+  mealStart: string;
+  mealEnd: string;
+}
+
+/**
+ * Company-wide raw timecard entries in a date range (inclusive) — feeds
+ * Payroll Calculation, which needs every employee's daily check-in/out
+ * rather than one profile at a time.
+ */
+export async function getCompanyTimecardEntries(
+  startDate: string,
+  endDate: string
+): Promise<CompanyTimecardEntry[]> {
+  const { data, error } = await supabase
+    .from("timecard_entries")
+    .select("profile_id, work_date, check_in, check_out, meal_start, meal_end")
+    .gte("work_date", startDate)
+    .lte("work_date", endDate);
+  if (error) {
+    console.error("getCompanyTimecardEntries error:", error.message);
+    return [];
+  }
+  return (data ?? []).map((row: any) => ({
+    profileId: row.profile_id as string,
+    workDate: row.work_date as string,
+    checkIn: row.check_in ?? "",
+    checkOut: row.check_out ?? "",
+    mealStart: row.meal_start ?? "",
+    mealEnd: row.meal_end ?? "",
+  }));
+}

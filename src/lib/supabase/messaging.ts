@@ -13,6 +13,15 @@
 
 import { supabase } from "./client";
 
+// Date.now() alone collides when two components subscribe in the same
+// millisecond (e.g. MessagesMenu + NotificationsMenu both mounting in
+// Header.tsx). supabase.channel(name) returns the SAME channel instance for
+// a repeated name, and calling .on() on an already-.subscribe()d channel
+// throws — so every channel name needs a truly unique suffix.
+function uniqueChannelSuffix(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 export interface ChannelRow {
   id: string;
   slug: string;
@@ -191,6 +200,8 @@ export async function sendMessage(params: {
   senderName: string;
   body: string;
   isAnnouncement?: boolean;
+  /** "system" marks an app-generated notification (e.g. attendance note alerts) rather than a typed chat line. Defaults to "user". */
+  kind?: "system" | "user";
 }): Promise<MessageRow> {
   const body = params.body.trim();
   if (!body) throw new Error("Cannot send an empty message");
@@ -203,7 +214,7 @@ export async function sendMessage(params: {
     sender_id: params.senderId,
     sender_name: params.senderName,
     body,
-    kind: "user" as const,
+    kind: params.kind ?? ("user" as const),
     is_announcement: Boolean(params.isAnnouncement),
   };
   const { data, error } = await supabase
@@ -233,7 +244,7 @@ export function subscribeToMessages(params: {
       : null;
   if (!filter) return () => {};
 
-  const channelName = `messages-${params.channelId ?? params.dmThreadId}-${Date.now()}`;
+  const channelName = `messages-${params.channelId ?? params.dmThreadId}-${uniqueChannelSuffix()}`;
   const sub = supabase
     .channel(channelName)
     .on(
@@ -393,7 +404,7 @@ export async function getUnreadCounts(profileId: string): Promise<{
  * Caller decides how to react — e.g. bump the unread badge.
  */
 export function subscribeToAllNewMessages(onMessage: (row: MessageRow) => void): () => void {
-  const channelName = `messages-all-${Date.now()}`;
+  const channelName = `messages-all-${uniqueChannelSuffix()}`;
   const sub = supabase
     .channel(channelName)
     .on(

@@ -55,6 +55,8 @@ export interface ProfileRow {
   sms_status: string | null;
   off_days: number[] | null;
   work_plan: Record<string, any> | null;
+  required_check_in: string | null;
+  required_check_out: string | null;
   is_active: boolean;
   created_at: string;
 }
@@ -183,7 +185,7 @@ export async function getMyRoles(firebaseUid: string): Promise<{ role: string | 
 export async function getCompanyUsers(): Promise<ProfileRow[]> {
   const { data, error } = await supabase
     .from("profiles")
-    .select("id, firebase_uid, company_id, email, username, display_name, role, extra_roles, phone_number, department, manager_name, assigned_branch, branch_access, technician_id, po_initials, is_active, created_at")
+    .select("id, firebase_uid, company_id, email, username, display_name, role, extra_roles, phone_number, department, manager_name, assigned_branch, branch_access, technician_id, po_initials, off_days, work_plan, required_check_in, required_check_out, is_active, created_at")
     .neq("role", "SUPERADMIN")
     .order("display_name", { ascending: true });
 

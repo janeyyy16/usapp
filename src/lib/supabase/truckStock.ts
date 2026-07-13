@@ -9,6 +9,8 @@
 
 import { supabase } from "./client";
 
+export type TruckStockStatus = "in_stock" | "in_use";
+
 export type TruckStockRow = {
   id: string;
   branch: string;
@@ -18,6 +20,8 @@ export type TruckStockRow = {
   quantity: number;
   storageLocation: string;
   notes: string;
+  status: TruckStockStatus;
+  createdAt?: string;
   updatedAt?: string;
 };
 
@@ -31,6 +35,8 @@ function fromDb(r: any): TruckStockRow {
     quantity: Number(r.quantity ?? 0),
     storageLocation: r.storage_location ?? "",
     notes: r.notes ?? "",
+    status: r.status === "in_use" ? "in_use" : "in_stock",
+    createdAt: r.created_at ?? undefined,
     updatedAt: r.updated_at ?? undefined,
   };
 }
@@ -44,6 +50,7 @@ function toDb(row: TruckStockRow): Record<string, unknown> {
     quantity: Number.isFinite(row.quantity) ? Math.max(0, Math.trunc(row.quantity)) : 0,
     storage_location: row.storageLocation?.trim() || null,
     notes: row.notes?.trim() || null,
+    status: row.status === "in_use" ? "in_use" : "in_stock",
   };
 }
 
@@ -139,6 +146,7 @@ export async function findTruckStockForPart(partNo: string): Promise<TruckStockR
     .select("*")
     .ilike("part_no", trimmed)
     .gt("quantity", 0)
+    .eq("status", "in_stock")
     .order("quantity", { ascending: false });
   if (error) {
     console.warn("findTruckStockForPart error:", error.message);
@@ -175,6 +183,7 @@ export async function bulkUpsertTruckStock(
       quantity: Number.isFinite(r.quantity) ? Math.max(0, Math.trunc(r.quantity)) : 0,
       storage_location: r.storageLocation?.trim() || null,
       notes: r.notes?.trim() || null,
+      status: r.status === "in_use" ? "in_use" : "in_stock",
     }));
     const { error, count } = await supabase
       .from("truck_stock")
@@ -230,4 +239,33 @@ export async function decrementTruckStock(args: {
     .eq("id", row.id);
   if (updErr) throw new Error(updErr.message);
   return { newQuantity: next, storageLocation: row.storage_location ?? "" };
+}
+
+/**
+ * Restore `qty` units to a branch's truck stock — the symmetric inverse of
+ * decrementTruckStock. Used when a Truck Stock pull request is rejected: the
+ * quantity was reserved (decremented) at request time, so rejecting it needs
+ * to give those units back.
+ */
+export async function incrementTruckStock(args: {
+  branch: string;
+  partNo: string;
+  qty: number;
+}): Promise<{ newQuantity: number }> {
+  const qty = Math.max(1, Math.trunc(args.qty || 1));
+  const { data: row, error: readErr } = await supabase
+    .from("truck_stock")
+    .select("id, quantity")
+    .ilike("branch", args.branch.trim())
+    .ilike("part_no", args.partNo.trim())
+    .maybeSingle();
+  if (readErr) throw new Error(readErr.message);
+  if (!row) throw new Error(`No truck stock row for ${args.partNo} at ${args.branch}.`);
+  const next = Number(row.quantity ?? 0) + qty;
+  const { error: updErr } = await supabase
+    .from("truck_stock")
+    .update({ quantity: next })
+    .eq("id", row.id);
+  if (updErr) throw new Error(updErr.message);
+  return { newQuantity: next };
 }
