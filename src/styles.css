@@ -3173,15 +3173,24 @@
 :root[data-theme="light"] [class*="text-red-3"],
 :root[data-theme="light"] [class*="text-red-4"] { color: #dc2626 !important; }
 
-/* Inline-style dark backgrounds (some components use style={{background:"#1.."}}) */
+/* Inline-style dark backgrounds (some components use style={{background:"#1.."}}
+   or the shared dropdown-menu background style={{background:"rgb(22,28,52)"}}).
+   IMPORTANT: match the dropdown navy by its exact value, not a bare "rgb(2"
+   prefix — that prefix also matches any bright color whose red channel is in
+   the 200s (e.g. #fb923c -> rgb(251,146,60), #facc15 -> rgb(250,204,21)),
+   which was silently wiping chart/legend swatch colors in light mode. */
 :root[data-theme="light"] [style*="background:#1"],
 :root[data-theme="light"] [style*="background: #1"],
-:root[data-theme="light"] [style*="background:rgb(2"],
-:root[data-theme="light"] [style*="background: rgb(2"],
+:root[data-theme="light"] [style*="background:rgb(22,28,52)"],
+:root[data-theme="light"] [style*="background: rgb(22,28,52)"],
+:root[data-theme="light"] [style*="background:rgb(22, 28, 52)"],
+:root[data-theme="light"] [style*="background: rgb(22, 28, 52)"],
 :root[data-theme="light"] [style*="background-color:#1"],
 :root[data-theme="light"] [style*="background-color: #1"],
-:root[data-theme="light"] [style*="background-color:rgb(2"],
-:root[data-theme="light"] [style*="background-color: rgb(2"] {
+:root[data-theme="light"] [style*="background-color:rgb(22,28,52)"],
+:root[data-theme="light"] [style*="background-color: rgb(22,28,52)"],
+:root[data-theme="light"] [style*="background-color:rgb(22, 28, 52)"],
+:root[data-theme="light"] [style*="background-color: rgb(22, 28, 52)"] {
   background-color: var(--lt-surface) !important;
   background-image: none !important;
 }
@@ -4069,7 +4078,6 @@
   border-color: #4ade80 !important;
   color: #166534 !important;
 }
-
 
 /* ════════════════════════════════════════════════════════════════════════
    LIGHT THEME — native <select> button + option list

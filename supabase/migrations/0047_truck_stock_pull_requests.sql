@@ -1,21 +1,3 @@
--- =====================================================================
--- 0047 — Truck Stock Pull Requests (Parts Manager approval workflow)
---
--- Pulling a part from Truck Stock used to be immediate: the requester's
--- click decremented stock and stamped the Part Transaction line PO Made
--- in one step. This adds an approval gate for non-privileged requesters
--- (Triage, Parts non-manager) — the pull request lands here as 'pending',
--- Truck Stock is decremented right away (reserved, so a second requester
--- can't also claim the same units while this is under review), and the
--- Part Transaction line stays "Need PO" until the Parts Manager approves
--- or rejects it. Privileged roles (Parts Manager, Admin, Superadmin,
--- Manager, BizOps/Branch Manager tiers) skip this entirely and pull
--- immediately, same as before — they're the approval authority, so
--- routing their own request through themselves would be redundant.
---
--- Run once in the Supabase SQL Editor, after 0046.
--- =====================================================================
-
 create table if not exists truck_stock_pull_requests (
   id                uuid primary key default gen_random_uuid(),
   company_id        uuid not null references companies(id) on delete cascade,
