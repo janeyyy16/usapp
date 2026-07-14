@@ -17,6 +17,7 @@ import { TIME_FRAMES } from "@/lib/timeframes";
 import { CLAIM_STATUSES, CLAIM_TOS, PAYMENT_METHODS } from "@/lib/claimDropdowns";
 import { LOCATIONS_DATA } from "@/lib/zipCoverage";
 import { resolveTierCode } from "@/lib/tierCodes";
+import { CANCEL_REASONS, buildCancelReasonNote } from "@/lib/operationsBranchMetrics";
 import { getLocationManagementCoordinates } from "@/components/LocationManagementPage";
 import {
   buildSquaretradeUrlFromToken,
@@ -1059,6 +1060,7 @@ function TicketDetailsPage() {
   const [newVisitActivity, setNewVisitActivity] = useState("");
   const [newVisitActionType, setNewVisitActionType] = useState("SCHEDULE");
   const [newVisitRepairStatus, setNewVisitRepairStatus] = useState("");
+  const [newVisitCancelReason, setNewVisitCancelReason] = useState("");
   const [newVisitRepairType, setNewVisitRepairType] = useState("");
   const [newVisitReclaim, setNewVisitReclaim] = useState("");
   const [newVisitVisited, setNewVisitVisited] = useState("Visited");
@@ -2456,6 +2458,15 @@ function TicketDetailsPage() {
       }
       return;
     }
+    if (newVisitRepairStatus === "CL-Need Cancel" && !newVisitCancelReason.trim()) {
+      alert("A cancellation reason is required when Repair Status is CL-Need Cancel.");
+      const el = document.getElementById("visit-cancel-reason-modal") as HTMLSelectElement | null;
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        setTimeout(() => el.focus(), 80);
+      }
+      return;
+    }
     // Cause of Failure (diagnosis) + Repair Notes (resolution) are required
     // before a technician can submit / complete a visit. Office roles on the
     // web aren't blocked — only technicians and anyone using the mobile tech
@@ -2552,6 +2563,19 @@ function TicketDetailsPage() {
           console.warn("status update skipped:", e)
         );
       }
+      // A CL-Need Cancel status requires a reason — record it on the
+      // ticket's Internal Note (the column shown in the Ticket List grid),
+      // appended onto whatever's already there so nothing is lost.
+      if (newVisitRepairStatus === "CL-Need Cancel" && newVisitCancelReason) {
+        try {
+          const current = await sbGetTicketByNumber(ticketNo);
+          await sbUpdateTicketFields(ticketNo, {
+            internalNote: buildCancelReasonNote(newVisitCancelReason, current?.internalNote),
+          });
+        } catch (e) {
+          console.warn("cancellation reason note update skipped:", e);
+        }
+      }
     } catch (err) {
       console.error("Failed to save visit:", err);
       alert(`Failed to save visit: ${err instanceof Error ? err.message : "Unknown error"}`);
@@ -2588,6 +2612,7 @@ function TicketDetailsPage() {
     setNewVisitActivity("");
     setNewVisitActionType("SCHEDULE");
     setNewVisitRepairStatus("");
+    setNewVisitCancelReason("");
     setNewVisitRepairType("");
     setNewVisitReclaim("");
     setNewVisitVisited("Visited");
@@ -6163,6 +6188,26 @@ function TicketDetailsPage() {
                             <option>TR-Need Triage</option>
                           </select>
                         </div>
+                        {newVisitRepairStatus === "CL-Need Cancel" ? (
+                          <div className="space-y-1.5">
+                            <label htmlFor="visit-cancel-reason-modal" className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">
+                              Cancellation Reason <span className="text-rose-400">*</span>
+                            </label>
+                            <select
+                              id="visit-cancel-reason-modal"
+                              value={newVisitCancelReason}
+                              onChange={(event) => setNewVisitCancelReason(event.target.value)}
+                              className={`w-full rounded-md border bg-slate-950/90 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 ${
+                                newVisitCancelReason.trim() ? "border-white/15" : "border-rose-400/40"
+                              }`}
+                            >
+                              <option value="">— select —</option>
+                              {CANCEL_REASONS.map((reason) => (
+                                <option key={reason} value={reason}>{reason}</option>
+                              ))}
+                            </select>
+                          </div>
+                        ) : null}
                         <div className="space-y-1.5">
                           <label htmlFor="visit-repair-type-modal" className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Repair Type (2nd Tech)</label>
                           <select id="visit-repair-type-modal" value={newVisitRepairType} onChange={(event) => setNewVisitRepairType(event.target.value)} className="w-full rounded-md border border-white/15 bg-slate-950/90 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500">
