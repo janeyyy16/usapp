@@ -46,49 +46,10 @@ export const csrReportData: Record<string, any> = {
   },
 };
 
-export const claimsReportData: Record<string, any> = {
-  "602": {
-    completed: 125,
-    remaining: 43,
-    brands: {
-      GE: 45,
-      SQT: 32,
-      ASSURANT: 28,
-      AIG: 15,
-      SS: 5,
-    },
-    pending: {
-      "Awaiting Authorization": 15,
-      "Missing Parts": 12,
-      "Customer Follow-up": 8,
-      "Documentation": 8,
-    },
-  },
-};
-
-export const triageReportData: Record<string, any> = {
-  "602": {
-    summary: {
-      completed: 78,
-      remaining: 25,
-      staff: 8,
-    },
-    agents: [
-      { name: "Jane Smith", completed: 15, remaining: 3, avgTime: "12m" },
-      { name: "Bob Johnson", completed: 12, remaining: 5, avgTime: "15m" },
-    ],
-  },
-};
-
-export const partsReportData: Record<string, any> = {
-  "602": {
-    branches: [
-      { branch: "Houston HQ", collections: 24, ra: 8, receives: 15 },
-      { branch: "Dallas", collections: 18, ra: 5, receives: 12 },
-      { branch: "Austin", collections: 15, ra: 3, receives: 10 },
-    ],
-  },
-};
+// Claims/Triage/Part Daily Report now come from live data (see
+// ReportClaimsDaily.tsx, ReportTriageDaily.tsx, ReportPartsDaily.tsx) — the
+// mock claimsReportData/triageReportData/partsReportData structures that
+// used to live here have been removed.
 
 // Operations Daily Report's Overview tab now comes from real BizOps
 // Manager/Senior Manager profiles + the live Warnings/Mistakes notes
