@@ -142,6 +142,7 @@ function rowToTicket(row: any): Ticket {
     location: sanitizeLocation(row.location ?? ""),
     model: row.model ?? "",
     internalNote: row.internal_note ?? "",
+    cancellationReason: row.cancellation_reason ?? "",
     problemDescription: row.problem_description ?? "",
     diagnosed: row.diagnosed ? "Y" : "N",
     technician: row.technician ?? "",
@@ -554,6 +555,7 @@ export async function updateTicketFields(
   fields: {
     problemDescription?: string;
     internalNote?: string;
+    cancellationReason?: string;
     manufacturer?: string;
     model?: string;
     serial?: string;
@@ -568,6 +570,7 @@ export async function updateTicketFields(
   const payload: Record<string, unknown> = { updated_at: new Date().toISOString() };
   if (fields.problemDescription !== undefined) payload.problem_description = fields.problemDescription;
   if (fields.internalNote !== undefined) payload.internal_note = fields.internalNote;
+  if (fields.cancellationReason !== undefined) payload.cancellation_reason = fields.cancellationReason;
 
   // Product-info fields. Any update to any of these flips the lock flag.
   const productKeys: Array<keyof typeof fields> = [

@@ -17,7 +17,7 @@ import { TIME_FRAMES } from "@/lib/timeframes";
 import { CLAIM_STATUSES, CLAIM_TOS, PAYMENT_METHODS } from "@/lib/claimDropdowns";
 import { LOCATIONS_DATA } from "@/lib/zipCoverage";
 import { resolveTierCode } from "@/lib/tierCodes";
-import { CANCEL_REASONS, buildCancelReasonNote } from "@/lib/operationsBranchMetrics";
+import { CANCEL_REASONS } from "@/lib/operationsBranchMetrics";
 import { getLocationManagementCoordinates } from "@/components/LocationManagementPage";
 import {
   buildSquaretradeUrlFromToken,
@@ -2458,14 +2458,20 @@ function TicketDetailsPage() {
       }
       return;
     }
-    if (newVisitRepairStatus === "CL-Need Cancel" && !newVisitCancelReason.trim()) {
-      alert("A cancellation reason is required when Repair Status is CL-Need Cancel.");
-      const el = document.getElementById("visit-cancel-reason-modal") as HTMLSelectElement | null;
-      if (el) {
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
-        setTimeout(() => el.focus(), 80);
+    if (newVisitRepairStatus === "CL-Cancelled") {
+      if (!canSetCancelled) {
+        alert("Only a BizOps Manager can set Repair Status to CL-Cancelled.");
+        return;
       }
-      return;
+      if (!newVisitCancelReason.trim()) {
+        alert("A cancellation reason is required when Repair Status is CL-Cancelled.");
+        const el = document.getElementById("visit-cancel-reason-modal") as HTMLSelectElement | null;
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          setTimeout(() => el.focus(), 80);
+        }
+        return;
+      }
     }
     // Cause of Failure (diagnosis) + Repair Notes (resolution) are required
     // before a technician can submit / complete a visit. Office roles on the
@@ -2563,17 +2569,15 @@ function TicketDetailsPage() {
           console.warn("status update skipped:", e)
         );
       }
-      // A CL-Need Cancel status requires a reason — record it on the
-      // ticket's Internal Note (the column shown in the Ticket List grid),
-      // appended onto whatever's already there so nothing is lost.
-      if (newVisitRepairStatus === "CL-Need Cancel" && newVisitCancelReason) {
+      // A CL-Cancelled status requires a reason — recorded in its own
+      // column (Ticket List's "Cancellation Reason" column), not embedded
+      // in Internal Note. Only BizOps Manager+ can actually reach this
+      // (see canSetCancelled below).
+      if (newVisitRepairStatus === "CL-Cancelled" && newVisitCancelReason) {
         try {
-          const current = await sbGetTicketByNumber(ticketNo);
-          await sbUpdateTicketFields(ticketNo, {
-            internalNote: buildCancelReasonNote(newVisitCancelReason, current?.internalNote),
-          });
+          await sbUpdateTicketFields(ticketNo, { cancellationReason: newVisitCancelReason });
         } catch (e) {
-          console.warn("cancellation reason note update skipped:", e);
+          console.warn("cancellation reason update skipped:", e);
         }
       }
     } catch (err) {
@@ -3817,6 +3821,21 @@ function TicketDetailsPage() {
     // the toolbar per current business rule.
     return false;
   }, [currentUserRole, currentUserExtraRoles, isNaveen, PART_LOCK_BYPASS_ROLES, CSR_ONLY_ROLES]);
+
+  // Only BizOps Manager (+ BizOps Senior Manager, and the usual Admin/
+  // Superadmin platform override) may move a ticket to CL-Cancelled and
+  // record its Cancellation Reason. A CSR can still flag CL-Need Cancel and
+  // explain why in the free-text Internal Note — but the actual cancel + the
+  // structured reason only happen after BizOps verifies it.
+  const CANCEL_ROLES = useMemo(
+    () => new Set(["BIZOPS_MANAGER", "BIZOPS_SENIOR_MANAGER", "ADMIN", "SUPERADMIN"]),
+    [],
+  );
+  const canSetCancelled = useMemo(() => {
+    const primary = String(currentUserRole || "").toUpperCase();
+    if (CANCEL_ROLES.has(primary)) return true;
+    return currentUserExtraRoles.some((r) => CANCEL_ROLES.has(String(r).toUpperCase()));
+  }, [currentUserRole, currentUserExtraRoles, CANCEL_ROLES]);
 
   const notifyUnauthorizedPartEdit = useCallback(async (attemptedRow: PartTransactionRow | null) => {
     if (!currentCompanyId) return;
@@ -6169,7 +6188,9 @@ function TicketDetailsPage() {
                             }`}
                           >
                             <option value="">— select —</option>
-                            <option>CL-Cancelled</option>
+                            {/* Only BizOps Manager+ may move a ticket to CL-Cancelled — everyone
+                                else can still flag CL-Need Cancel and explain why in Internal Note. */}
+                            {canSetCancelled && <option>CL-Cancelled</option>}
                             <option>CL-Claimed</option>
                             <option>CL-Data-Closed</option>
                             <option>CL-Need Cancel</option>
@@ -6188,7 +6209,7 @@ function TicketDetailsPage() {
                             <option>TR-Need Triage</option>
                           </select>
                         </div>
-                        {newVisitRepairStatus === "CL-Need Cancel" ? (
+                        {newVisitRepairStatus === "CL-Cancelled" && canSetCancelled ? (
                           <div className="space-y-1.5">
                             <label htmlFor="visit-cancel-reason-modal" className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">
                               Cancellation Reason <span className="text-rose-400">*</span>

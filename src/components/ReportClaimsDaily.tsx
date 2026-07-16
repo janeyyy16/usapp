@@ -18,7 +18,7 @@ import { getCompanyUsers, type ProfileRow } from "@/lib/supabase/users";
 import { getCompanyTickets } from "@/lib/supabase/tickets";
 import { statusGroupOf, type Ticket } from "@/lib/ticketData";
 import { getAllAgentNotes, type CsrAgentNote } from "@/lib/supabase/csrAgentNotes";
-import { normalizeRole, ROLE_LABELS } from "@/lib/roleLabels";
+import { normalizeRole } from "@/lib/roleLabels";
 
 const CLAIMS_ROLES = new Set(["CLAIMS", "CLAIMS_MANAGER"]);
 const CHART_COLORS = ["#3b82f6", "#34d399", "#a78bfa", "#fb923c", "#f472b6", "#facc15", "#60a5fa", "#f87171"];
@@ -137,27 +137,17 @@ export function ReportClaimsDaily({ mod, sub }: { mod: ModuleDef; sub: SubModule
     return dates.map((d) => ({ date: fmtShort(d), completed: counts.get(d) ?? 0 }));
   }, [filtered, date]);
 
-  const warningCountByProfile = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const n of notes) { if (n.status !== "approved" || n.type !== "warning") continue; map.set(n.agentProfileId, (map.get(n.agentProfileId) ?? 0) + 1); }
-    return map;
-  }, [notes]);
-  const mistakeCountByProfile = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const n of notes) { if (n.status !== "approved" || n.type !== "mistake") continue; map.set(n.agentProfileId, (map.get(n.agentProfileId) ?? 0) + 1); }
-    return map;
-  }, [notes]);
-  const staffRows = useMemo(() => {
-    return staff.map((p) => ({
-      id: p.id,
-      name: p.display_name || p.username || p.email,
-      role: ROLE_LABELS[normalizeRole(p.role)] ?? p.role,
-      branch: p.assigned_branch || "—",
-      claimsTouched: filtered.filter((t) => t.statusChangedBy === p.id).length,
-      warnings: warningCountByProfile.get(p.id) ?? 0,
-      mistakes: mistakeCountByProfile.get(p.id) ?? 0,
-    })).sort((a, b) => b.claimsTouched - a.claimsTouched);
-  }, [staff, filtered, warningCountByProfile, mistakeCountByProfile]);
+  // Company-wide totals only — this is a system-wide report, not a
+  // per-employee attribution tool (that's what ClaimsDashboard.tsx's staff
+  // table is for).
+  const totalWarnings = useMemo(() => {
+    const staffIds = new Set(staff.map((p) => p.id));
+    return notes.filter((n) => n.status === "approved" && n.type === "warning" && staffIds.has(n.agentProfileId)).length;
+  }, [notes, staff]);
+  const totalMistakes = useMemo(() => {
+    const staffIds = new Set(staff.map((p) => p.id));
+    return notes.filter((n) => n.status === "approved" && n.type === "mistake" && staffIds.has(n.agentProfileId)).length;
+  }, [notes, staff]);
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -265,36 +255,18 @@ export function ReportClaimsDaily({ mod, sub }: { mod: ModuleDef; sub: SubModule
           </div>
         </div>
 
-        <div className="panel p-0 overflow-hidden">
-          <div className="px-4 py-4 border-b border-white/10">
-            <h2 className="font-semibold text-sm">Claims Staff</h2>
-            <p className="text-[10px] text-muted-foreground mt-0.5">Everyone currently holding a Claims or Claims Manager role — click a name for their full stats, mistakes &amp; warnings.</p>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead><tr className="bg-white/5 border-b border-white/10">
-                <th className="px-3 py-2 text-left font-semibold text-muted-foreground">Name</th>
-                <th className="px-3 py-2 text-left font-semibold text-muted-foreground">Role</th>
-                <th className="px-3 py-2 text-left font-semibold text-muted-foreground">Branch</th>
-                <th className="px-3 py-2 text-right font-semibold text-muted-foreground">Claims Touched</th>
-                <th className="px-3 py-2 text-right font-semibold text-muted-foreground">Warnings</th>
-                <th className="px-3 py-2 text-right font-semibold text-muted-foreground">Mistakes</th>
-              </tr></thead>
-              <tbody>
-                {staffRows.length === 0 ? <tr><td colSpan={6} className="px-3 py-8 text-center text-muted-foreground">No one currently holds a Claims or Claims Manager role.</td></tr> :
-                  staffRows.map((s) => (
-                    <tr key={s.id} className="border-b border-white/5 hover:bg-white/5">
-                      <td className="px-3 py-2 font-medium"><a href={`/csr-agent/${s.id}`} target="_blank" rel="noopener noreferrer" className="hover:text-blue-300 hover:underline transition" title={`View ${s.name}'s statistics`}>{s.name}</a></td>
-                      <td className="px-3 py-2 text-muted-foreground">{s.role}</td>
-                      <td className="px-3 py-2 text-muted-foreground">{s.branch}</td>
-                      <td className="px-3 py-2 text-right">{s.claimsTouched}</td>
-                      <td className="px-3 py-2 text-right">{s.warnings > 0 ? <span className="bg-yellow-500/20 text-yellow-300 px-2 py-0.5 rounded font-semibold">{s.warnings}</span> : <span className="text-muted-foreground">—</span>}</td>
-                      <td className="px-3 py-2 text-right">{s.mistakes > 0 ? <span className="bg-orange-500/20 text-orange-300 px-2 py-0.5 rounded font-semibold">{s.mistakes}</span> : <span className="text-muted-foreground">—</span>}</td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          {[
+            { label: "Claims Staff", value: kpi.staff, color: "text-purple-300", icon: <Users className="h-4 w-4" /> },
+            { label: "Warnings (Company-wide)", value: totalWarnings, color: "text-yellow-300", icon: <Clock className="h-4 w-4" /> },
+            { label: "Mistakes (Company-wide)", value: totalMistakes, color: "text-orange-300", icon: <Clock className="h-4 w-4" /> },
+          ].map((k) => (
+            <div key={k.label} className="panel p-3 text-center">
+              <div className="flex justify-center mb-1 text-muted-foreground">{k.icon}</div>
+              <p className={`text-lg font-bold ${k.color}`}>{k.value}</p>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wide mt-0.5">{k.label}</p>
+            </div>
+          ))}
         </div>
         </>
         )}

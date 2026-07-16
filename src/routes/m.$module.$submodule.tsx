@@ -70,11 +70,14 @@ import { AddBranchPage } from "@/components/AddBranchPage";
 import { canAccessUserManagement, getUserManagementRecord, canAccessAdminModule } from "@/lib/user-management";
 import { isSubmoduleAllowed } from "@/lib/roleLabels";
 import { ReportHRDaily } from "@/components/ReportHRDaily";
+import { ReportHR } from "@/components/ReportHR";
 import { ReportCSRDaily } from "@/components/ReportCSRDaily";
 import { ReportClaimsDaily } from "@/components/ReportClaimsDaily";
 import { ReportTriageDaily } from "@/components/ReportTriageDaily";
 import { ReportPartsDaily } from "@/components/ReportPartsDaily";
 import { ReportOperationsDaily } from "@/components/ReportOperationsDaily";
+import { ReportAttendanceMonitoring } from "@/components/ReportAttendanceMonitoring";
+import { ReportAccounting } from "@/components/ReportAccounting";
 import { EncompassClaimAuditReport } from "@/components/EncompassClaimAuditReport";
 import { MonthlyPartReport } from "@/components/MonthlyPartReport";
 import { PayrollReport } from "@/components/PayrollReport";
@@ -306,7 +309,7 @@ function SubModule() {
         : (sub as any).custom === "triage-performance-report"
         ? <TriagePerformanceReport mod={mod} sub={sub} />
         : (sub as any).custom === "report-hr-daily"
-        ? <ReportHRDaily mod={mod} sub={sub} />
+        ? <ReportHR mod={mod} sub={sub} />
         : (sub as any).custom === "report-claims-daily"
         ? <ReportClaimsDaily mod={mod} sub={sub} />
         : (sub as any).custom === "report-triage-daily"
@@ -315,6 +318,10 @@ function SubModule() {
         ? <ReportPartsDaily mod={mod} sub={sub} />
         : (sub as any).custom === "report-operations-daily"
         ? <ReportOperationsDaily mod={mod} sub={sub} />
+        : (sub as any).custom === "report-attendance-monitoring"
+        ? <ReportAttendanceMonitoring mod={mod} sub={sub} />
+        : (sub as any).custom === "report-accounting"
+        ? <ReportAccounting mod={mod} sub={sub} />
         : (sub as any).custom === "encompass-claim-audit-report"
         ? <EncompassClaimAuditReport mod={mod} sub={sub} />
         : (sub as any).custom === "monthly-part-report"

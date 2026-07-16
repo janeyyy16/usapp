@@ -22,7 +22,7 @@ import { getCompanyUsers, type ProfileRow } from "@/lib/supabase/users";
 import { getCompanyTickets, getTicketAuditLog } from "@/lib/supabase/tickets";
 import type { Ticket } from "@/lib/ticketData";
 import { getAllAgentNotes, type CsrAgentNote } from "@/lib/supabase/csrAgentNotes";
-import { normalizeRole, ROLE_LABELS } from "@/lib/roleLabels";
+import { normalizeRole } from "@/lib/roleLabels";
 
 const TRIAGE_ROLES = new Set(["TRIAGE_USER", "TRIAGE_MANAGER"]);
 const TOOLTIP_STYLE = { background: "#ffffff", border: "1px solid #cbd5e1", borderRadius: 6, color: "#0f172a", fontSize: 12, fontWeight: 600, boxShadow: "0 4px 12px rgba(0,0,0,0.3)" } as const;
@@ -166,23 +166,8 @@ export function ReportTriageDaily({ mod, sub }: { mod: ModuleDef; sub: SubModule
     return map;
   }, [notes]);
 
-  const staffRows = useMemo(() => {
-    return staff.map((p) => {
-      const myExits = exitsInRange.filter((e) => e.agentId === p.id);
-      const myDurations = myExits.filter((e) => e.durationMs !== null);
-      const myAvg = myDurations.length > 0 ? myDurations.reduce((s, e) => s + (e.durationMs ?? 0), 0) / myDurations.length : null;
-      return {
-        id: p.id,
-        name: p.display_name || p.username || p.email,
-        role: ROLE_LABELS[normalizeRole(p.role)] ?? p.role,
-        remaining: remainingTickets.filter((t) => t.statusChangedBy === p.id).length,
-        completed: myExits.length,
-        avgTime: myAvg !== null ? fmtDuration(myAvg) : "—",
-        warnings: warningCountByProfile.get(p.id) ?? 0,
-        mistakes: mistakeCountByProfile.get(p.id) ?? 0,
-      };
-    }).sort((a, b) => b.completed - a.completed);
-  }, [staff, exitsInRange, remainingTickets, warningCountByProfile, mistakeCountByProfile]);
+  const totalWarnings = staff.reduce((s, p) => s + (warningCountByProfile.get(p.id) ?? 0), 0);
+  const totalMistakes = staff.reduce((s, p) => s + (mistakeCountByProfile.get(p.id) ?? 0), 0);
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -234,27 +219,14 @@ export function ReportTriageDaily({ mod, sub }: { mod: ModuleDef; sub: SubModule
           </ResponsiveContainer>
         </div>
 
-        <div className="panel overflow-x-auto p-0">
-          <div className="px-4 py-3 border-b border-white/10 font-semibold text-sm flex justify-between"><span>Agent Performance</span><span className="text-xs text-muted-foreground">{staffRows.length} staff</span></div>
-          <table className="w-full text-sm"><thead><tr className="border-b border-white/10 bg-white/5">
-            {["Name", "Role", "Remaining", "Completed", "Avg Triage Time", "Warnings", "Mistakes"].map((h) => (
-              <th key={h} className="px-3 py-2.5 text-left text-xs text-muted-foreground uppercase whitespace-nowrap">{h}</th>
-            ))}
-          </tr></thead>
-          <tbody>
-            {staffRows.length === 0 ? <tr><td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">No one currently holds a Triage User or Triage Manager role.</td></tr> :
-              staffRows.map((a, i) => (
-                <tr key={a.id} className={`border-b border-white/5 hover:bg-white/5 ${i % 2 !== 0 ? "bg-white/[0.02]" : ""}`}>
-                  <td className="px-3 py-2.5 font-medium whitespace-nowrap"><a href={`/csr-agent/${a.id}`} target="_blank" rel="noopener noreferrer" className="hover:text-blue-300 hover:underline transition" title={`View ${a.name}'s statistics`}>{a.name}</a></td>
-                  <td className="px-3 py-2.5 text-muted-foreground">{a.role}</td>
-                  <td className="px-3 py-2.5 text-center text-orange-400">{a.remaining || "—"}</td>
-                  <td className="px-3 py-2.5 text-center text-green-400 font-semibold">{a.completed || "—"}</td>
-                  <td className="px-3 py-2.5 text-center text-muted-foreground">{a.avgTime}</td>
-                  <td className="px-3 py-2.5 text-center">{a.warnings > 0 ? <span className="px-2 py-0.5 rounded text-xs bg-yellow-500/20 text-yellow-300 border border-yellow-500/30">{a.warnings}</span> : "—"}</td>
-                  <td className="px-3 py-2.5 text-center">{a.mistakes > 0 ? <span className="px-2 py-0.5 rounded text-xs bg-red-500/20 text-red-300 border border-red-500/30">{a.mistakes}</span> : "—"}</td>
-                </tr>
-              ))}
-          </tbody></table>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          {[
+            ["Triage Staff", kpi.staff, "text-blue-300"],
+            ["Warnings (Company-wide)", totalWarnings, "text-yellow-300"],
+            ["Mistakes (Company-wide)", totalMistakes, "text-red-300"],
+          ].map(([l, v, c]) => (
+            <div key={l as string} className="panel p-3 text-center"><p className={`text-lg font-bold ${c}`}>{v}</p><p className="text-[10px] text-muted-foreground uppercase tracking-wide mt-0.5">{l}</p></div>
+          ))}
         </div>
         </>
         )}

@@ -142,15 +142,17 @@ export async function deleteEntry(profileId: string, workDate: string): Promise<
 
 
 /**
- * Compute hours worked between two HH:MM strings, accounting for an optional
- * meal break. Mirrors the math used by the personal timecard page so the
- * self-service Attendance tab agrees with the timecard.
+ * Compute hours worked between two "HH:MM" or "HH:MM:SS" strings, accounting
+ * for an optional meal break. Mirrors the math used by the personal timecard
+ * page so the self-service Attendance tab agrees with the timecard. Seconds
+ * (when present) are included so payroll hours — and therefore pay — aren't
+ * rounded to the nearest minute.
  */
 function hoursBetween(t1: string, t2: string): number {
   if (!t1 || !t2) return 0;
-  const [h1, m1] = t1.split(":").map(Number);
-  const [h2, m2] = t2.split(":").map(Number);
-  return ((h2 * 60 + m2) - (h1 * 60 + m1)) / 60;
+  const [h1, m1, s1 = 0] = t1.split(":").map(Number);
+  const [h2, m2, s2 = 0] = t2.split(":").map(Number);
+  return ((h2 * 3600 + m2 * 60 + s2) - (h1 * 3600 + m1 * 60 + s1)) / 3600;
 }
 
 export function calcWorkedHours(entry: UITimeEntry): number {
@@ -176,6 +178,8 @@ export interface AttendanceRow {
   date: string;          // "YYYY-MM-DD"
   clockIn: string;       // "HH:MM" or ""
   clockOut: string;      // "HH:MM" or ""
+  mealStart: string;     // "HH:MM" or ""
+  mealEnd: string;       // "HH:MM" or ""
   hoursWorked: number;
   status: "present" | "absent" | "missing-in" | "missing-out";
 }
@@ -225,6 +229,8 @@ export async function getAttendanceForRange(
           date: key,
           clockIn: "",
           clockOut: "",
+          mealStart: "",
+          mealEnd: "",
           hoursWorked: 0,
           status: "absent",
         });
@@ -245,6 +251,8 @@ export async function getAttendanceForRange(
       date: key,
       clockIn: entry.checkIn,
       clockOut: entry.checkOut,
+      mealStart: entry.mealStart,
+      mealEnd: entry.mealEnd,
       hoursWorked: calcWorkedHours(entry),
       status,
     });
@@ -375,9 +383,10 @@ export interface CompanyTimecardEntry {
 }
 
 /**
- * Company-wide raw timecard entries in a date range (inclusive) — feeds
- * Payroll Calculation, which needs every employee's daily check-in/out
- * rather than one profile at a time.
+ * Company-wide raw timecard entries in a date range (inclusive). Unlike
+ * getCompanyTimecardWarnings this returns one row per entry, not an
+ * aggregated count, so callers (Attendance Monitoring dashboard) can build
+ * their own daily/weekly/monthly views and alerts on top of it.
  */
 export async function getCompanyTimecardEntries(
   startDate: string,

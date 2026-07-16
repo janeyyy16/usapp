@@ -21,6 +21,8 @@ export interface Ticket {
   location: string;
   model: string;
   internalNote: string;
+  /** Structured reason recorded when a BizOps Manager sets status to CL-Cancelled — its own column, not embedded in internalNote. */
+  cancellationReason?: string;
   problemDescription?: string;
   diagnosed: string;
   technician: string;

@@ -18,13 +18,13 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { ChevronLeft, Loader2, Users } from "lucide-react";
+import { ChevronLeft, Loader2 } from "lucide-react";
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis, Legend } from "recharts";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 import { getPartsInventoryRows, type PartInventoryRow } from "@/lib/supabase/partsInventory";
 import { getCompanyUsers, type ProfileRow } from "@/lib/supabase/users";
 import { getAllAgentNotes, type CsrAgentNote } from "@/lib/supabase/csrAgentNotes";
-import { normalizeRole, ROLE_LABELS } from "@/lib/roleLabels";
+import { normalizeRole } from "@/lib/roleLabels";
 
 const PARTS_ROLES = new Set(["PARTS", "PARTS_MANAGER"]);
 const DONE_STATUSES = new Set(["Used", "Claimed"]);
@@ -116,6 +116,7 @@ export function ReportPartsDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleD
     ra: raRows.length,
     receives: receivesRows.length,
     warnings: staff.reduce((s, p) => s + (warningCountByProfile.get(p.id) ?? 0), 0),
+    staffCount: staff.length,
   };
 
   const branchChartData = useMemo(() => {
@@ -146,16 +147,7 @@ export function ReportPartsDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleD
     return dates.map((d) => ({ date: fmtShort(d), collections: collected.get(d) ?? 0, receives: received.get(d) ?? 0 }));
   }, [rows, branchFilter, dateTo]);
 
-  const staffRows = useMemo(() => {
-    return staff.map((p) => ({
-      id: p.id,
-      name: p.display_name || p.username || p.email,
-      role: ROLE_LABELS[normalizeRole(p.role)] ?? p.role,
-      branch: p.assigned_branch || "—",
-      warnings: warningCountByProfile.get(p.id) ?? 0,
-      mistakes: mistakeCountByProfile.get(p.id) ?? 0,
-    })).sort((a, b) => (b.warnings + b.mistakes) - (a.warnings + a.mistakes));
-  }, [staff, warningCountByProfile, mistakeCountByProfile]);
+  const totalMistakes = staff.reduce((s, p) => s + (mistakeCountByProfile.get(p.id) ?? 0), 0);
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -229,25 +221,14 @@ export function ReportPartsDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleD
           </div>
         </div>
 
-        <div className="panel overflow-x-auto p-0">
-          <div className="px-4 py-3 border-b border-white/10 font-semibold text-sm flex justify-between"><span>Staff Detail</span><span className="text-xs text-muted-foreground">{staffRows.length} staff</span></div>
-          <table className="w-full text-sm"><thead><tr className="border-b border-white/10 bg-white/5">
-            {["Name", "Role", "Branch", "Warnings", "Mistakes"].map((h) => (
-              <th key={h} className="px-3 py-3 text-left text-xs text-muted-foreground uppercase whitespace-nowrap">{h}</th>
-            ))}
-          </tr></thead>
-          <tbody>
-            {staffRows.length === 0 ? <tr><td colSpan={5} className="px-4 py-12 text-center text-muted-foreground">No one currently holds a Parts or Parts Manager role.</td></tr> :
-              staffRows.map((s, i) => (
-                <tr key={s.id} className={`border-b border-white/5 hover:bg-white/5 ${i % 2 !== 0 ? "bg-white/[0.02]" : ""}`}>
-                  <td className="px-3 py-2.5 font-medium"><a href={`/csr-agent/${s.id}`} target="_blank" rel="noopener noreferrer" className="hover:text-blue-300 hover:underline transition" title={`View ${s.name}'s statistics`}>{s.name}</a></td>
-                  <td className="px-3 py-2.5 text-xs text-muted-foreground">{s.role}</td>
-                  <td className="px-3 py-2.5 text-xs text-muted-foreground">{s.branch}</td>
-                  <td className="px-3 py-2.5 text-center">{s.warnings > 0 ? <span className="px-2 py-0.5 rounded text-xs bg-yellow-500/20 text-yellow-300 border border-yellow-500/30">{s.warnings}</span> : "—"}</td>
-                  <td className="px-3 py-2.5 text-center">{s.mistakes > 0 ? <span className="px-2 py-0.5 rounded text-xs bg-red-500/20 text-red-300 border border-red-500/30">{s.mistakes}</span> : "—"}</td>
-                </tr>
-              ))}
-          </tbody></table>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          {[
+            ["Parts Staff", kpi.staffCount, "text-blue-300"],
+            ["Warnings (Company-wide)", kpi.warnings, "text-yellow-300"],
+            ["Mistakes (Company-wide)", totalMistakes, "text-red-300"],
+          ].map(([l, v, c]) => (
+            <div key={l as string} className="panel p-3 text-center"><p className={`text-lg font-bold ${c}`}>{v}</p><p className="text-[10px] text-muted-foreground uppercase tracking-wide mt-0.5">{l}</p></div>
+          ))}
         </div>
         </>
         )}
