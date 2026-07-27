@@ -17,6 +17,7 @@ import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as PrivacyRouteImport } from './routes/privacy'
 import { Route as MobileRouteImport } from './routes/mobile'
 import { Route as LandingRouteImport } from './routes/landing'
+import { Route as HrActivityLogRouteImport } from './routes/hr-activity-log'
 import { Route as HomeRouteImport } from './routes/home'
 import { Route as FirebaseSetupRouteImport } from './routes/firebase-setup'
 import { Route as AnnouncementsRouteImport } from './routes/announcements'
@@ -24,6 +25,9 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as TicketsMapRouteImport } from './routes/tickets.map'
 import { Route as TicketTicketNoRouteImport } from './routes/ticket.$ticketNo'
 import { Route as MModuleRouteImport } from './routes/m.$module'
+import { Route as FillW9DocIdRouteImport } from './routes/fill-w9.$docId'
+import { Route as FillW8benDocIdRouteImport } from './routes/fill-w8ben.$docId'
+import { Route as FillW4DocIdRouteImport } from './routes/fill-w4.$docId'
 import { Route as EmployeeEmployeeIdRouteImport } from './routes/employee.$employeeId'
 import { Route as CsrAgentAgentIdRouteImport } from './routes/csr-agent.$agentId'
 import { Route as AdminUsersRouteImport } from './routes/admin.users'
@@ -70,6 +74,11 @@ const LandingRoute = LandingRouteImport.update({
   path: '/landing',
   getParentRoute: () => rootRouteImport,
 } as any)
+const HrActivityLogRoute = HrActivityLogRouteImport.update({
+  id: '/hr-activity-log',
+  path: '/hr-activity-log',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const HomeRoute = HomeRouteImport.update({
   id: '/home',
   path: '/home',
@@ -105,6 +114,21 @@ const MModuleRoute = MModuleRouteImport.update({
   path: '/m/$module',
   getParentRoute: () => rootRouteImport,
 } as any)
+const FillW9DocIdRoute = FillW9DocIdRouteImport.update({
+  id: '/fill-w9/$docId',
+  path: '/fill-w9/$docId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const FillW8benDocIdRoute = FillW8benDocIdRouteImport.update({
+  id: '/fill-w8ben/$docId',
+  path: '/fill-w8ben/$docId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const FillW4DocIdRoute = FillW4DocIdRouteImport.update({
+  id: '/fill-w4/$docId',
+  path: '/fill-w4/$docId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const EmployeeEmployeeIdRoute = EmployeeEmployeeIdRouteImport.update({
   id: '/employee/$employeeId',
   path: '/employee/$employeeId',
@@ -136,6 +160,7 @@ export interface FileRoutesByFullPath {
   '/announcements': typeof AnnouncementsRoute
   '/firebase-setup': typeof FirebaseSetupRoute
   '/home': typeof HomeRoute
+  '/hr-activity-log': typeof HrActivityLogRoute
   '/landing': typeof LandingRoute
   '/mobile': typeof MobileRoute
   '/privacy': typeof PrivacyRoute
@@ -147,6 +172,9 @@ export interface FileRoutesByFullPath {
   '/admin/users': typeof AdminUsersRoute
   '/csr-agent/$agentId': typeof CsrAgentAgentIdRoute
   '/employee/$employeeId': typeof EmployeeEmployeeIdRoute
+  '/fill-w4/$docId': typeof FillW4DocIdRoute
+  '/fill-w8ben/$docId': typeof FillW8benDocIdRoute
+  '/fill-w9/$docId': typeof FillW9DocIdRoute
   '/m/$module': typeof MModuleRouteWithChildren
   '/ticket/$ticketNo': typeof TicketTicketNoRoute
   '/tickets/map': typeof TicketsMapRoute
@@ -158,6 +186,7 @@ export interface FileRoutesByTo {
   '/announcements': typeof AnnouncementsRoute
   '/firebase-setup': typeof FirebaseSetupRoute
   '/home': typeof HomeRoute
+  '/hr-activity-log': typeof HrActivityLogRoute
   '/landing': typeof LandingRoute
   '/mobile': typeof MobileRoute
   '/privacy': typeof PrivacyRoute
@@ -169,6 +198,9 @@ export interface FileRoutesByTo {
   '/admin/users': typeof AdminUsersRoute
   '/csr-agent/$agentId': typeof CsrAgentAgentIdRoute
   '/employee/$employeeId': typeof EmployeeEmployeeIdRoute
+  '/fill-w4/$docId': typeof FillW4DocIdRoute
+  '/fill-w8ben/$docId': typeof FillW8benDocIdRoute
+  '/fill-w9/$docId': typeof FillW9DocIdRoute
   '/m/$module': typeof MModuleRouteWithChildren
   '/ticket/$ticketNo': typeof TicketTicketNoRoute
   '/tickets/map': typeof TicketsMapRoute
@@ -181,6 +213,7 @@ export interface FileRoutesById {
   '/announcements': typeof AnnouncementsRoute
   '/firebase-setup': typeof FirebaseSetupRoute
   '/home': typeof HomeRoute
+  '/hr-activity-log': typeof HrActivityLogRoute
   '/landing': typeof LandingRoute
   '/mobile': typeof MobileRoute
   '/privacy': typeof PrivacyRoute
@@ -192,6 +225,9 @@ export interface FileRoutesById {
   '/admin/users': typeof AdminUsersRoute
   '/csr-agent/$agentId': typeof CsrAgentAgentIdRoute
   '/employee/$employeeId': typeof EmployeeEmployeeIdRoute
+  '/fill-w4/$docId': typeof FillW4DocIdRoute
+  '/fill-w8ben/$docId': typeof FillW8benDocIdRoute
+  '/fill-w9/$docId': typeof FillW9DocIdRoute
   '/m/$module': typeof MModuleRouteWithChildren
   '/ticket/$ticketNo': typeof TicketTicketNoRoute
   '/tickets/map': typeof TicketsMapRoute
@@ -205,6 +241,7 @@ export interface FileRouteTypes {
     | '/announcements'
     | '/firebase-setup'
     | '/home'
+    | '/hr-activity-log'
     | '/landing'
     | '/mobile'
     | '/privacy'
@@ -216,6 +253,9 @@ export interface FileRouteTypes {
     | '/admin/users'
     | '/csr-agent/$agentId'
     | '/employee/$employeeId'
+    | '/fill-w4/$docId'
+    | '/fill-w8ben/$docId'
+    | '/fill-w9/$docId'
     | '/m/$module'
     | '/ticket/$ticketNo'
     | '/tickets/map'
@@ -227,6 +267,7 @@ export interface FileRouteTypes {
     | '/announcements'
     | '/firebase-setup'
     | '/home'
+    | '/hr-activity-log'
     | '/landing'
     | '/mobile'
     | '/privacy'
@@ -238,6 +279,9 @@ export interface FileRouteTypes {
     | '/admin/users'
     | '/csr-agent/$agentId'
     | '/employee/$employeeId'
+    | '/fill-w4/$docId'
+    | '/fill-w8ben/$docId'
+    | '/fill-w9/$docId'
     | '/m/$module'
     | '/ticket/$ticketNo'
     | '/tickets/map'
@@ -249,6 +293,7 @@ export interface FileRouteTypes {
     | '/announcements'
     | '/firebase-setup'
     | '/home'
+    | '/hr-activity-log'
     | '/landing'
     | '/mobile'
     | '/privacy'
@@ -260,6 +305,9 @@ export interface FileRouteTypes {
     | '/admin/users'
     | '/csr-agent/$agentId'
     | '/employee/$employeeId'
+    | '/fill-w4/$docId'
+    | '/fill-w8ben/$docId'
+    | '/fill-w9/$docId'
     | '/m/$module'
     | '/ticket/$ticketNo'
     | '/tickets/map'
@@ -272,6 +320,7 @@ export interface RootRouteChildren {
   AnnouncementsRoute: typeof AnnouncementsRoute
   FirebaseSetupRoute: typeof FirebaseSetupRoute
   HomeRoute: typeof HomeRoute
+  HrActivityLogRoute: typeof HrActivityLogRoute
   LandingRoute: typeof LandingRoute
   MobileRoute: typeof MobileRoute
   PrivacyRoute: typeof PrivacyRoute
@@ -283,6 +332,9 @@ export interface RootRouteChildren {
   AdminUsersRoute: typeof AdminUsersRoute
   CsrAgentAgentIdRoute: typeof CsrAgentAgentIdRoute
   EmployeeEmployeeIdRoute: typeof EmployeeEmployeeIdRoute
+  FillW4DocIdRoute: typeof FillW4DocIdRoute
+  FillW8benDocIdRoute: typeof FillW8benDocIdRoute
+  FillW9DocIdRoute: typeof FillW9DocIdRoute
   MModuleRoute: typeof MModuleRouteWithChildren
   TicketTicketNoRoute: typeof TicketTicketNoRoute
   TicketsMapRoute: typeof TicketsMapRoute
@@ -346,6 +398,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LandingRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/hr-activity-log': {
+      id: '/hr-activity-log'
+      path: '/hr-activity-log'
+      fullPath: '/hr-activity-log'
+      preLoaderRoute: typeof HrActivityLogRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/home': {
       id: '/home'
       path: '/home'
@@ -393,6 +452,27 @@ declare module '@tanstack/react-router' {
       path: '/m/$module'
       fullPath: '/m/$module'
       preLoaderRoute: typeof MModuleRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/fill-w9/$docId': {
+      id: '/fill-w9/$docId'
+      path: '/fill-w9/$docId'
+      fullPath: '/fill-w9/$docId'
+      preLoaderRoute: typeof FillW9DocIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/fill-w8ben/$docId': {
+      id: '/fill-w8ben/$docId'
+      path: '/fill-w8ben/$docId'
+      fullPath: '/fill-w8ben/$docId'
+      preLoaderRoute: typeof FillW8benDocIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/fill-w4/$docId': {
+      id: '/fill-w4/$docId'
+      path: '/fill-w4/$docId'
+      fullPath: '/fill-w4/$docId'
+      preLoaderRoute: typeof FillW4DocIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/employee/$employeeId': {
@@ -460,6 +540,7 @@ const rootRouteChildren: RootRouteChildren = {
   AnnouncementsRoute: AnnouncementsRoute,
   FirebaseSetupRoute: FirebaseSetupRoute,
   HomeRoute: HomeRoute,
+  HrActivityLogRoute: HrActivityLogRoute,
   LandingRoute: LandingRoute,
   MobileRoute: MobileRoute,
   PrivacyRoute: PrivacyRoute,
@@ -471,6 +552,9 @@ const rootRouteChildren: RootRouteChildren = {
   AdminUsersRoute: AdminUsersRoute,
   CsrAgentAgentIdRoute: CsrAgentAgentIdRoute,
   EmployeeEmployeeIdRoute: EmployeeEmployeeIdRoute,
+  FillW4DocIdRoute: FillW4DocIdRoute,
+  FillW8benDocIdRoute: FillW8benDocIdRoute,
+  FillW9DocIdRoute: FillW9DocIdRoute,
   MModuleRoute: MModuleRouteWithChildren,
   TicketTicketNoRoute: TicketTicketNoRoute,
   TicketsMapRoute: TicketsMapRoute,
