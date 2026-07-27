@@ -572,6 +572,15 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
     return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
   }, [filtered]);
 
+  // Manager dropdown candidates: real users with a manager-ish or admin
+  // role, not the old hardcoded name list. Stored as free-text (manager_name
+  // matched against real profiles by display name — see resolveTeamLeadOrManager
+  // in src/lib/notifyRouting.ts), so the option value is the display name.
+  const managerCandidates = useMemo(() => {
+    const eligible = users.filter((u) => (u.type || "").toUpperCase() === "ADMIN" || (u.type || "").toUpperCase().includes("MANAGER"));
+    return Array.from(new Set(eligible.map((u) => u.userName).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  }, [users]);
+
   const handleAddUserFormChange = (field: keyof NewUserFormData, value: any) => {
     setNewUserForm((prev) => ({ ...prev, [field]: value }));
   };
@@ -600,8 +609,11 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
   };
 
   const handleCreateUser = async () => {
+    // Admins don't report to a manager in this system, so the Manager field
+    // isn't required when Admin is one of the selected user types.
+    const managerNotRequired = newUserForm.userTypes.includes("ADMIN");
     // Validate required fields
-    if (!newUserForm.loginName || !newUserForm.userName || !newUserForm.email || newUserForm.userTypes.length === 0 || !newUserForm.manager || !newUserForm.assignedBranch || !newUserForm.branchAccess) {
+    if (!newUserForm.loginName || !newUserForm.userName || !newUserForm.email || newUserForm.userTypes.length === 0 || (!managerNotRequired && !newUserForm.manager) || !newUserForm.assignedBranch || !newUserForm.branchAccess) {
       alert("Please fill in all required fields.");
       return;
     }
@@ -933,21 +945,18 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
                 <h3 className="text-sm font-semibold text-slate-300 mb-4">Assignment Details</h3>
                 <div className="grid gap-4 lg:grid-cols-2">
                   <label className="space-y-2 text-sm text-slate-200">
-                    <span className="block text-xs uppercase tracking-[0.08em] text-slate-400">Manager *</span>
+                    <span className="block text-xs uppercase tracking-[0.08em] text-slate-400">
+                      Manager {newUserForm.userTypes.includes("ADMIN") ? "(not required for Admins)" : "*"}
+                    </span>
                     <select
                       className="glass-input w-full text-[11px] px-2 py-1"
                       value={newUserForm.manager}
                       onChange={(e) => handleAddUserFormChange("manager", e.target.value)}
                     >
                       <option value="">Assign manager</option>
-                      <option>Aleena Hii</option>
-                      <option>Daven Hodge</option>
-                      <option>Ian Montesclaros</option>
-                      <option>Jerich Leonard</option>
-                      <option>Jonathon Allen</option>
-                      <option>Justin Parker</option>
-                      <option>Naveen Lakhani</option>
-                      <option>Raul Bayuyos Jr</option>
+                      {managerCandidates.map((name) => (
+                        <option key={name}>{name}</option>
+                      ))}
                     </select>
                   </label>
                   <label className="space-y-2 text-sm text-slate-200">

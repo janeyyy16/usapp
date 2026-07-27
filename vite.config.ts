@@ -5,8 +5,23 @@
 //     error logger plugins, and sandbox detection (port/host/strictPort).
 // You can pass additional config via defineConfig({ vite: { ... } }) if needed.
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
+
+// Windows-only build race: @cloudflare/vite-plugin's client-build phase
+// spawns a local workerd instance that doesn't reliably exit before the
+// very next ssr-build phase starts — and Vite's own out-dir-emptying step
+// (build.emptyOutDir, on by default) then fails with EBUSY trying to rmdir
+// dist/server/.wrangler/state/v3/cache while that process still holds a
+// lock on it. Neither disabling wrangler's state persistence nor
+// relocating it actually stops the directory from being created and raced
+// over — the fix instead sidesteps Vite's crash-prone cleanup entirely:
+// clean dist/ ourselves, once, synchronously, here at config-load time
+// (before any environment's build — and therefore before workerd — has
+// started), then tell both environments not to try emptying it again
+// (see emptyOutDir: false below) so nothing ever attempts to touch a path
+// workerd might still be holding open partway through the build.
+rmSync(resolve(process.cwd(), "dist"), { recursive: true, force: true });
 
 // Read .env directly (avoid importing from "vite" here — it creates a module
 // require-cycle with the lovable config wrapper). We inject SERVER-ONLY secrets
@@ -220,17 +235,82 @@ export default defineConfig({
   tanstackStart: {
     server: { entry: "server" },
   },
+  // Production builds are one-shot — nothing needs local Wrangler state
+  // persisted across runs. See the rmSync/emptyOutDir notes above for the
+  // actual EBUSY fix; this just avoids writing the sqlite cache files into
+  // the build output in the first place.
+  cloudflare: { viteEnvironment: { name: "ssr" }, persistState: false },
   vite: {
     define: SERVER_DEFINE,
+    // Vite's default asset list doesn't include .pdf — needed so the blank
+    // W-4/W-8BEN/W-9 templates (src/assets/*.pdf) resolve to a URL via a
+    // plain `import` the same way the logo/ribbon/footer PNGs already do.
+    assetsInclude: ["**/*.pdf"],
     plugins: [supabaseTokenDevPlugin(), servicePowerDevPlugin(), marconeDevPlugin(), nsaDevPlugin()],
     build: {
       chunkSizeWarningLimit: 800,
+      // See the rmSync call above — we clean dist/ ourselves once, up
+      // front, so Vite's own crash-prone out-dir-emptying step (which
+      // races against a lingering workerd process on Windows) never runs.
+      emptyOutDir: false,
       rollupOptions: {
         output: {
           manualChunks(id) {
             const normalized = id.replace(/\\/g, "/");
 
             if (normalized.includes("/node_modules/")) {
+              // Leaflet is browser-only (touches `window` at module load, not
+              // just when called) and is only ever reached via a dynamic
+              // import() (see getLeaflet() in mapEngine.ts), never a static
+              // import — so it must land in its OWN chunk, separate from the
+              // catch-all "vendor" bucket below. That bucket also holds
+              // genuinely SSR-eager deps (Supabase, Firebase, ...), so if
+              // Leaflet shared it, the whole chunk — Leaflet included — would
+              // still be eagerly evaluated by the server entry, crashing
+              // Cloudflare Workers (no `window`) before any request is even
+              // handled, regardless of the dynamic import() at the call site.
+              if (normalized.includes("/node_modules/leaflet/")) return "leaflet";
+              // Same reasoning as Leaflet above: heic2any's own module does
+              // `import "./libheif"` / `import "./gifshot"` at its top level,
+              // both of which touch `window` at load time, not just when
+              // called. It's only ever reached via a dynamic import() inside
+              // compressImage() (src/lib/imageCompression.ts), itself only
+              // called from a browser file-input handler — but sharing the
+              // "vendor" bucket with SSR-eager deps meant the Cloudflare
+              // Worker crashed on `window is not defined` at startup, before
+              // handling any request, regardless of that dynamic import().
+              // browser-image-compression is bundled alongside it since it's
+              // only ever imported from the same call site, for the same
+              // reason.
+              if (
+                normalized.includes("/node_modules/heic2any/") ||
+                normalized.includes("/node_modules/browser-image-compression/")
+              ) {
+                return "image-compression";
+              }
+              // Same reasoning again: pdfjs-dist touches browser globals
+              // (DOMMatrix, document, Worker, canvas) at module load, and is
+              // only ever reached via a dynamic import() inside the
+              // Fill*Page components (FillW4Page.tsx etc.) — but the
+              // "vendor" bucket is eagerly evaluated by the Cloudflare
+              // Worker regardless of that dynamic import(), so it needs its
+              // own chunk too. Exclude the `?url` worker-asset import
+              // (pdfjs-dist/build/pdf.worker.min.mjs?url) — that one IS
+              // statically imported by the Fill*Page components, and
+              // grouping it into the same chunk as the real dynamically-
+              // imported library code would merge them into one physical
+              // chunk, making the whole thing a static (eager) dependency
+              // again — exactly the bug this isolation exists to prevent.
+              // Left to fall through, it resolves as a plain build-time URL
+              // constant, same as the PNG asset imports elsewhere.
+              if (
+                normalized.includes("/node_modules/pdfjs-dist/") &&
+                !normalized.endsWith("?url")
+              ) {
+                return "pdfjs-dist";
+              }
+              // pdf-lib is left in "vendor": it's pure JS PDF manipulation
+              // with no DOM dependency, so it's SSR-safe.
               if (normalized.includes("/node_modules/@tanstack/")) return "tanstack";
               if (normalized.includes("/node_modules/@radix-ui/")) return "radix-ui";
               if (
@@ -265,7 +345,19 @@ export default defineConfig({
             }
 
             if (normalized.includes("/src/lib/modules.ts")) return "module-registry";
-            if (normalized.includes("/src/lib/")) return "app-lib";
+            // Was its own "app-lib" chunk; merged into "vendor" because the
+            // two had grown into a genuine circular chunk dependency
+            // ("Circular chunk: vendor -> app-lib -> vendor" in the build
+            // log) — several src/lib files are reachable both by static
+            // import (e.g. from ReportHRDaily.tsx) and by dynamic import
+            // (e.g. from auth.tsx) at once, and Rollup has to split the
+            // physical files across the two chunks either way. At runtime
+            // this surfaced as `Uncaught ReferenceError: Cannot access 'X'
+            // before initialization` — a module in one chunk trying to read
+            // an export from the other chunk before its own top-level code
+            // had finished running. Putting them in the same chunk removes
+            // the boundary (and the ordering hazard) entirely.
+            if (normalized.includes("/src/lib/")) return "vendor";
             if (normalized.includes("/src/components/ui/")) return "ui-kit";
             if (normalized.includes("/src/components/")) return "app-components";
             if (normalized.includes("/src/hooks/")) return "app-hooks";

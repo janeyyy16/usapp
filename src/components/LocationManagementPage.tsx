@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
+import type * as Leaflet from "leaflet";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 import { LOCATIONS, normalizeLocationName } from "@/lib/locations";
 import { useAuth } from "@/lib/auth";
-import { lookupGeocode, storeGeocode } from "@/lib/supabase/geocodeCache";
+import { getCompanyMapProvider, type MapProvider } from "@/lib/supabase/companySettings";
+import { loadGoogleMapsScript, getLeaflet, makeGeocoder, attachLeafletResizeFix, createBadgeDivIcon, OSM_TILE_URL, OSM_ATTRIBUTION } from "@/lib/mapEngine";
 import {
   getLocations as sbGetLocations,
   upsertLocation as sbUpsertLocation,
@@ -732,6 +734,112 @@ function matchesQuery(values: Array<string | number | undefined>, query: string)
   return values.join(" ").toLowerCase().includes(query);
 }
 
+/**
+ * Checkbox-list dropdown for the Coverage tab's Location filter — lets the
+ * user view 2+ branches' covered zip codes at once instead of only ever
+ * one. `selected` empty = "All Locations" (mirrors TicketColumnFilter's
+ * empty-set-means-everything convention). Not nested in any
+ * overflow-x-auto/scroll container on this page, so a plain `absolute`
+ * popover (no portal) is safe here — unlike the ticket-list column filter.
+ */
+function LocationCheckboxDropdown({
+  options,
+  selected,
+  onChange,
+}: {
+  options: string[];
+  selected: Set<string>;
+  onChange: (next: Set<string>) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (!wrapperRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const filteredOptions = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter((opt) => opt.toLowerCase().includes(q));
+  }, [options, query]);
+
+  const allSelected = selected.size === 0;
+  const summary = allSelected
+    ? "All Locations"
+    : selected.size === 1
+      ? Array.from(selected)[0]
+      : `${selected.size} locations selected`;
+
+  const toggle = (value: string) => {
+    const next = new Set(selected);
+    if (next.has(value)) next.delete(value);
+    else next.add(value);
+    onChange(next);
+  };
+
+  return (
+    <div ref={wrapperRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="glass-input flex w-full items-center justify-between gap-2 text-left text-[11px] px-2 py-1"
+        aria-haspopup="true"
+        aria-expanded={open}
+      >
+        <span className="truncate">{summary}</span>
+        <span className="text-slate-400">▾</span>
+      </button>
+      {open ? (
+        <div className="absolute left-0 top-full z-50 mt-1 w-64 rounded-md border border-[var(--color-panel-border)] bg-[var(--color-card)] p-2 text-xs text-foreground shadow-2xl">
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search…"
+            className="mb-1 w-full rounded border border-[var(--color-panel-border)] bg-[var(--color-background)] px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-blue-500"
+            autoFocus
+          />
+          <label className="flex items-center gap-2 rounded px-2 py-1 hover:bg-[var(--color-secondary)] cursor-pointer border-b border-[var(--color-panel-border)] mb-1">
+            <input type="checkbox" checked={allSelected} onChange={() => onChange(new Set())} className="accent-blue-500" />
+            <span className="font-semibold">All Locations</span>
+          </label>
+          <div className="max-h-56 overflow-y-auto">
+            {filteredOptions.length === 0 ? (
+              <div className="px-2 py-2 text-muted-foreground italic">No matches</div>
+            ) : (
+              filteredOptions.map((opt) => (
+                <label key={opt} className="flex items-center gap-2 rounded px-2 py-1 hover:bg-[var(--color-secondary)] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!allSelected && selected.has(opt)}
+                    onChange={() => toggle(opt)}
+                    className="accent-blue-500"
+                  />
+                  <span className="truncate" title={opt}>{opt}</span>
+                </label>
+              ))
+            )}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function resolveCoverageLocation(query: string, locationRows: LocationRow[], coverageRows: CoverageRow[]) {
   const normalizedQuery = query.trim().toLowerCase();
   if (!normalizedQuery) return "";
@@ -843,36 +951,21 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
           }
           console.log(`📍 Coverage seed complete: ${inserted} rows inserted.`);
           cov = await sbGetCoverage();
-        } else if (DEFAULT_COVERAGE_ROWS.length > 0) {
-          // Top-up: if some branches are present in Supabase but others
-          // are missing (e.g. the original seed pre-dated newer CSVs),
-          // insert only the missing branches' rows. Compare by normalised
-          // location name so "Jackson, MS" matches "Jackson,MS".
-          const presentByLocation = new Set(
-            cov.map((r) => normalizeLocationName(r.location).toLowerCase()),
-          );
-          const missingRows = DEFAULT_COVERAGE_ROWS.filter(
-            (r) => !presentByLocation.has(normalizeLocationName(r.location).toLowerCase()),
-          );
-          if (missingRows.length > 0) {
-            const missingBranches = Array.from(
-              new Set(missingRows.map((r) => normalizeLocationName(r.location))),
-            ).join(", ");
-            console.log(`📍 Topping up coverage for missing branches (${missingRows.length} rows): ${missingBranches}`);
-            const chunkSize = 500;
-            let inserted = 0;
-            for (let i = 0; i < missingRows.length; i += chunkSize) {
-              try {
-                const saved = await sbInsertCoverageBulk(missingRows.slice(i, i + chunkSize));
-                inserted += saved.length;
-              } catch (e) {
-                console.error("top-up coverage chunk failed:", e);
-              }
-            }
-            console.log(`📍 Coverage top-up complete: ${inserted} rows inserted.`);
-            cov = await sbGetCoverage();
-          }
         }
+        // NOTE: there used to be a "top up missing branches" step here that
+        // compared this fetch's locations against DEFAULT_COVERAGE_ROWS and
+        // bulk-inserted any branch it didn't see. sbGetCoverage() had no
+        // pagination and Supabase silently caps a plain select at 1000 rows,
+        // so on a populated table that check almost always saw only a
+        // handful of branches (whichever sorted lowest by zip code) and
+        // concluded every other branch was "missing" — re-inserting their
+        // entire bundled CSV on every single page load/remount. That ran
+        // repeatedly enough (across 2026-06-17, 06-29, and 07-15) to bloat
+        // location_mgmt_coverage from ~6k real rows to 316,663. Removed
+        // rather than made "safer" — every real branch already has its
+        // correct data now, so there's nothing left for it to legitimately
+        // top up; a genuinely new branch's zips belong in the Coverage tab's
+        // own Import CSV button, an explicit action, not a silent one on load.
 
         if (!cancelled) {
           if (locs.length) {
@@ -955,6 +1048,15 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
   const [newPartRow, setNewPartRow] = useState<PartAddressRow>({ id: "", name: "", address1: "", address2: "", city: "", state: "", zipCode: "", location: "" });
   const [newCoverageRow, setNewCoverageRow] = useState<CoverageRow>(() => buildEmptyCoverageRow());
   const [selectedCoverageLocation, setSelectedCoverageLocation] = useState(() => DEFAULT_COVERAGE_ROWS[0]?.location ?? locationRows[0]?.location ?? "Birmingham");
+  // Which branch(es) the Coverage tab's table + map are filtered to. Empty
+  // set = "All Locations" (mirrors TicketColumnFilter's convention). Kept
+  // separate from selectedCoverageLocation, which stays a single value used
+  // as the target branch when adding a new zip code row. Defaults to a
+  // single branch (not "All") so the tab's first load doesn't immediately
+  // fetch every branch's zips at once — the user opts into "All" explicitly.
+  const [viewLocations, setViewLocations] = useState<Set<string>>(
+    () => new Set([DEFAULT_COVERAGE_ROWS[0]?.location ?? locationRows[0]?.location ?? "Birmingham"]),
+  );
   const [coverageMapReady, setCoverageMapReady] = useState(false);
   const [coverageMapLoading, setCoverageMapLoading] = useState(false);
   const [coverageMapError, setCoverageMapError] = useState<string | null>(null);
@@ -966,6 +1068,19 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
   const coverageGeocodeCacheRef = useRef(new Map<string, MapZipGeometry | null>());
   const coverageZipGeoJsonCacheRef = useRef(new Map<string, CoverageZipGeoJson | null>());
   const coverageOverlayRefs = useRef<any[]>([]);
+
+  // Company-wide map provider (see migration 0050) — set from /m/admin.
+  const [mapProvider, setMapProvider] = useState<MapProvider | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getCompanyMapProvider().then((p) => { if (!cancelled) setMapProvider(p); });
+    return () => { cancelled = true; };
+  }, []);
+  const leafletCoverageContainerRef = useRef<HTMLDivElement | null>(null);
+  const leafletCoverageMapRef = useRef<Leaflet.Map | null>(null);
+  const leafletCoverageLayerRef = useRef<Leaflet.LayerGroup | null>(null);
+  const leafletZipLabelMarkersRef = useRef<Leaflet.Marker[]>([]);
+  const [L, setL] = useState<typeof Leaflet | null>(null);
 
   const filteredLocations = useMemo(() => {
     const query = locationSearch.trim().toLowerCase();
@@ -1003,18 +1118,19 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
     // match a "Memphis" dropdown pick.
     const norm = (v: string | null | undefined) =>
       normalizeLocationName(String(v ?? "")).toLowerCase();
-    const target = norm(selectedCoverageLocation);
+    const targets = new Set(Array.from(viewLocations).map(norm));
+    const matchesLocation = (row: CoverageRow) => targets.size === 0 || targets.has(norm(row.location));
     const fromSupabase = coverageRows.filter(
-      (row) => norm(row.location) === target &&
+      (row) => matchesLocation(row) &&
         matchesQuery([row.id, row.zipCode, row.city, row.location, row.selfSchedule, row.daysLater, row.tierCode], query),
     );
-    if (fromSupabase.length > 0 || !target) return fromSupabase;
-    // Fall back to bundled CSV rows if Supabase has nothing for this branch.
+    if (fromSupabase.length > 0) return fromSupabase;
+    // Fall back to bundled CSV rows if Supabase has nothing matching yet.
     return DEFAULT_COVERAGE_ROWS.filter(
-      (row) => norm(row.location) === target &&
+      (row) => matchesLocation(row) &&
         matchesQuery([row.id, row.zipCode, row.city, row.location, row.selfSchedule, row.daysLater, row.tierCode], query),
     );
-  }, [coverageRows, coverageSearch, selectedCoverageLocation]);
+  }, [coverageRows, coverageSearch, viewLocations]);
 
   const selectedLocationRow = useMemo(
     () => findLocationByName(locationRows, newLocationRow.officeLocation || newLocationRow.location),
@@ -1068,6 +1184,7 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
     const matchedLocation = resolveCoverageLocation(locationSearch, locationRows, coverageRows);
     if (matchedLocation && matchedLocation !== selectedCoverageLocation) {
       setSelectedCoverageLocation(matchedLocation);
+      setViewLocations(new Set([matchedLocation]));
       setNewCoverageRow((current) => ({ ...current, location: matchedLocation }));
     }
   }, [activeTab, coverageRows, locationRows, locationSearch, selectedCoverageLocation]);
@@ -1098,6 +1215,7 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
     // Locations tab.
     if (activeTab !== "coverage" && selectedCoverageLocation !== selectedLocationRow.location) {
       setSelectedCoverageLocation(selectedLocationRow.location);
+      setViewLocations(new Set([selectedLocationRow.location]));
     }
   }, [activeTab, locationRows, selectedCoverageLocation, selectedLocationRow]);
 
@@ -1105,155 +1223,125 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
     () => {
       const norm = (v: string | null | undefined) =>
         normalizeLocationName(String(v ?? "")).toLowerCase();
-      const target = norm(selectedCoverageLocation);
-      if (!target) return [] as CoverageRow[];
-      const fromSupabase = coverageRows.filter((row) => norm(row.location) === target);
+      // Empty viewLocations = "All Locations" — every branch's zips feed the map.
+      const targets = new Set(Array.from(viewLocations).map(norm));
+      const matchesLocation = (row: CoverageRow) => targets.size === 0 || targets.has(norm(row.location));
+      const fromSupabase = coverageRows.filter(matchesLocation);
       if (fromSupabase.length > 0) return fromSupabase;
       // Fall back to the CSVs bundled with the app so the map still
       // draws polygons when Supabase is missing rows for a branch
       // (e.g. the original seed pre-dated newer CSVs, or the row
       // got stored under a slightly different spelling).
-      return DEFAULT_COVERAGE_ROWS.filter((row) => norm(row.location) === target);
+      return DEFAULT_COVERAGE_ROWS.filter(matchesLocation);
     },
-    [coverageRows, selectedCoverageLocation],
+    [coverageRows, viewLocations],
   );
 
-  const minimumReadableZoom = selectedCoverageLocation === "Memphis" ? 6 : 7;
+  // A single non-Memphis branch gets the tighter default zoom; Memphis
+  // (already wide) and any multi-branch/All-Locations view default to the
+  // more zoomed-out level so a wider area starts out fully visible.
+  const singleViewLocation = viewLocations.size === 1 ? Array.from(viewLocations)[0] : null;
+  const minimumReadableZoom = !singleViewLocation || singleViewLocation === "Memphis" ? 6 : 7;
+  const coverageLocationSummary = viewLocations.size === 0
+    ? "All Locations"
+    : viewLocations.size === 1
+      ? Array.from(viewLocations)[0]
+      : `${viewLocations.size} locations selected`;
 
   useEffect(() => {
-    if (activeTab !== "coverage") return;
-
+    if (activeTab !== "coverage" || mapProvider !== "google") return;
     if (!GOOGLE_MAPS_API_KEY) {
       setCoverageMapError("Set VITE_GOOGLE_MAPS_API_KEY to enable the Google coverage map.");
       return;
     }
 
     let cancelled = false;
-
-    const initializeMap = () => {
-      if (cancelled || !coverageMapContainerRef.current) return;
-      const maps = (window as Window & { google?: any }).google?.maps;
-      if (!maps) return;
-
-      const MapConstructor = maps.Map;
-      const mapTypeId = maps.MapTypeId?.ROADMAP ?? "roadmap";
-
-      if (typeof MapConstructor !== "function") {
-        if (!cancelled) setCoverageMapError("Google Maps did not expose a Map constructor.");
-        return;
-      }
-
-      // Always re-create the map if the container div has changed (tab remount)
-      if (
-        !coverageMapRef.current ||
-        coverageMapRef.current.getDiv() !== coverageMapContainerRef.current
-      ) {
-        coverageMapRef.current = new MapConstructor(coverageMapContainerRef.current, {
+    loadGoogleMapsScript()
+      .then(() => {
+        if (cancelled || !coverageMapContainerRef.current) return;
+        const maps = (window as Window & { google?: any }).google?.maps;
+        if (!maps) return;
+        coverageMapRef.current = new maps.Map(coverageMapContainerRef.current, {
           center: { lat: 37.0902, lng: -95.7129 },
           zoom: 4,
-          mapTypeId,
+          mapTypeId: maps.MapTypeId?.ROADMAP ?? "roadmap",
           disableDefaultUI: false,
           zoomControl: true,
           mapTypeControl: true,
           gestureHandling: "greedy",
         });
-      }
-
-      if (!cancelled) {
         setCoverageMapReady(true);
         setCoverageMapError(null);
-      }
-    };
-
-    const existingScript = document.querySelector<HTMLScriptElement>('script[data-google-maps="location-coverage"]');
-    if ((window as Window & { google?: any }).google?.maps) {
-      initializeMap();
-    } else if (existingScript) {
-      (window as Window & { initCoverageMap?: () => void }).initCoverageMap = initializeMap;
-      existingScript.addEventListener(
-        "error",
-        () => {
-          if (!cancelled) setCoverageMapError("Google Maps failed to load.");
-        },
-        { once: true },
-      );
-    } else {
-      (window as Window & { initCoverageMap?: () => void }).initCoverageMap = initializeMap;
-      const script = document.createElement("script");
-      script.dataset.googleMaps = "location-coverage";
-      script.async = true;
-      script.defer = true;
-      script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}&loading=async&v=weekly&callback=initCoverageMap`;
-      script.onerror = () => {
-        if (!cancelled) setCoverageMapError("Google Maps failed to load.");
-      };
-      document.head.appendChild(script);
-    }
+      })
+      .catch(() => { if (!cancelled) setCoverageMapError("Google Maps failed to load."); });
 
     return () => {
       cancelled = true;
       // Reset so map re-attaches correctly on next tab visit
       coverageMapRef.current = null;
       setCoverageMapReady(false);
-      delete (window as Window & { initCoverageMap?: () => void }).initCoverageMap;
     };
-  }, [activeTab]);
+  }, [activeTab, mapProvider]);
+
+  // Load the Leaflet module (client-only) once it's the active provider.
+  useEffect(() => {
+    if (mapProvider !== "leaflet" || L) return;
+    let cancelled = false;
+    getLeaflet().then((mod) => { if (!cancelled) setL(mod); });
+    return () => { cancelled = true; };
+  }, [mapProvider, L]);
+
+  // Leaflet counterpart of the effect above.
+  useEffect(() => {
+    if (activeTab !== "coverage" || mapProvider !== "leaflet" || !L || !leafletCoverageContainerRef.current) return;
+    const container = leafletCoverageContainerRef.current;
+    const map = L.map(container, {
+      center: [37.0902, -95.7129],
+      zoom: 4,
+    });
+    L.tileLayer(OSM_TILE_URL, { attribution: OSM_ATTRIBUTION, maxZoom: 19 }).addTo(map);
+    leafletCoverageLayerRef.current = L.layerGroup().addTo(map);
+    leafletCoverageMapRef.current = map;
+    const detachResizeFix = attachLeafletResizeFix(map, container);
+    setCoverageMapReady(true);
+    setCoverageMapError(null);
+    return () => {
+      detachResizeFix();
+      map.remove();
+      leafletCoverageMapRef.current = null;
+      leafletCoverageLayerRef.current = null;
+      setCoverageMapReady(false);
+    };
+  }, [activeTab, mapProvider, L]);
 
   useEffect(() => {
-    if (activeTab !== "coverage" || !coverageMapReady || !coverageMapRef.current) return;
-
+    if (activeTab !== "coverage" || !coverageMapReady || !mapProvider) return;
+    if (mapProvider === "leaflet" && !L) return;
+    const activeMap = mapProvider === "google" ? coverageMapRef.current : leafletCoverageMapRef.current;
+    if (!activeMap) return;
     const maps = (window as Window & { google?: any }).google?.maps;
-    if (!maps) return;
+    if (mapProvider === "google" && !maps) return;
 
     coverageOverlayRefs.current.forEach((overlay) => overlay.setMap(null));
     coverageOverlayRefs.current = [];
+    leafletCoverageLayerRef.current?.clearLayers();
 
-    const mapData = coverageMapRef.current.data as any;
-    mapData.forEach((feature: any) => mapData.remove(feature));
+    const mapData = mapProvider === "google" ? (coverageMapRef.current.data as any) : null;
+    mapData?.forEach((feature: any) => mapData.remove(feature));
 
     let cancelled = false;
-    const bounds = new maps.LatLngBounds();
-    const geocoder = new maps.Geocoder();
+    const bounds = mapProvider === "google" ? new maps.LatLngBounds() : L!.latLngBounds([]);
+    const geocode = makeGeocoder(mapProvider);
 
-    const geocodeZip = (zipCode: string) =>
-      new Promise<MapZipGeometry | null>((resolve) => {
-        geocoder.geocode({ address: `${zipCode}, USA` }, (results: any, status: string) => {
-          if (status === "OK" && results?.[0]?.geometry?.location) {
-            const location = results[0].geometry.location;
-            const viewport = results[0].geometry.viewport;
-            resolve({
-              center: { lat: location.lat(), lng: location.lng() },
-              viewport: viewport
-                ? {
-                    north: viewport.getNorthEast().lat(),
-                    east: viewport.getNorthEast().lng(),
-                    south: viewport.getSouthWest().lat(),
-                    west: viewport.getSouthWest().lng(),
-                  }
-                : null,
-            });
-            return;
-          }
-          resolve(null);
-        });
-      });
-
+    // fetchZipPoint keeps the existing coverageGeocodeCacheRef as a fast
+    // in-memory layer in front of makeGeocoder's own cache-then-provider
+    // logic (Supabase cache, then Google Geocoder or Geoapify per provider).
     const fetchZipPoint = async (zipCode: string): Promise<MapZipGeometry | null> => {
       if (coverageGeocodeCacheRef.current.has(zipCode)) {
         return coverageGeocodeCacheRef.current.get(zipCode) ?? null;
       }
-      // Check Supabase persistent cache first — free and instant
-      const addr = `${zipCode}, USA`;
-      const cached = await lookupGeocode(addr);
-      if (cached) {
-        const point: MapZipGeometry = { center: cached, viewport: null };
-        coverageGeocodeCacheRef.current.set(zipCode, point);
-        return point;
-      }
-      // Miss — call Google Geocoding API
-      const point = await geocodeZip(zipCode);
-      // Persist to Supabase so we never pay for this zip again
-      if (point) void storeGeocode(addr, point.center);
+      const center = await geocode(`${zipCode}, USA`);
+      const point: MapZipGeometry | null = center ? { center, viewport: null } : null;
       coverageGeocodeCacheRef.current.set(zipCode, point);
       return point;
     };
@@ -1296,123 +1384,183 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
       "#2f855a",
       "#3f8f7a",
     ];
+    const fillColorFor = (zip: string) => {
+      const index = uniqueZipCodes.indexOf(zip);
+      return fillPalette[(index >= 0 ? index : 0) % fillPalette.length];
+    };
 
     setCoverageMapLoading(true);
     setCoverageMapError(null);
 
-    mapData.setStyle((feature: any) => {
-      const zip = String(feature.getProperty("ZCTA5") ?? "");
-      const index = uniqueZipCodes.indexOf(zip);
-      const fillColor = fillPalette[(index >= 0 ? index : 0) % fillPalette.length];
-      return {
-        fillColor,
+    if (mapProvider === "google") {
+      mapData.setStyle((feature: any) => ({
+        fillColor: fillColorFor(String(feature.getProperty("ZCTA5") ?? "")),
         fillOpacity: 0.35,
         strokeColor: "#0f172a",
         strokeOpacity: 0.6,
         strokeWeight: 1,
-      };
-    });
+      }));
+    } else {
+      leafletZipLabelMarkersRef.current = [];
+    }
+
+    const resetToDefaultView = (message: string) => {
+      setCoverageMapLoading(false);
+      setCoverageMapError(message);
+      if (mapProvider === "google") {
+        coverageMapRef.current.setCenter({ lat: 37.0902, lng: -95.7129 });
+        coverageMapRef.current.setZoom(4);
+      } else {
+        leafletCoverageMapRef.current?.setView([37.0902, -95.7129], 4);
+      }
+    };
 
     if (!uniqueZipCodes.length) {
-      setCoverageMapLoading(false);
-      coverageMapRef.current.setCenter({ lat: 37.0902, lng: -95.7129 });
-      coverageMapRef.current.setZoom(4);
-      setCoverageMapError("No geocodable zip codes found for this location.");
+      resetToDefaultView("No geocodable zip codes found for this location.");
       return () => {
         cancelled = true;
         coverageOverlayRefs.current.forEach((overlay) => overlay.setMap(null));
         coverageOverlayRefs.current = [];
-        mapData.forEach((feature: any) => mapData.remove(feature));
+        mapData?.forEach((feature: any) => mapData.remove(feature));
       };
     }
 
     let pendingZipCount = uniqueZipCodes.length;
     let hasAnyValidPoints = false;
+    let firstPointHandled = false;
 
-    uniqueZipCodes.forEach((zipCode, index) => {
-      void (async () => {
-        const [point, geojson] = await Promise.all([fetchZipPoint(zipCode), fetchZipGeoJson(zipCode)]);
-        if (cancelled || !coverageMapRef.current) return;
+    // "All Locations" can mean 500+ unique zips at once — firing every
+    // fetchZipPoint/fetchZipGeoJson pair simultaneously hammers the Census
+    // TIGERweb boundary service (and the geocoders) with a burst far bigger
+    // than any single branch ever produced. A small worker pool keeps the
+    // same per-zip logic below but caps how many are in flight together.
+    const ZIP_FETCH_CONCURRENCY = 12;
+    let nextZipIndex = 0;
+
+    const processZip = async (zipCode: string) => {
+      const [point, geojson] = await Promise.all([fetchZipPoint(zipCode), fetchZipGeoJson(zipCode)]);
+      if (cancelled || !activeMap) return;
 
         if (point) {
           hasAnyValidPoints = true;
-          bounds.extend(point.center);
+          bounds.extend(mapProvider === "google" ? point.center : [point.center.lat, point.center.lng]);
 
-          // Plot a clickable, label-only marker at the centroid of every
-          // zip so dispatchers can read which polygon is which without
-          // hovering. A transparent 1×1 PNG keeps the marker invisible;
-          // the `label` carries the zip code text directly. We push the
-          // marker onto coverageOverlayRefs so the next render clears it.
-          try {
-            const marker = new maps.Marker({
-              position: point.center,
-              map: coverageMapRef.current,
-              clickable: false,
-              visible: showZipLabels,
-              icon: {
-                // 1×1 transparent gif — keeps the marker dot from rendering
-                // while still letting Google Maps position the label.
-                url: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
-                scaledSize: new maps.Size(1, 1),
-                anchor: new maps.Point(0, 0),
-                labelOrigin: new maps.Point(0, 0),
-              },
-              label: {
-                text: zipCode,
-                color: "#0f172a",
-                fontSize: "11px",
-                fontWeight: "700",
-                className: "coverage-zip-label",
-              },
-              zIndex: 1000,
-            });
-            coverageOverlayRefs.current.push(marker);
-          } catch (err) {
-            // Marker overlay is purely decorative — if Google Maps refuses
-            // it (e.g. AdvancedMarker migration), the polygon still renders.
-            console.warn(`coverage zip label failed for ${zipCode}:`, err);
+          // Plot a label-only marker at the centroid of every zip so
+          // dispatchers can read which polygon is which without hovering.
+          if (mapProvider === "google") {
+            try {
+              const marker = new maps.Marker({
+                position: point.center,
+                map: coverageMapRef.current,
+                clickable: false,
+                visible: showZipLabels,
+                icon: {
+                  // 1×1 transparent gif — keeps the marker dot from rendering
+                  // while still letting Google Maps position the label.
+                  url: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+                  scaledSize: new maps.Size(1, 1),
+                  anchor: new maps.Point(0, 0),
+                  labelOrigin: new maps.Point(0, 0),
+                },
+                label: {
+                  text: zipCode,
+                  color: "#0f172a",
+                  fontSize: "11px",
+                  fontWeight: "700",
+                  className: "coverage-zip-label",
+                },
+                zIndex: 1000,
+              });
+              coverageOverlayRefs.current.push(marker);
+            } catch (err) {
+              // Marker overlay is purely decorative — if Google Maps refuses
+              // it (e.g. AdvancedMarker migration), the polygon still renders.
+              console.warn(`coverage zip label failed for ${zipCode}:`, err);
+            }
+          } else if (leafletCoverageLayerRef.current) {
+            const marker = L!.marker([point.center.lat, point.center.lng], {
+              icon: createBadgeDivIcon(
+                L!,
+                `<span style="font-size:11px;font-weight:700;color:#0f172a;white-space:nowrap;">${zipCode}</span>`,
+                { className: "coverage-zip-label" },
+              ),
+              interactive: false,
+              opacity: showZipLabels ? 1 : 0,
+            }).addTo(leafletCoverageLayerRef.current);
+            leafletZipLabelMarkersRef.current.push(marker);
           }
         }
 
         if (geojson) {
-          mapData.addGeoJson(geojson);
+          if (mapProvider === "google") {
+            mapData.addGeoJson(geojson);
+          } else if (leafletCoverageLayerRef.current) {
+            L!.geoJSON(geojson, {
+              style: { fillColor: fillColorFor(zipCode), fillOpacity: 0.35, color: "#0f172a", opacity: 0.6, weight: 1 },
+            }).addTo(leafletCoverageLayerRef.current);
+          }
         }
 
         pendingZipCount -= 1;
 
-        // On first resolved point, immediately zoom to the area so the map isn't blank
-        if (index === 0 && point) {
-          coverageMapRef.current.setCenter(point.center);
-          coverageMapRef.current.setZoom(Math.max(minimumReadableZoom, 8));
+        // On the first resolved point (whichever zip happens to finish
+        // first — the worker pool no longer guarantees array order),
+        // immediately zoom to the area so the map isn't blank.
+        if (!firstPointHandled && point) {
+          firstPointHandled = true;
+          if (mapProvider === "google") {
+            coverageMapRef.current.setCenter(point.center);
+            coverageMapRef.current.setZoom(Math.max(minimumReadableZoom, 8));
+          } else {
+            leafletCoverageMapRef.current?.setView([point.center.lat, point.center.lng], Math.max(minimumReadableZoom, 8));
+          }
         }
 
         if (pendingZipCount === 0) {
           setCoverageMapLoading(false);
-          if (hasAnyValidPoints && !bounds.isEmpty()) {
-            coverageMapRef.current.fitBounds(bounds, { padding: 40 });
-            maps.event.addListenerOnce(coverageMapRef.current, "idle", () => {
-              if (!coverageMapRef.current) return;
-              const currentZoom = coverageMapRef.current.getZoom?.();
-              if (typeof currentZoom === "number" && currentZoom < minimumReadableZoom) {
-                coverageMapRef.current.setZoom(minimumReadableZoom);
-              }
-            });
+          // Google's LatLngBounds has isEmpty(); Leaflet's has no such
+          // method and uses isValid() instead (true once at least one
+          // point has been extended into it).
+          const boundsHasPoints = mapProvider === "google" ? !bounds.isEmpty() : bounds.isValid();
+          if (hasAnyValidPoints && boundsHasPoints) {
+            if (mapProvider === "google") {
+              coverageMapRef.current.fitBounds(bounds, { padding: 40 });
+              maps.event.addListenerOnce(coverageMapRef.current, "idle", () => {
+                if (!coverageMapRef.current) return;
+                const currentZoom = coverageMapRef.current.getZoom?.();
+                if (typeof currentZoom === "number" && currentZoom < minimumReadableZoom) {
+                  coverageMapRef.current.setZoom(minimumReadableZoom);
+                }
+              });
+            } else if (leafletCoverageMapRef.current) {
+              leafletCoverageMapRef.current.fitBounds(bounds, { padding: [40, 40] });
+              const currentZoom = leafletCoverageMapRef.current.getZoom();
+              if (currentZoom < minimumReadableZoom) leafletCoverageMapRef.current.setZoom(minimumReadableZoom);
+            }
           } else {
-            coverageMapRef.current.setCenter({ lat: 37.0902, lng: -95.7129 });
-            coverageMapRef.current.setZoom(4);
-            setCoverageMapError("No geocodable zip codes found for this location.");
+            resetToDefaultView("No geocodable zip codes found for this location.");
           }
         }
-      })();
-    });
+    };
+
+    const worker = async () => {
+      while (nextZipIndex < uniqueZipCodes.length) {
+        if (cancelled) return;
+        const zipCode = uniqueZipCodes[nextZipIndex++];
+        await processZip(zipCode);
+      }
+    };
+    void Promise.all(
+      Array.from({ length: Math.min(ZIP_FETCH_CONCURRENCY, uniqueZipCodes.length) }, worker),
+    );
 
     return () => {
       cancelled = true;
       coverageOverlayRefs.current.forEach((overlay) => overlay.setMap(null));
       coverageOverlayRefs.current = [];
-      mapData.forEach((feature: any) => mapData.remove(feature));
+      mapData?.forEach((feature: any) => mapData.remove(feature));
     };
-  }, [activeTab, coverageMapReady, minimumReadableZoom, selectedLocationCoverage, coverageGeocodeCacheRef, coverageMapRef, coverageOverlayRefs, coverageZipGeoJsonCacheRef, selectedCoverageLocation]);
+  }, [activeTab, coverageMapReady, mapProvider, minimumReadableZoom, selectedLocationCoverage, coverageGeocodeCacheRef, coverageMapRef, coverageOverlayRefs, coverageZipGeoJsonCacheRef, selectedCoverageLocation, L]);
 
   // Toggle the zip-code labels on/off without rebuilding the map. The map
   // effect above tracks every label marker in coverageOverlayRefs; we just
@@ -1424,6 +1572,7 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
         overlay.setVisible(showZipLabels);
       }
     });
+    leafletZipLabelMarkersRef.current.forEach((marker) => marker.setOpacity(showZipLabels ? 1 : 0));
   }, [showZipLabels]);
 
   const addLocationRow = () => {
@@ -1844,7 +1993,7 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
                           const isAssignedHere = tech.assignedBranch && newLocationRow.location && tech.assignedBranch === newLocationRow.location;
                           return (
                             <label key={tech.id || tech.name} className="flex items-start gap-2 rounded-md border border-white/10 bg-white/[0.02] px-2 py-1 text-xs text-slate-200">
-                              <input type="checkbox" className="mt-0.5" checked={checked} onChange={() => setNewLocationRow((current) => ({ ...current, coveredTechnicians: toggleStringValue(current.coveredTechnicians, tech.name) }))} />
+                              <input type="checkbox" className="mt-0.5" checked={checked} onChange={() => setNewLocationRow((current) => ({ ...current, coveredTechnicians: toggleListValue(current.coveredTechnicians, tech.name) }))} />
                               <span className="flex-1">
                                 <span>{tech.name}</span>
                                 {tech.assignedBranch ? (
@@ -1942,6 +2091,7 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
                         type="button"
                         onClick={() => {
                           setSelectedCoverageLocation(row.location);
+                          setViewLocations(new Set([row.location]));
                           setNewCoverageRow(buildEmptyCoverageRow(row.location));
                           setActiveTab("coverage");
                         }}
@@ -2041,7 +2191,7 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <h2 className="text-2xl font-bold tracking-tight">Covered Zip Codes</h2>
-              <p className="mt-1 text-sm text-slate-300">Location: {selectedCoverageLocation || "Select a location"}</p>
+              <p className="mt-1 text-sm text-slate-300">Location: {coverageLocationSummary}</p>
             </div>
           </div>
 
@@ -2050,22 +2200,24 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
               <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
                 <label className="space-y-2 text-sm text-slate-200">
                   <span className="block text-xs uppercase tracking-[0.08em] text-slate-400">Location</span>
-                  <select
-                    value={selectedCoverageLocation}
-                    onChange={(event) => {
-                      const location = event.target.value;
-                      setSelectedCoverageLocation(location);
-                      setNewCoverageRow((current) => ({ ...current, location }));
-                      setNewLocationRow((current) => applyOfficeLocationSelection(current, location, locationRows));
+                  <LocationCheckboxDropdown
+                    options={coverageLocationOptions}
+                    selected={viewLocations}
+                    onChange={(next) => {
+                      setViewLocations(next);
+                      // Add-row / office-location defaulting still needs a
+                      // single target branch — only update it when exactly
+                      // one location is checked. With 0 (All) or 2+ checked,
+                      // it just keeps whatever it last was; the Add form's
+                      // own Location input can always be retyped by hand.
+                      if (next.size === 1) {
+                        const [only] = Array.from(next);
+                        setSelectedCoverageLocation(only);
+                        setNewCoverageRow((current) => ({ ...current, location: only }));
+                        setNewLocationRow((current) => applyOfficeLocationSelection(current, only, locationRows));
+                      }
                     }}
-                    className="glass-input w-full text-[11px] px-2 py-1"
-                  >
-                    {coverageLocationOptions.map((location) => (
-                      <option key={location} value={location}>
-                        {location}
-                      </option>
-                    ))}
-                  </select>
+                  />
                 </label>
                 <label className="space-y-2 text-sm text-slate-200">
                   <span className="block text-xs uppercase tracking-[0.08em] text-slate-400">Zip Code</span>
@@ -2146,7 +2298,7 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <div className="text-xs uppercase tracking-[0.18em] text-slate-400">Coverage Map</div>
-                  <h3 className="mt-2 text-xl font-semibold text-white">{selectedCoverageLocation || "No location selected"}</h3>
+                  <h3 className="mt-2 text-xl font-semibold text-white">{coverageLocationSummary}</h3>
                 </div>
                 {/* Toggle whether each polygon's zip code is rendered as a
                     pill label at its centroid. Useful for screenshots and
@@ -2164,7 +2316,11 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
                 </label>
               </div>
               <div className="relative mt-3 min-h-[580px] overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-blue-500/10 via-slate-900 to-cyan-500/10">
-                <div ref={coverageMapContainerRef} className="google-map-canvas" aria-label="Google coverage map" />
+                {mapProvider === "leaflet" ? (
+                  <div ref={leafletCoverageContainerRef} className="google-map-canvas" aria-label="Coverage map" />
+                ) : (
+                  <div ref={coverageMapContainerRef} className="google-map-canvas" aria-label="Coverage map" />
+                )}
                 {(!coverageMapReady || coverageMapLoading) && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-slate-950/75 text-center backdrop-blur-sm">
                     <div className="relative flex h-14 w-14 items-center justify-center">
@@ -2172,7 +2328,7 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
                       <span className="absolute inline-block h-8 w-8 animate-spin-fast animate-spin-reverse rounded-full border-4 border-white/10 border-t-cyan-400" />
                     </div>
                     <div className="text-sm font-medium text-slate-200">
-                      {coverageMapReady ? `Loading ${selectedCoverageLocation} coverage…` : "Loading Google coverage map…"}
+                      {coverageMapReady ? `Loading ${selectedCoverageLocation} coverage…` : "Loading coverage map…"}
                     </div>
                     {coverageMapError ? <div className="max-w-sm text-xs text-rose-300">{coverageMapError}</div> : null}
                   </div>

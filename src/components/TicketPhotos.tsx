@@ -6,6 +6,21 @@ import {
   deleteTicketPhoto,
   type TicketPhoto,
 } from "@/lib/firebase/storage";
+import { compressImage, validateImageFile, formatBytes } from "@/lib/imageCompression";
+
+const MAX_PHOTOS = 10;
+
+interface UploadQueueItem {
+  id: string;
+  fileName: string;
+  status: "compressing" | "uploading" | "done" | "error";
+  progress: number;
+  originalSize: number;
+  originalDims?: { width: number; height: number };
+  compressedSize?: number;
+  compressedDims?: { width: number; height: number };
+  error?: string;
+}
 
 /**
  * Ticket photo gallery + uploader. Photos live in Firebase Storage under
@@ -34,16 +49,18 @@ export function TicketPhotos({
   const { companyId, ready } = useAuth();
   const [photos, setPhotos] = useState<TicketPhoto[]>([]);
   const [loading, setLoading] = useState(true);
-  const [uploading, setUploading] = useState(false);
+  const [uploadQueue, setUploadQueue] = useState<UploadQueueItem[]>([]);
+  const uploading = uploadQueue.some((q) => q.status === "compressing" || q.status === "uploading");
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<TicketPhoto | null>(null);
-  // The visit number to tag the next batch of uploads with. Defaults to the
-  // newest visit if the parent passed any options.
+  const [zoomScale, setZoomScale] = useState(1);
+  const [zoomPos, setZoomPos] = useState({ x: 0, y: 0 });
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const lastTouchDist = useRef<number | null>(null);
   const [selectedVisitNo, setSelectedVisitNo] = useState<string>(() => (visitOptions && visitOptions.length ? visitOptions[visitOptions.length - 1] : ""));
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const cid = companyId || "COMP001";
-  // Storage sub-path. Keep backward compatible: no category => the ticket root.
   const ticketPath = category ? `${ticketNo}/${category}` : ticketNo;
 
   useEffect(() => {
@@ -66,9 +83,6 @@ export function TicketPhotos({
 
   const isImage = (name: string) => /\.(png|jpe?g|gif|webp|bmp|heic|heif)$/i.test(name);
 
-  // Format the upload timestamp the same way SP's running notes are displayed
-  // — local time, short date + time, with no seconds. Falls back to "—" when
-  // the metadata isn't available.
   const formatUploadedAt = (iso: string | undefined): string => {
     if (!iso) return "—";
     const d = new Date(iso);
@@ -82,32 +96,92 @@ export function TicketPhotos({
     });
   };
 
+  const updateQueueItem = (id: string, patch: Partial<UploadQueueItem>) => {
+    setUploadQueue((prev) => prev.map((q) => (q.id === id ? { ...q, ...patch } : q)));
+  };
+
+  // Compresses (in parallel across files, via a Web Worker per
+  // browser-image-compression) then uploads each selected photo. Each
+  // file's pipeline is wrapped in its own try/catch so one failure never
+  // stops the rest of the batch — the previous version awaited each file
+  // sequentially inside a single try/catch, which silently abandoned the
+  // remaining files the moment any one of them threw.
   const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
-    setUploading(true);
     setError(null);
-    try {
-      const uploaded: TicketPhoto[] = [];
-      for (const file of Array.from(files)) {
-        // 25MB guard per file.
-        if (file.size > 25 * 1024 * 1024) {
-          setError(`"${file.name}" is larger than 25MB and was skipped.`);
-          continue;
-        }
-        const photo = await uploadTicketPhoto(cid, ticketPath, file, {
-          uploadedBy,
-          visitNo: selectedVisitNo || undefined,
-        });
-        uploaded.push(photo);
+
+    const candidates = Array.from(files);
+    const valid: File[] = [];
+    const rejections: string[] = [];
+
+    const roomLeft = MAX_PHOTOS - photos.length - uploadQueue.length;
+    for (const file of candidates) {
+      const formatError = validateImageFile(file);
+      if (formatError) {
+        rejections.push(formatError);
+        continue;
       }
-      if (uploaded.length) setPhotos((prev) => [...uploaded, ...prev]);
-    } catch (err) {
-      console.error("Photo upload failed:", err);
-      setError(`Upload failed: ${err instanceof Error ? err.message : "Unknown error"}`);
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
+      if (valid.length >= Math.max(0, roomLeft)) {
+        rejections.push(`"${file.name}" was skipped — a ticket can have at most ${MAX_PHOTOS} photos.`);
+        continue;
+      }
+      valid.push(file);
     }
+    if (rejections.length) setError(rejections.join(" "));
+    if (valid.length === 0) {
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
+    const items: UploadQueueItem[] = valid.map((file) => ({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      fileName: file.name,
+      status: "compressing",
+      progress: 0,
+      originalSize: file.size,
+    }));
+    setUploadQueue((prev) => [...items, ...prev]);
+
+    await Promise.allSettled(
+      valid.map(async (file, i) => {
+        const id = items[i].id;
+        try {
+          const compressed = await compressImage(file);
+          updateQueueItem(id, {
+            status: "uploading",
+            originalDims: { width: compressed.originalWidth, height: compressed.originalHeight },
+            compressedSize: compressed.compressedSize,
+            compressedDims: { width: compressed.width, height: compressed.height },
+          });
+
+          const photo = await uploadTicketPhoto(
+            cid,
+            ticketPath,
+            compressed.blob,
+            file.name,
+            {
+              uploadedBy,
+              visitNo: selectedVisitNo || undefined,
+              width: compressed.width,
+              height: compressed.height,
+              originalSize: compressed.originalSize,
+            },
+            (percent) => updateQueueItem(id, { progress: percent }),
+          );
+
+          setPhotos((prev) => [photo, ...prev]);
+          setUploadQueue((prev) => prev.filter((q) => q.id !== id));
+        } catch (err) {
+          console.error(`Photo upload failed for "${file.name}":`, err);
+          updateQueueItem(id, {
+            status: "error",
+            error: err instanceof Error ? err.message : "Unknown error",
+          });
+        }
+      }),
+    );
+
+    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   const handleDelete = async (photo: TicketPhoto) => {
@@ -120,6 +194,9 @@ export function TicketPhotos({
       alert(`Delete failed: ${err instanceof Error ? err.message : "Unknown error"}`);
     }
   };
+
+  const closePreview = () => { setPreview(null); setZoomScale(1); setZoomPos({ x: 0, y: 0 }); };
+  const openPreview = (photo: TicketPhoto) => { setPreview(photo); setZoomScale(1); setZoomPos({ x: 0, y: 0 }); };
 
   return (
     <div className="space-y-4 pb-8">
@@ -166,6 +243,43 @@ export function TicketPhotos({
         </div>
       )}
 
+      {uploadQueue.length > 0 && (
+        <div className="space-y-2">
+          {uploadQueue.map((item) => {
+            const savedPct = item.compressedSize
+              ? Math.round((1 - item.compressedSize / item.originalSize) * 100)
+              : null;
+            return (
+              <div key={item.id} className="rounded-lg border border-white/10 bg-slate-900/50 px-3 py-2 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate text-slate-300">{item.fileName}</span>
+                  <span className={item.status === "error" ? "text-red-400" : "text-slate-400"}>
+                    {item.status === "compressing" && "Compressing…"}
+                    {item.status === "uploading" && `Uploading ${item.progress}%`}
+                    {item.status === "error" && "Failed"}
+                  </span>
+                </div>
+                {item.status === "uploading" && (
+                  <div className="mt-1.5 h-1 w-full rounded-full bg-slate-800 overflow-hidden">
+                    <div className="h-full bg-blue-500 transition-all" style={{ width: `${item.progress}%` }} />
+                  </div>
+                )}
+                {item.compressedSize != null && item.compressedDims && item.originalDims ? (
+                  <div className="mt-1 text-slate-500">
+                    {formatBytes(item.originalSize)} ({item.originalDims.width}×{item.originalDims.height}) →{" "}
+                    {formatBytes(item.compressedSize)} ({item.compressedDims.width}×{item.compressedDims.height})
+                    {savedPct != null && savedPct > 0 && <span className="text-emerald-400 ml-1">· {savedPct}% saved</span>}
+                  </div>
+                ) : null}
+                {item.status === "error" && item.error && (
+                  <div className="mt-1 text-red-400">{item.error}</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {loading ? (
         <p className="text-sm text-slate-400">Loading photos…</p>
       ) : photos.length === 0 ? (
@@ -175,7 +289,12 @@ export function TicketPhotos({
           {photos.map((photo) => (
             <div key={photo.fullPath} className="group relative rounded-lg overflow-hidden border border-white/10 bg-slate-900/50">
               {isImage(photo.name) ? (
-                <button type="button" onClick={() => setPreview(photo)} className="block w-full">
+                <button
+                  type="button"
+                  onClick={() => openPreview(photo)}
+                  className="block w-full"
+                  title={photo.width && photo.height ? `${formatBytes(photo.size)} · ${photo.width}×${photo.height}` : undefined}
+                >
                   <img src={photo.url} alt={photo.name} className="h-28 w-full object-cover" loading="lazy" />
                 </button>
               ) : (
@@ -208,22 +327,68 @@ export function TicketPhotos({
         </div>
       )}
 
-      {/* Lightbox preview */}
+      {/* Lightbox with zoom */}
       {preview && (
-        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-6" onClick={() => setPreview(null)}>
-          <div className="max-w-4xl max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
-            <img src={preview.url} alt={preview.name} className="max-h-[85vh] w-auto rounded-lg" />
-            <div className="mt-2 flex items-center justify-between gap-3 text-sm text-slate-300">
-              <div className="truncate">
-                <div className="truncate">{preview.name}</div>
-                <div className="text-xs text-slate-400">
-                  Uploaded {formatUploadedAt(preview.uploadedAt)}
-                  {preview.uploadedBy ? ` · by ${preview.uploadedBy}` : ""}
-                  {preview.visitNo ? ` · Visit ${preview.visitNo}` : ""}
-                </div>
-              </div>
-              <a href={preview.url} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 shrink-0">Open original</a>
+        <div
+          className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center"
+          onClick={closePreview}
+        >
+          {/* Toolbar */}
+          <div className="absolute top-0 left-0 right-0 flex items-center justify-between px-4 py-3 bg-black/60 z-10">
+            <div className="text-sm text-slate-200 truncate max-w-xs">
+              {preview.name}
+              {preview.uploadedBy && <span className="text-slate-400 ml-2">· by {preview.uploadedBy}</span>}
+              {preview.visitNo && <span className="text-blue-300 ml-2">· Visit {preview.visitNo}</span>}
             </div>
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={(e) => { e.stopPropagation(); setZoomScale(s => Math.max(1, +(s - 0.5).toFixed(1))); if (zoomScale <= 1.5) setZoomPos({ x: 0, y: 0 }); }} className="w-8 h-8 rounded bg-white/10 hover:bg-white/20 text-white text-lg flex items-center justify-center" title="Zoom out">−</button>
+              <span className="text-xs text-slate-300 w-10 text-center">{Math.round(zoomScale * 100)}%</span>
+              <button type="button" onClick={(e) => { e.stopPropagation(); setZoomScale(s => Math.min(5, +(s + 0.5).toFixed(1))); }} className="w-8 h-8 rounded bg-white/10 hover:bg-white/20 text-white text-lg flex items-center justify-center" title="Zoom in">+</button>
+              <button type="button" onClick={(e) => { e.stopPropagation(); setZoomScale(1); setZoomPos({ x: 0, y: 0 }); }} className="px-2 h-8 rounded bg-white/10 hover:bg-white/20 text-white text-xs" title="Reset zoom">Reset</button>
+              <a href={preview.url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="px-2 h-8 rounded bg-blue-600/40 hover:bg-blue-600/60 text-blue-200 text-xs flex items-center">Open original ↗</a>
+              <button type="button" onClick={closePreview} className="w-8 h-8 rounded bg-white/10 hover:bg-rose-600/40 text-white text-sm flex items-center justify-center">✕</button>
+            </div>
+          </div>
+
+          {/* Image */}
+          <div
+            className="overflow-hidden w-full h-full flex items-center justify-center cursor-zoom-in pt-12 pb-8"
+            onDoubleClick={(e) => { e.stopPropagation(); if (zoomScale > 1) { setZoomScale(1); setZoomPos({ x: 0, y: 0 }); } else { setZoomScale(2.5); } }}
+            onWheel={(e) => { e.stopPropagation(); const delta = e.deltaY > 0 ? -0.2 : 0.2; setZoomScale(s => Math.min(5, Math.max(1, +(s + delta).toFixed(1)))); if (zoomScale + delta <= 1) setZoomPos({ x: 0, y: 0 }); }}
+            onTouchStart={(e) => { if (e.touches.length === 2) { const dx = e.touches[0].clientX - e.touches[1].clientX; const dy = e.touches[0].clientY - e.touches[1].clientY; lastTouchDist.current = Math.sqrt(dx * dx + dy * dy); } }}
+            onTouchMove={(e) => { if (e.touches.length === 2 && lastTouchDist.current !== null) { const dx = e.touches[0].clientX - e.touches[1].clientX; const dy = e.touches[0].clientY - e.touches[1].clientY; const dist = Math.sqrt(dx * dx + dy * dy); setZoomScale(s => Math.min(5, Math.max(1, +(s * (dist / lastTouchDist.current!)).toFixed(2)))); lastTouchDist.current = dist; } }}
+            onTouchEnd={() => { lastTouchDist.current = null; }}
+          >
+            <img
+              ref={imgRef}
+              src={preview.url}
+              alt={preview.name}
+              draggable={false}
+              style={{
+                transform: `scale(${zoomScale}) translate(${zoomPos.x / zoomScale}px, ${zoomPos.y / zoomScale}px)`,
+                transition: zoomScale === 1 ? "transform 0.2s ease" : "none",
+                maxHeight: "calc(100vh - 80px)",
+                maxWidth: "100%",
+                objectFit: "contain",
+                userSelect: "none",
+                cursor: zoomScale > 1 ? "grab" : "zoom-in",
+              }}
+              onMouseDown={(e) => {
+                if (zoomScale <= 1) return;
+                e.preventDefault();
+                const startX = e.clientX - zoomPos.x;
+                const startY = e.clientY - zoomPos.y;
+                const onMove = (mv: MouseEvent) => { setZoomPos({ x: mv.clientX - startX, y: mv.clientY - startY }); };
+                const onUp = () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+                window.addEventListener("mousemove", onMove);
+                window.addEventListener("mouseup", onUp);
+              }}
+            />
+          </div>
+
+          {/* Caption */}
+          <div className="absolute bottom-0 left-0 right-0 px-4 py-2 bg-black/60 text-xs text-slate-400 text-center">
+            Scroll to zoom · Double-click to zoom in/out · Drag to pan when zoomed
           </div>
         </div>
       )}

@@ -9,6 +9,7 @@
 import {
   ref,
   uploadBytes,
+  uploadBytesResumable,
   getDownloadURL,
   listAll,
   deleteObject,
@@ -21,11 +22,16 @@ export interface TicketPhoto {
   fullPath: string;   // full storage path (used for delete)
   url: string;        // download URL
   uploadedAt: string; // ISO timestamp from metadata
-  size: number;       // bytes
+  size: number;       // bytes (compressed size, once compression is in place)
   /** Display name / email of whoever uploaded this file. */
   uploadedBy?: string;
   /** Visit number the photo is associated with (e.g. "1", "2"). Optional. */
   visitNo?: string;
+  /** Pixel dimensions of the stored (compressed) image, if known. */
+  width?: number;
+  height?: number;
+  /** Size in bytes before client-side compression, if known. */
+  originalSize?: number;
 }
 
 function sanitizeFileName(name: string): string {
@@ -34,40 +40,68 @@ function sanitizeFileName(name: string): string {
 
 /**
  * Upload one photo for a ticket. Returns the stored photo info. Accepts
- * optional metadata so we can stamp who uploaded the file and which visit
- * it belongs to.
+ * optional metadata so we can stamp who uploaded the file, which visit it
+ * belongs to, and (once compression is in place) the compressed image's
+ * real dimensions and pre-compression size.
+ *
+ * Takes a Blob rather than a File since the caller compresses the photo
+ * client-side first (see src/lib/imageCompression.ts) — the compressed
+ * output is a Blob with no `name`, hence the separate `fileName` param.
+ *
+ * `onProgress` (0-100) is wired to Firebase's resumable-upload progress
+ * events so callers can show a real per-file upload percentage.
  */
 export async function uploadTicketPhoto(
   companyId: string,
   ticketNo: string,
-  file: File,
-  meta?: { uploadedBy?: string; visitNo?: string }
+  blob: Blob,
+  fileName: string,
+  meta?: { uploadedBy?: string; visitNo?: string; width?: number; height?: number; originalSize?: number },
+  onProgress?: (percent: number) => void,
 ): Promise<TicketPhoto> {
   if (!isFirebaseReady() || !storage) {
     throw new Error("Firebase Storage not configured");
   }
   const folder = `companies/${companyId}/tickets/${ticketNo}`;
-  const objectName = `${Date.now()}-${sanitizeFileName(file.name)}`;
+  const objectName = `${Date.now()}-${sanitizeFileName(fileName)}`;
   const objectRef = ref(storage, `${folder}/${objectName}`);
 
   const uploadedAt = new Date().toISOString();
   const customMetadata: Record<string, string> = { uploadedAt };
   if (meta?.uploadedBy) customMetadata.uploadedBy = meta.uploadedBy;
   if (meta?.visitNo) customMetadata.visitNo = meta.visitNo;
+  if (meta?.width) customMetadata.width = String(meta.width);
+  if (meta?.height) customMetadata.height = String(meta.height);
+  if (meta?.originalSize) customMetadata.originalSize = String(meta.originalSize);
 
-  const snapshot = await uploadBytes(objectRef, file, {
-    contentType: file.type || "application/octet-stream",
+  const task = uploadBytesResumable(objectRef, blob, {
+    contentType: blob.type || "application/octet-stream",
     customMetadata,
   });
-  const url = await getDownloadURL(snapshot.ref);
+
+  await new Promise<void>((resolve, reject) => {
+    task.on(
+      "state_changed",
+      (snapshot) => {
+        if (onProgress) onProgress(Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100));
+      },
+      reject,
+      () => resolve(),
+    );
+  });
+
+  const url = await getDownloadURL(task.snapshot.ref);
   return {
     name: objectName,
-    fullPath: snapshot.ref.fullPath,
+    fullPath: task.snapshot.ref.fullPath,
     url,
     uploadedAt,
-    size: file.size,
+    size: blob.size,
     uploadedBy: meta?.uploadedBy,
     visitNo: meta?.visitNo,
+    width: meta?.width,
+    height: meta?.height,
+    originalSize: meta?.originalSize,
   };
 }
 
@@ -91,6 +125,9 @@ export async function listTicketPhotos(
         getDownloadURL(item),
         getMetadata(item).catch(() => null),
       ]);
+      const width = meta?.customMetadata?.width ? Number(meta.customMetadata.width) : undefined;
+      const height = meta?.customMetadata?.height ? Number(meta.customMetadata.height) : undefined;
+      const originalSize = meta?.customMetadata?.originalSize ? Number(meta.customMetadata.originalSize) : undefined;
       return {
         name: item.name,
         fullPath: item.fullPath,
@@ -99,6 +136,9 @@ export async function listTicketPhotos(
         size: meta?.size ?? 0,
         uploadedBy: meta?.customMetadata?.uploadedBy ?? undefined,
         visitNo: meta?.customMetadata?.visitNo ?? undefined,
+        width,
+        height,
+        originalSize,
       } as TicketPhoto;
     })
   );
@@ -154,6 +194,99 @@ export async function deleteOnboardingDocumentFile(fullPath: string): Promise<vo
     throw new Error("Firebase Storage not configured");
   }
   await deleteObject(ref(storage, fullPath));
+}
+
+/**
+ * Delete a Jotform-generated document (companies/{companyId}/jotform-documents/…)
+ * by its full storage path — used when HR deletes a submission row (e.g. a
+ * test/junk one) so the file doesn't linger orphaned in Storage.
+ */
+export async function deleteJotformDocumentFile(fullPath: string): Promise<void> {
+  if (!isFirebaseReady() || !storage) {
+    throw new Error("Firebase Storage not configured");
+  }
+  await deleteObject(ref(storage, fullPath));
+}
+
+/**
+ * Upload a generated Certificate of Employment PDF so it can be linked in a
+ * Team Messenger message — same "generate client-side, upload, share a
+ * link" pattern as the CV-forwarding feature on the Hiring tab.
+ */
+export async function uploadCoeCertificate(companyId: string, employeeName: string, pdfBlob: Blob): Promise<string> {
+  if (!isFirebaseReady() || !storage) {
+    throw new Error("Firebase Storage not configured");
+  }
+  const folder = `companies/${companyId}/coe-certificates`;
+  const objectName = `${Date.now()}-${sanitizeFileName(employeeName || "certificate")}.pdf`;
+  const objectRef = ref(storage, `${folder}/${objectName}`);
+  const snapshot = await uploadBytes(objectRef, pdfBlob, { contentType: "application/pdf" });
+  return getDownloadURL(snapshot.ref);
+}
+
+/**
+ * Upload a generated Employee Warning Form PDF so it can be linked in a
+ * Team Messenger message — same pattern as uploadCoeCertificate above.
+ */
+export async function uploadWarningForm(companyId: string, employeeName: string, pdfBlob: Blob): Promise<string> {
+  if (!isFirebaseReady() || !storage) {
+    throw new Error("Firebase Storage not configured");
+  }
+  const folder = `companies/${companyId}/warning-forms`;
+  const objectName = `${Date.now()}-${sanitizeFileName(employeeName || "warning-form")}.pdf`;
+  const objectRef = ref(storage, `${folder}/${objectName}`);
+  const snapshot = await uploadBytes(objectRef, pdfBlob, { contentType: "application/pdf" });
+  return getDownloadURL(snapshot.ref);
+}
+
+export async function uploadW8benForm(companyId: string, employeeName: string, pdfBlob: Blob): Promise<string> {
+  if (!isFirebaseReady() || !storage) {
+    throw new Error("Firebase Storage not configured");
+  }
+  const folder = `companies/${companyId}/w8ben-forms`;
+  const objectName = `${Date.now()}-${sanitizeFileName(employeeName || "w8ben-form")}.pdf`;
+  const objectRef = ref(storage, `${folder}/${objectName}`);
+  const snapshot = await uploadBytes(objectRef, pdfBlob, { contentType: "application/pdf" });
+  return getDownloadURL(snapshot.ref);
+}
+
+export async function uploadW4Form(companyId: string, employeeName: string, pdfBlob: Blob): Promise<string> {
+  if (!isFirebaseReady() || !storage) {
+    throw new Error("Firebase Storage not configured");
+  }
+  const folder = `companies/${companyId}/w4-forms`;
+  const objectName = `${Date.now()}-${sanitizeFileName(employeeName || "w4-form")}.pdf`;
+  const objectRef = ref(storage, `${folder}/${objectName}`);
+  const snapshot = await uploadBytes(objectRef, pdfBlob, { contentType: "application/pdf" });
+  return getDownloadURL(snapshot.ref);
+}
+
+export async function uploadW9Form(companyId: string, name: string, pdfBlob: Blob): Promise<string> {
+  if (!isFirebaseReady() || !storage) {
+    throw new Error("Firebase Storage not configured");
+  }
+  const folder = `companies/${companyId}/w9-forms`;
+  const objectName = `${Date.now()}-${sanitizeFileName(name || "w9-form")}.pdf`;
+  const objectRef = ref(storage, `${folder}/${objectName}`);
+  const snapshot = await uploadBytes(objectRef, pdfBlob, { contentType: "application/pdf" });
+  return getDownloadURL(snapshot.ref);
+}
+
+/**
+ * Upload a drawn signature (PNG data URL from a canvas — same capture
+ * pattern as the ticket customer-signature pad in MobileTechApp.tsx) for a
+ * signable HR document.
+ */
+export async function uploadSignableDocumentSignature(companyId: string, docId: string, slot: string, dataUrl: string): Promise<string> {
+  if (!isFirebaseReady() || !storage) {
+    throw new Error("Firebase Storage not configured");
+  }
+  const res = await fetch(dataUrl);
+  const blob = await res.blob();
+  const folder = `companies/${companyId}/signable-documents/${docId}`;
+  const objectRef = ref(storage, `${folder}/${slot}-${Date.now()}.png`);
+  const snapshot = await uploadBytes(objectRef, blob, { contentType: "image/png" });
+  return getDownloadURL(snapshot.ref);
 }
 
 /**

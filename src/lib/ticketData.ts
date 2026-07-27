@@ -57,6 +57,10 @@ export interface Ticket {
   calls: number;
   partOrder: string;
   created: string;
+  /** Full raw created_at timestamp (unlike `created`, which is truncated to
+   * YYYY-MM-DD for list/filter display) — used where the time of day matters,
+   * e.g. the ticket detail page's Posting Date. */
+  createdAt?: string;
   statusChangedAt?: string;
   statusChangedBy?: string;
   // Additional fields for ticket details
@@ -77,6 +81,7 @@ export interface Ticket {
   address2?: string;
   zip?: string;
   state?: string;
+  country?: string;
   email?: string;
   secondPhone?: string;
   /** Alternate contact number (in addition to home + cell). Persisted on
@@ -90,9 +95,46 @@ export interface Ticket {
   // Additional tracking fields
   fakeTicket?: boolean;
   originalTicketNo?: string;
+  // A claim/reference number from the source (NSA dispatch, or manually
+  // entered on New Ticket) — see migration 0056. Deliberately its own
+  // column, separate from originalTicketNo above ("Redo Ticket #"); the
+  // two used to share one column, which meant a ticket could never have
+  // both, and the ticket detail page had to guess which one a stored
+  // value actually meant.
+  caseNumber?: string;
   callReceivedDate?: string;
   addressNote?: string;
   claimCompany?: string;
+  // NSA dispatch fields (see nsaSync.ts / migration 0055).
+  nsaStatus?: string;
+  nsaRouteName?: string;
+  nsaGroupName?: string;
+  nsaDeductible?: string;
+  nsaScheduleAck?: string;
+  nsaSpecialInstructions?: string;
+  nsaValidCoverage?: string;
+  nsaRequiredCoverage?: string;
+  nsaRequiredPart?: string;
+  nsaPreAuth?: string;
+  nsaMasterCode?: string;
+  nsaCoverageExclusions?: string;
+  // NSA extended dispatch fields (see migration 0057) — previously
+  // silently dropped on every NSA sync since they had no column.
+  nsaLatitude?: number;
+  nsaLongitude?: number;
+  nsaStatusCode?: string;
+  nsaDispatchCodes?: Record<string, any>;
+  nsaHasPartBOM?: boolean;
+  nsaPartBOMRequired?: boolean;
+  nsaSfCanAddPart?: boolean;
+  nsaSfCanOrderParts?: boolean;
+  nsaProgram?: string;
+  nsaApiClose?: boolean;
+  nsaHash?: string;
+  nsaLegacyFileName?: string;
+  nsaDatetimeDepotReceived?: string;
+  nsaScheduleAckByUserId?: string;
+  nsaScheduleAckByUserName?: string;
   // Service tracking data - visits and parts integrated into ticket
   visits?: Array<{
     id: string;
@@ -121,6 +163,8 @@ export interface Ticket {
     triageNote: string;
     status: string;
     note: string;
+    /** Set once a newer visit supersedes this one — blocks further edits. */
+    locked?: boolean;
   }>;
   parts?: Array<{
     id: string;

@@ -142,7 +142,6 @@ function rowToTicket(row: any): Ticket {
     location: sanitizeLocation(row.location ?? ""),
     model: row.model ?? "",
     internalNote: row.internal_note ?? "",
-    cancellationReason: row.cancellation_reason ?? "",
     problemDescription: row.problem_description ?? "",
     diagnosed: row.diagnosed ? "Y" : "N",
     technician: row.technician ?? "",
@@ -157,6 +156,7 @@ function rowToTicket(row: any): Ticket {
     calls: row.calls ?? 0,
     partOrder: row.part_order ?? "",
     created: row.created_at ? String(row.created_at).slice(0, 10) : "",
+    createdAt: row.created_at ?? "",
     statusChangedAt: row.status_changed_at ?? undefined,
     statusChangedBy: row.status_changed_by ?? undefined,
     account: row.account ?? "",
@@ -169,6 +169,7 @@ function rowToTicket(row: any): Ticket {
     address2: c.address2 ?? "",
     zip: c.zip ?? "",
     state: c.state ?? "",
+    country: c.country ?? "",
     email: c.email ?? "",
     secondPhone: c.second_phone ?? "",
     altPhone: c.alt_phone ?? "",
@@ -181,22 +182,49 @@ function rowToTicket(row: any): Ticket {
     // tracking
     fakeTicket: row.fake_ticket ?? false,
     originalTicketNo: row.original_ticket_no ?? "",
+    caseNumber: row.case_number ?? "",
     callReceivedDate: row.call_received_date ?? "",
     claimCompany: row.claim_company ?? "",
+    nsaStatus: row.nsa_status ?? "",
+    nsaRouteName: row.nsa_route_name ?? "",
+    nsaGroupName: row.nsa_group_name ?? "",
+    nsaDeductible: row.nsa_deductible ?? "",
+    nsaScheduleAck: row.nsa_schedule_ack ?? "",
+    nsaSpecialInstructions: row.nsa_special_instructions ?? "",
+    nsaValidCoverage: row.nsa_valid_coverage ?? "",
+    nsaRequiredCoverage: row.nsa_required_coverage ?? "",
+    nsaRequiredPart: row.nsa_required_part ?? "",
+    nsaPreAuth: row.nsa_pre_auth ?? "",
+    nsaMasterCode: row.nsa_master_code ?? "",
+    nsaCoverageExclusions: row.nsa_coverage_exclusions ?? "",
+    nsaLatitude: row.nsa_latitude ?? undefined,
+    nsaLongitude: row.nsa_longitude ?? undefined,
+    nsaStatusCode: row.nsa_status_code ?? "",
+    nsaDispatchCodes: row.nsa_dispatch_codes ?? undefined,
+    nsaHasPartBOM: row.nsa_has_part_bom ?? undefined,
+    nsaPartBOMRequired: row.nsa_part_bom_required ?? undefined,
+    nsaSfCanAddPart: row.nsa_sf_can_add_part ?? undefined,
+    nsaSfCanOrderParts: row.nsa_sf_can_order_parts ?? undefined,
+    nsaProgram: row.nsa_program ?? "",
+    nsaApiClose: row.nsa_api_close ?? undefined,
+    nsaHash: row.nsa_hash ?? "",
+    nsaLegacyFileName: row.nsa_legacy_file_name ?? "",
+    nsaDatetimeDepotReceived: row.nsa_datetime_depot_received ?? "",
+    nsaScheduleAckByUserId: row.nsa_schedule_ack_by_user_id ?? "",
+    nsaScheduleAckByUserName: row.nsa_schedule_ack_by_user_name ?? "",
+    cancellationReason: row.cancellation_reason ?? "",
     // planner slot (persisted)
     // @ts-expect-error extra field consumed by the Work Planner
     slot: row.time_slot ?? undefined,
     // The internal Supabase ids (handy for updates); not part of the UI type.
-    // @ts-expect-error attach internal ids for service use
     _id: row.id,
-    // @ts-expect-error
     _customerId: row.customer_id,
   };
 }
 
 const SELECT = `
   *,
-  customer:customers ( id, first_name, last_name, full_name, phone, second_phone, alt_phone, email, address, address2, city, state, zip, address_note )
+  customer:customers ( id, first_name, last_name, full_name, phone, second_phone, alt_phone, email, address, address2, city, state, zip, country, address_note )
 `;
 
 // ---- reads -----------------------------------------------------------------
@@ -220,7 +248,7 @@ export async function backfillTicketLocations(): Promise<{ scanned: number; upda
     throw new Error(error.message);
   }
 
-  const rows = (data ?? []) as Array<{
+  const rows = (data ?? []) as unknown as Array<{
     id: string;
     location: string | null;
     customer: { zip: string | null; city: string | null; state: string | null } | null;
@@ -364,6 +392,7 @@ export async function createTicket(input: Partial<Ticket>): Promise<Ticket> {
       problem_description: input.problemDescription ?? null,
       fake_ticket: input.fakeTicket ?? false,
       original_ticket_no: input.originalTicketNo ?? null,
+      case_number: input.caseNumber ?? null,
     })
     .select(SELECT)
     .single();
@@ -555,7 +584,6 @@ export async function updateTicketFields(
   fields: {
     problemDescription?: string;
     internalNote?: string;
-    cancellationReason?: string;
     manufacturer?: string;
     model?: string;
     serial?: string;
@@ -565,6 +593,8 @@ export async function updateTicketFields(
     warranty?: string;
     claimCompany?: string;
     originalTicketNo?: string;
+    caseNumber?: string;
+    cancellationReason?: string;
   }
 ): Promise<void> {
   const payload: Record<string, unknown> = { updated_at: new Date().toISOString() };
@@ -583,6 +613,7 @@ export async function updateTicketFields(
     "warranty",
     "claimCompany",
     "originalTicketNo",
+    "caseNumber",
   ];
   const touchedProductInfo = productKeys.some((k) => fields[k] !== undefined);
 
@@ -598,6 +629,7 @@ export async function updateTicketFields(
   if (fields.warranty !== undefined) payload.warranty = fields.warranty;
   if (fields.claimCompany !== undefined) payload.claim_company = fields.claimCompany;
   if (fields.originalTicketNo !== undefined) payload.original_ticket_no = fields.originalTicketNo;
+  if (fields.caseNumber !== undefined) payload.case_number = fields.caseNumber;
   if (touchedProductInfo) payload.product_edited_by_user = true;
 
   const { error } = await supabase.from("tickets").update(payload).eq("ticket_no", ticketNo);
@@ -640,6 +672,7 @@ function rowToVisit(row: any): UIVisit {
     triageNote: row.triage_note ?? "",
     status: row.status ?? "",
     note: row.note ?? "",
+    locked: row.locked ?? false,
   };
 }
 
@@ -903,6 +936,7 @@ export async function addTicketVisit(ticketNo: string, visit: Partial<UIVisit>):
       triage_note: visit.triageNote ?? null,
       status: visit.status ?? null,
       note: visit.note ?? null,
+      locked: visit.locked ?? false,
     })
     .select("*")
     .single();
@@ -934,7 +968,14 @@ export async function updateTicketVisit(visitId: string, visit: Partial<UIVisit>
       triage_note: visit.triageNote ?? null,
       status: visit.status ?? null,
       note: visit.note ?? null,
+      locked: visit.locked ?? false,
       update_reason: visit.updateReason ?? null,
+      // Previously omitted, so updated_at/updated_by never actually moved
+      // off their insert-time default — every visit looked "just edited"
+      // at its own creation time forever, and nothing could tell a real
+      // edit apart from a fresh add. Stamp them for real on every edit.
+      updated_at: new Date().toISOString(),
+      updated_by: visit.updatedBy ?? null,
     })
     .eq("id", visitId);
   if (error) {
@@ -1062,6 +1103,23 @@ function partToColumns(part: Partial<UIPartRow>) {
   };
 }
 
+/**
+ * Get a single part row by id — used where the caller doesn't already have
+ * the full row in memory (e.g. the Truck Stock Requests dashboard, which
+ * only holds the request record, not the ticket's live Part Transaction
+ * state). updateTicketPart() always writes every column from its input, so
+ * a partial-only update would null out every field the caller didn't pass —
+ * callers must read the full row here first, then merge their changes in.
+ */
+export async function getPartById(partId: string): Promise<UIPartRow | null> {
+  const { data, error } = await supabase.from("parts").select("*").eq("id", partId).maybeSingle();
+  if (error) {
+    console.error("getPartById error:", error.message);
+    throw new Error(error.message);
+  }
+  return data ? rowToPart(data) : null;
+}
+
 /** Get all parts for a ticket. */
 export async function getTicketParts(ticketNo: string): Promise<UIPartRow[]> {
   const ticketId = await getTicketId(ticketNo);
@@ -1093,23 +1151,6 @@ export async function addTicketPart(ticketNo: string, part: Partial<UIPartRow>):
     throw new Error(error.message);
   }
   return rowToPart(data);
-}
-
-/**
- * Get a single part row by id — used where the caller doesn't already have
- * the full row in memory (e.g. the Truck Stock Requests dashboard, which
- * only holds the request record, not the ticket's live Part Transaction
- * state). updateTicketPart() always writes every column from its input, so
- * a partial-only update would null out every field the caller didn't pass —
- * callers must read the full row here first, then merge their changes in.
- */
-export async function getPartById(partId: string): Promise<UIPartRow | null> {
-  const { data, error } = await supabase.from("parts").select("*").eq("id", partId).maybeSingle();
-  if (error) {
-    console.error("getPartById error:", error.message);
-    throw new Error(error.message);
-  }
-  return data ? rowToPart(data) : null;
 }
 
 /** Update an existing part by id. */
@@ -1254,6 +1295,7 @@ async function upsertTicketFromServicePowerImpl(
     city: input.city ?? "",
     state: input.state ?? "",
     zip: input.zip ?? "",
+    country: input.country ?? "",
   };
 
   // Ticket payload (source, product, work order details).
@@ -1297,6 +1339,47 @@ async function upsertTicketFromServicePowerImpl(
     customer_pref: bool(input.customerPref),
     redo: bool(input.redo),
     problem_description: input.problemDescription ?? input.internalNote ?? null,
+    // Case number (migration 0056) — nsaSync.ts computes this from the NSA
+    // dispatch's caseNumber, but this payload never read input.caseNumber
+    // (or, before 0056, input.originalTicketNo, which is what it used to
+    // be called) at all, so it silently never made it to Supabase. The
+    // ticket detail page only ever showed it correctly for NSA tickets
+    // because of a separate live re-fetch straight from the NSA API on
+    // every page view — every other view (Work Map, Ticket List, reports)
+    // never saw it.
+    case_number: input.caseNumber || null,
+    // NSA dispatch fields (see migration 0055) — nsaSync.ts has always
+    // computed these from the NSA API response, but they were silently
+    // dropped here before, since this payload had no handling for any
+    // nsa*-prefixed field.
+    nsa_status: input.nsaStatus || null,
+    nsa_route_name: input.nsaRouteName || null,
+    nsa_group_name: input.nsaGroupName || null,
+    nsa_deductible: input.nsaDeductible || null,
+    nsa_schedule_ack: input.nsaScheduleAck || null,
+    nsa_special_instructions: input.nsaSpecialInstructions || null,
+    nsa_valid_coverage: input.nsaValidCoverage || null,
+    nsa_required_coverage: input.nsaRequiredCoverage || null,
+    nsa_required_part: input.nsaRequiredPart || null,
+    nsa_pre_auth: input.nsaPreAuth || null,
+    nsa_master_code: input.nsaMasterCode || null,
+    nsa_coverage_exclusions: input.nsaCoverageExclusions || null,
+    // NSA extended fields (see migration 0057) — previously had no column.
+    nsa_latitude: input.nsaLatitude ?? null,
+    nsa_longitude: input.nsaLongitude ?? null,
+    nsa_status_code: input.nsaStatusCode || null,
+    nsa_dispatch_codes: input.nsaDispatchCodes ?? null,
+    nsa_has_part_bom: input.nsaHasPartBOM ?? null,
+    nsa_part_bom_required: input.nsaPartBOMRequired ?? null,
+    nsa_sf_can_add_part: input.nsaSfCanAddPart ?? null,
+    nsa_sf_can_order_parts: input.nsaSfCanOrderParts ?? null,
+    nsa_program: input.nsaProgram || null,
+    nsa_api_close: input.nsaApiClose ?? null,
+    nsa_hash: input.nsaHash || null,
+    nsa_legacy_file_name: input.nsaLegacyFileName || null,
+    nsa_datetime_depot_received: input.nsaDatetimeDepotReceived || null,
+    nsa_schedule_ack_by_user_id: input.nsaScheduleAckByUserId || null,
+    nsa_schedule_ack_by_user_name: input.nsaScheduleAckByUserName || null,
     updated_at: new Date().toISOString(),
   };
 
@@ -1465,6 +1548,7 @@ async function upsertTicketFromServicePowerImpl(
 void yn;
 
 export interface TicketAuditEntry {
+  id: string;
   ticketId: string;
   action: string;
   field: string;
@@ -1476,16 +1560,18 @@ export interface TicketAuditEntry {
 
 /**
  * Read the ticket_audit_log (company-scoped via RLS). This is the real,
- * trigger-written trail of who changed a ticket's status/tech/schedule and
- * when — the live substitute for any "who did what" reporting (Daily
- * Activity Report, CSR Dashboard per-agent counts) since there is no
- * separate user-activity table.
+ * shared trail of who changed a ticket/visit and when — a mix of rows the
+ * DB trigger writes automatically (status/tech/schedule changes on the
+ * `tickets` table) and rows the app writes explicitly via
+ * logTicketAuditEntry (visit edits, SP status sends, etc. — see the ticket
+ * detail page's Change Log). Pass `ticketId` to scope to one ticket.
  */
-export async function getTicketAuditLog(opts?: { startDate?: string; endDate?: string }): Promise<TicketAuditEntry[]> {
+export async function getTicketAuditLog(opts?: { ticketId?: string; startDate?: string; endDate?: string }): Promise<TicketAuditEntry[]> {
   let query = supabase
     .from("ticket_audit_log")
-    .select("ticket_id, action, field, before_value, after_value, changed_by, created_at")
+    .select("id, ticket_id, action, field, before_value, after_value, changed_by, created_at")
     .order("created_at", { ascending: false });
+  if (opts?.ticketId) query = query.eq("ticket_id", opts.ticketId);
   if (opts?.startDate) query = query.gte("created_at", opts.startDate);
   if (opts?.endDate) query = query.lte("created_at", `${opts.endDate}T23:59:59.999Z`);
 
@@ -1495,6 +1581,7 @@ export async function getTicketAuditLog(opts?: { startDate?: string; endDate?: s
     throw new Error(error.message);
   }
   return (data ?? []).map((r: any) => ({
+    id: r.id,
     ticketId: r.ticket_id,
     action: r.action ?? "",
     field: r.field ?? "",

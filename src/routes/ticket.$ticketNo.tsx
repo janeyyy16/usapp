@@ -5,7 +5,7 @@ import { Footer } from "@/components/Footer";
 import { ALL_TECHNICIANS } from "@/lib/locations";
 import { savePartOrder, createPartOrderFromTicket, placeMarconeOrder, isMarconeDist, type MarconeOrderPayload, type ShipToAddress } from "@/lib/supabase/partOrders";
 import { getPartAddresses, getLocations } from "@/lib/supabase/locationManagement";
-import { Copy, Map as MapIcon, CalendarDays, Send, ExternalLink, Pencil } from "lucide-react";
+import { Copy, Map as MapIcon, CalendarDays, Send, ExternalLink, Pencil, Lock } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { isFirebaseReady } from "@/lib/firebase/config";
 import { useIsPhone } from "@/lib/device";
@@ -19,6 +19,8 @@ import { LOCATIONS_DATA } from "@/lib/zipCoverage";
 import { resolveTierCode } from "@/lib/tierCodes";
 import { CANCEL_REASONS } from "@/lib/operationsBranchMetrics";
 import { getLocationManagementCoordinates } from "@/components/LocationManagementPage";
+import { getCompanyMapProvider, type MapProvider } from "@/lib/supabase/companySettings";
+import { loadGoogleMapsScript, makeGeocoder, routeGeoapify, metersToMiles } from "@/lib/mapEngine";
 import {
   buildSquaretradeUrlFromToken,
   extractSquaretradeUrl,
@@ -40,6 +42,7 @@ import {
   getTicketVisits as sbGetTicketVisits,
   addTicketVisit as sbAddTicketVisit,
   updateTicketVisit as sbUpdateTicketVisit,
+  deleteTicketVisit as sbDeleteTicketVisit,
   updateTicketStatus as sbUpdateTicketStatus,
   updateTicketMisdiagnosed as sbUpdateTicketMisdiagnosed,
   updateTicketAssignment as sbUpdateTicketAssignment,
@@ -53,6 +56,7 @@ import {
 import { getTicketComments, addTicketComment } from "@/lib/supabase/comments";
 import { getModelResources, saveModelResources } from "@/lib/supabase/modelResources";
 import { canManageMisdiagnosed } from "@/lib/roleLabels";
+
 // Product category options for the ticket Product Information dropdown.
 const PRODUCT_CATEGORY_OPTIONS = [
   "Air Conditioner", "Bed", "Coffee Machines", "Compactor", "Cooktop", "Dehumidifier",
@@ -116,7 +120,7 @@ function warrantyAcronym(warrantyType: string | undefined | null): string {
   return (warrantyType || "").toUpperCase();
 }
 
-// Format a ServicePower date string to YYYY-MM-DD for display in call info.
+// Format a ServicePower date string to YYYY-MM-DD HH:MM:SS for display in call info.
 function formatSpDate(dateStr: string | null | undefined): string {
   if (!dateStr) return "";
   try {
@@ -125,7 +129,10 @@ function formatSpDate(dateStr: string | null | undefined): string {
     if (isNaN(d.getTime())) return String(dateStr);
     const mm = String(d.getMonth() + 1).padStart(2, "0");
     const dd = String(d.getDate()).padStart(2, "0");
-    return `${d.getFullYear()}-${mm}-${dd}`;
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${d.getFullYear()}-${mm}-${dd} ${hh}:${mi}:${ss}`;
   } catch {
     return String(dateStr);
   }
@@ -183,6 +190,11 @@ interface TicketData {
   serialNo: string;
   modelVersion: string;
   redoTicketNo: string;
+  // Case number (NSA dispatch caseNumber, or manually entered on New
+  // Ticket) — see migration 0056. Its own column (tickets.case_number),
+  // separate from redoTicketNo/original_ticket_no above; the two used to
+  // share one column, which meant a ticket could never have both.
+  caseNumber: string;
   productCategory: string;
   purchaseDate: string;
   warrantyType: string;
@@ -223,6 +235,7 @@ interface TicketData {
   nsaPreAuth?: string;
   nsaCaseNumber?: string;
   nsaMasterCode?: string;
+  nsaCoverageExclusions?: string;
 }
 
 interface CompensationRow {
@@ -309,6 +322,8 @@ interface VisitLogEntry {
   triageNote: string;
   status: string;
   note: string;
+  /** Set once a newer visit supersedes this one — blocks further edits. */
+  locked?: boolean;
 }
 
 type TicketCopyPayload = {
@@ -333,6 +348,7 @@ type TicketCopyPayload = {
   cxPreferredDate: string;
   callTakenDate: string;
   problemDescription: string;
+  caseNumber: string;
 };
 
 const TICKET_COPY_KEY_PREFIX = "ahs:ticket-copy:";
@@ -562,6 +578,77 @@ function summarizeVisitEntry(entry: VisitLogEntry) {
     .join(" | ");
 }
 
+// Change-log summaries always start with "Visit No: <value>" (see
+// summarizeVisitEntry above) — used to scope the per-visit Change Log to
+// just the visit being viewed instead of every visit on the ticket.
+function visitLogEntryMatchesVisitNo(summary: string, visitNo: string): boolean {
+  return summary.split(" | ")[0] === `Visit No: ${visitNo}`;
+}
+
+// Human-readable labels for the ticket-level fields/actions the DB trigger
+// (log_ticket_change, see 0001_init.sql) writes to ticket_audit_log. These
+// entries have no visit reference at all — they're plain "tickets.status/
+// schedule_date/assigned_tech_id changed" rows — so they're attributed to a
+// visit below purely by timing (see isNearAnyTimestamp).
+const TICKET_LEVEL_AUDIT_FIELDS = new Set(["status", "schedule_date", "assigned_tech_id"]);
+const AUDIT_FIELD_LABELS: Record<string, string> = {
+  status: "Ticket Status",
+  schedule_date: "Ticket Schedule Date",
+  assigned_tech_id: "Assigned Technician",
+};
+const AUDIT_ACTION_LABELS: Record<string, string> = {
+  status_change: "Status Change",
+  reschedule: "Rescheduled",
+  reassign: "Reassigned",
+};
+function formatAuditField(field: string): string {
+  return AUDIT_FIELD_LABELS[field] || field;
+}
+function formatAuditAction(action: string): string {
+  return AUDIT_ACTION_LABELS[action] || action;
+}
+
+// Two audit entries represent the SAME real-world edit if their content
+// matches and they happened within a minute of each other. Needed because
+// every edit produces two independent records of itself — an optimistic
+// local entry (client-generated id, persisted to localStorage instantly)
+// and the authoritative Supabase row (DB-generated id, `changed_by` a
+// resolved profile name) — which never share an id to dedupe on directly.
+// Without this, reloading the page after an edit re-fetches the Supabase
+// copy and appends it next to the still-cached local one instead of
+// recognizing them as one event.
+function isSameAuditEvent(a: AuditLogEntry, b: AuditLogEntry): boolean {
+  if (a.field !== b.field || a.action !== b.action || a.before !== b.before || a.after !== b.after) return false;
+  const ta = new Date(a.timestamp).getTime();
+  const tb = new Date(b.timestamp).getTime();
+  if (!Number.isFinite(ta) || !Number.isFinite(tb)) return a.id === b.id;
+  return Math.abs(ta - tb) <= 60000;
+}
+
+// Saving a visit (addVisitLogEntry) writes the visit row, then syncs the
+// ticket's own schedule/status from it in two follow-up calls — so a
+// reschedule/status_change trigger row lands within ~1s of that save. No
+// visit_id exists on ticket_audit_log to join on directly, so time
+// proximity is the only way to attribute these ticket-level rows back to
+// the visit that caused them. A generous window keeps this robust to
+// slower saves without risking bleed into a different visit — visits are
+// realistically never saved within seconds of each other.
+//
+// Anchors are the visit's own "Visit Log" entry timestamps (one per save,
+// always accurate) plus its created_at as a fallback for the original
+// add — NOT visit.updatedAt, which older rows never actually got bumped
+// for (see updateTicketVisit in supabase/tickets.ts, fixed to stamp it
+// going forward, but historical edits still only have a stale value there).
+const VISIT_AUDIT_CORRELATION_WINDOW_MS = 20000;
+function isNearAnyTimestamp(entryTimestamp: string, anchors: string[]): boolean {
+  const entryMs = new Date(entryTimestamp).getTime();
+  if (!Number.isFinite(entryMs)) return false;
+  return anchors.some((anchor) => {
+    const anchorMs = new Date(anchor).getTime();
+    return Number.isFinite(anchorMs) && Math.abs(entryMs - anchorMs) <= VISIT_AUDIT_CORRELATION_WINDOW_MS;
+  });
+}
+
 function renderVisitSummary(summary: string, comparedSummary?: string) {
   const summaryParts = summary.split(" | ");
   const comparedParts = comparedSummary?.split(" | ") ?? [];
@@ -585,6 +672,45 @@ function renderVisitSummary(summary: string, comparedSummary?: string) {
       })}
     </div>
   );
+}
+
+// Part Number color coding, driven by that part's status — RED = blocked,
+// YELLOW = in the customer's hands / on order, BLUE = installed,
+// GREEN = resolved/paid/ready, GREY = parked/inactive, GREY + strikethrough
+// = voided/write-off outcomes. Only the Part No text picks up the color;
+// the Part Status control/badge itself stays in its normal, unstyled look.
+const PART_STATUS_TEXT_COLOR: Record<string, string> = {
+  "Cancelled": "text-red-400",
+  "Need PO": "text-red-400",
+
+  "CX Home": "text-yellow-500",
+  "Cx Received": "text-yellow-500",
+  "PO Made": "text-yellow-500",
+
+  "Used": "text-blue-400",
+
+  "Claimed": "text-green-500",
+  "Hold for next vist": "text-green-500",
+  "PAID": "text-green-500",
+  "Part Ready": "text-green-500",
+  "SQT Received": "text-green-500",
+
+  "Back Order": "text-slate-400",
+  "Defective": "text-slate-400",
+  "Hold for Estimation": "text-slate-400",
+  "Not Used & Stocked": "text-slate-400",
+  "Tech Pickup": "text-slate-400",
+  "Transfer to Another Ticket": "text-slate-400",
+
+  "RA - Defect": "text-slate-400 line-through decoration-2",
+  "RA- DMG": "text-slate-400 line-through decoration-2",
+  "RA - PNN": "text-slate-400 line-through decoration-2",
+  "RA - Qty Discrepancy": "text-slate-400 line-through decoration-2",
+  "Lost": "text-slate-400 line-through decoration-2",
+};
+
+function partStatusTextClass(status: string): string {
+  return PART_STATUS_TEXT_COLOR[status] || "";
 }
 
 function summarizePartRow(row: PartTransactionRow) {
@@ -669,6 +795,13 @@ const PART_FIELD_LABELS: Record<keyof Omit<PartTransactionRow, "id" | "createdBy
   cxPaid: "Cx Paid",
 };
 
+// Default technician pre-filled on a new visit log entry: Nashville tickets
+// default to the Nashville Admin placeholder, everything else defaults to
+// Memphis Admin (the original, still the fallback for every other branch).
+function defaultTechnicianForLocation(location: string | undefined | null): string {
+  return String(location || "").trim().toLowerCase() === "nashville" ? "Nashville Admin" : "Memphis Admin";
+}
+
 // Compute Turnaround Time (TAT): days elapsed since the ticket was created.
 // Accepts common date formats (ISO, MM/DD/YY, MM/DD/YYYY). Returns e.g. "3d".
 function computeTAT(created: string | undefined): string {
@@ -721,6 +854,27 @@ function getOfficeCoordinates(location: string): { lat: number; lng: number } | 
   return null;
 }
 
+// Electrolux tickets logged under the "Huntsville" location actually
+// dispatch from one of two different real offices depending on which state
+// the customer is in — the branch name alone doesn't disambiguate this.
+// Overrides the normal location-based mileage starting point for just this
+// account + location + state combination; every other account's Huntsville
+// tickets keep using the location's own stored coordinates. Returns a plain
+// address string (not lat/lng) so the Distance Matrix API geocodes it the
+// same way it already does for destinations, instead of us hand-typing
+// coordinates for a calculation that affects mileage reimbursement.
+const ELECTROLUX_HUNTSVILLE_MILEAGE_ORIGIN: Record<string, string> = {
+  AL: "631 Beacon Pkwy W #106, Birmingham, AL 35209, USA",
+  TN: "163 N Mt Juliet Rd, Mt. Juliet, TN 37122, USA",
+};
+function getElectroluxHuntsvilleMileageOrigin(ticket: { account?: string; location?: string; state?: string }): string | null {
+  const account = String(ticket.account || "").trim().toLowerCase();
+  const location = String(ticket.location || "").trim().toLowerCase();
+  const state = String(ticket.state || "").trim().toUpperCase();
+  if (!account.includes("electrolux") || location !== "huntsville") return null;
+  return ELECTROLUX_HUNTSVILLE_MILEAGE_ORIGIN[state] ?? null;
+}
+
 const DEFAULT_TICKET: TicketData = {
   ticketNo: "017151274136",
   account: "SQUARE TRADE",
@@ -746,6 +900,7 @@ const DEFAULT_TICKET: TicketData = {
   serialNo: "",
   modelVersion: "",
   redoTicketNo: "",
+  caseNumber: "",
   productCategory: "Dryer",
   purchaseDate: "04/11/2025",
   warrantyType: "In warranty",
@@ -1023,6 +1178,7 @@ function buildTicketCopyPayload(ticket: TicketData): TicketCopyPayload {
     cxPreferredDate: ticket.scheduleDate || "",
     callTakenDate: ticket.postingDate,
     problemDescription: ticket.problemDescription,
+    caseNumber: ticket.caseNumber,
   };
 }
 
@@ -1099,6 +1255,17 @@ function TicketDetailsPage() {
   const currentEditor = currentUserEmail ?? "Current User";
   const [auditEntries, setAuditEntries] = useState<AuditLogEntry[]>([]);
   const [auditEntriesLoaded, setAuditEntriesLoaded] = useState(false);
+  // Caller's Supabase profile id (for stamping ticket_audit_log.changed_by)
+  // and a profile-id -> display-name map (for rendering changed_by back to
+  // a readable name in the Change Log, since the column stores a UUID).
+  const [myProfileId, setMyProfileId] = useState<string | null>(null);
+  const [profileNameById, setProfileNameById] = useState<Record<string, string>>({});
+  // Real Supabase ticket UUID (tickets.id) — not part of the mapped
+  // TicketData shape, but needed to scope shared audit-log reads/writes
+  // (ticket_audit_log.ticket_id) to this ticket. Declared here (rather than
+  // alongside ticketData below) since effects earlier in this component
+  // already depend on it.
+  const [ticketDbId, setTicketDbId] = useState<string | null>(null);
   const [visitLogEntries, setVisitLogEntries] = useState<VisitLogEntry[]>([]);
   const [visitsLoaded, setVisitsLoaded] = useState(false);
   const [partRows, setPartRows] = useState<PartTransactionRow[]>([]);
@@ -1215,6 +1382,17 @@ function TicketDetailsPage() {
   // Distance (miles) from the office location to this ticket's address.
   const [officeDistanceMiles, setOfficeDistanceMiles] = useState<number | null>(null);
 
+  // Company-wide map provider (see migration 0050) — set from /m/admin.
+  // This page has no embedded map, but the mileage figure below still goes
+  // through Google's Distance Matrix (real driving miles) in Google mode,
+  // or straight-line distance via Geoapify geocoding in Leaflet mode.
+  const [mapProvider, setMapProvider] = useState<MapProvider | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getCompanyMapProvider().then((p) => { if (!cancelled) setMapProvider(p); });
+    return () => { cancelled = true; };
+  }, []);
+
   // Edit mode state for customer information
   const [isEditingCustomerInfo, setIsEditingCustomerInfo] = useState(false);
   const [editedCustomerInfo, setEditedCustomerInfo] = useState<Partial<TicketData>>({});
@@ -1252,11 +1430,84 @@ function TicketDetailsPage() {
   const [redoTicketDraft, setRedoTicketDraft] = useState("");
   const [savingRedoTicket, setSavingRedoTicket] = useState(false);
 
+  // Resolve the caller's Supabase profile id once auth is ready — needed to
+  // stamp ticket_audit_log.changed_by on entries this browser writes.
+  useEffect(() => {
+    if (!authReady || !uid) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { getMyProfileId } = await import("@/lib/supabase/users");
+        const id = await getMyProfileId(uid);
+        if (!cancelled) setMyProfileId(id);
+      } catch (err) {
+        console.error("Failed to resolve profile id for audit log:", err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [authReady, uid]);
+
+  // Company roster for resolving ticket_audit_log.changed_by (a profile
+  // UUID) back to a readable name in the Change Log.
+  useEffect(() => {
+    if (!authReady) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { getCompanyUsers } = await import("@/lib/supabase/users");
+        const rows = await getCompanyUsers();
+        if (cancelled) return;
+        const map: Record<string, string> = {};
+        rows.forEach((p: any) => { map[p.id] = p.display_name || p.email || p.id; });
+        setProfileNameById(map);
+      } catch (err) {
+        console.error("Failed to load profiles for audit log display:", err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [authReady]);
+
+  // Merge in the shared (Supabase) audit trail for this ticket, so edits
+  // made from any device show up in the Change Log here too — not just the
+  // entries this specific browser wrote to localStorage.
+  useEffect(() => {
+    if (!ticketDbId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { getTicketAuditLog } = await import("@/lib/supabase/tickets");
+        const rows = await getTicketAuditLog({ ticketId: ticketDbId });
+        if (cancelled) return;
+        const mapped: AuditLogEntry[] = rows.map((r) => ({
+          id: r.id,
+          timestamp: r.createdAt,
+          by: (r.changedBy && profileNameById[r.changedBy]) || r.changedBy || "Unknown",
+          action: r.action,
+          field: r.field,
+          before: r.beforeValue ?? "—",
+          after: r.afterValue ?? "—",
+        }));
+        setAuditEntries((prev) => {
+          // Drop any prior entry that represents the same event as one of
+          // the Supabase rows (e.g. this browser's own optimistic echo of an
+          // edit it just made) — the Supabase copy replaces it rather than
+          // sitting alongside it.
+          const withoutDupes = prev.filter((e) => !mapped.some((m) => isSameAuditEvent(e, m)));
+          const merged = [...withoutDupes, ...mapped];
+          return merged.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+        });
+      } catch (err) {
+        console.error("Failed to load shared ticket audit log:", err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [ticketDbId, profileNameById]);
+
   useEffect(() => {
     // Load audit entries from localStorage
     setAuditEntries(loadAuditEntries(ticketNo));
     setAuditEntriesLoaded(true);
-    
+
     // Reset loaded flags when ticket changes
     setVisitsLoaded(false);
     setPartRowsLoaded(false);
@@ -1408,6 +1659,28 @@ function TicketDetailsPage() {
 
   const appendAuditEntry = (entry: Omit<AuditLogEntry, "id" | "timestamp">) => {
     setAuditEntries((entries) => [createAuditEntry(entry), ...entries]);
+
+    // Write through to the shared Supabase audit trail so this change shows
+    // up in the Change Log from any device, not just this browser's
+    // localStorage. Best-effort — the local entry above already renders
+    // instantly for this session regardless of how this turns out.
+    if (ticketDbId) {
+      (async () => {
+        try {
+          const { logTicketAuditEntry } = await import("@/lib/supabase/tickets");
+          await logTicketAuditEntry({
+            ticketId: ticketDbId,
+            action: entry.action,
+            field: entry.field,
+            beforeValue: entry.before,
+            afterValue: entry.after,
+            changedBy: myProfileId,
+          });
+        } catch (err) {
+          console.error("Failed to write shared audit log entry:", err);
+        }
+      })();
+    }
   };
 
   const canFlagMisdiagnosed = canManageMisdiagnosed(currentUserRole);
@@ -1438,6 +1711,36 @@ function TicketDetailsPage() {
       after: next ? "Yes" : "No",
     });
   };
+
+  // Self-heal: the ticket's status should always mirror the latest visit's
+  // repair status. That invariant used to get silently broken by editing an
+  // older, not-yet-locked visit (see isLatestVisit above) — tickets that
+  // already drifted out of sync stay wrong forever otherwise, since nothing
+  // else re-checks this after the fact. Runs once visits have actually
+  // loaded, and only writes when there's a real mismatch to fix.
+  useEffect(() => {
+    if (!ticket || !visitsLoaded || !ticketDbId || visitLogEntries.length === 0) return;
+    const latest = visitLogEntries[0];
+    const latestStatus = latest.repairStatus?.trim();
+    if (!latestStatus || latestStatus === ticket.status) return;
+    const staleStatus = ticket.status;
+    (async () => {
+      try {
+        await sbUpdateTicketStatus(ticketNo, latestStatus);
+        setTicketData((prev) => (prev ? { ...prev, status: latestStatus } : prev));
+        appendAuditEntry({
+          by: "System",
+          action: "Resynced ticket status from latest visit",
+          field: "status",
+          before: staleStatus,
+          after: latestStatus,
+        });
+      } catch (err) {
+        console.error("Failed to resync ticket status from latest visit:", err);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visitsLoaded, visitLogEntries, ticketDbId]);
 
   const handleSendSpStatus = async () => {
     if (!spStatus) {
@@ -1667,7 +1970,6 @@ function TicketDetailsPage() {
     }
   };
 
-  const auditCountLabel = useMemo(() => `${auditEntries.length} change${auditEntries.length === 1 ? "" : "s"} logged`, [auditEntries.length]);
   const partAuditEntries = useMemo(
     () => auditEntries.filter((entry) => entry.field === "Part Transaction"),
     [auditEntries],
@@ -1680,6 +1982,33 @@ function TicketDetailsPage() {
     () => auditEntries.filter((entry) => entry.field === "Misdiagnosed"),
     [auditEntries],
   );
+  // Scoped to "Visit Log" entries; further narrowed to one specific visit
+  // (via visitLogEntryMatchesVisitNo) at the render site, same pattern as
+  // partAuditEntries below.
+  const visitAuditEntries = useMemo(
+    () => auditEntries.filter((entry) => entry.field === "Visit Log"),
+    [auditEntries],
+  );
+  // Ticket-level trigger rows (status/reschedule/reassign) — these have no
+  // visit reference, so they're matched to a specific visit by timing at
+  // the render site (see isNearAnyTimestamp) rather than filtered here.
+  const ticketLevelAuditEntries = useMemo(
+    () => auditEntries.filter((entry) => TICKET_LEVEL_AUDIT_FIELDS.has(entry.field)),
+    [auditEntries],
+  );
+  // Everything shown in a specific visit's Change Log: its own "Visit Log"
+  // entries plus whichever ticket-level status/reschedule rows happened
+  // right around that visit's save.
+  const visitChangeLogEntries = useMemo(() => {
+    if (!viewingVisitEntry) return [] as AuditLogEntry[];
+    const visitSpecific = visitAuditEntries.filter((e) =>
+      visitLogEntryMatchesVisitNo(e.before, viewingVisitEntry.visitNo) ||
+      visitLogEntryMatchesVisitNo(e.after, viewingVisitEntry.visitNo)
+    );
+    const anchors = [viewingVisitEntry.timestamp, ...visitSpecific.map((e) => e.timestamp)].filter(Boolean);
+    const ticketLevel = ticketLevelAuditEntries.filter((e) => isNearAnyTimestamp(e.timestamp, anchors));
+    return [...visitSpecific, ...ticketLevel].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  }, [visitAuditEntries, ticketLevelAuditEntries, viewingVisitEntry]);
   const partCountLabel = useMemo(
     () => `${partRows.length} distinct record${partRows.length === 1 ? "" : "s"} found`,
     [partRows.length],
@@ -1707,11 +2036,34 @@ function TicketDetailsPage() {
     setSelectedTicket(ticketNo);
   }, [ticketNo]);
 
+  // Load photo count for Claims Readiness Checklist (ADMIN/CLAIMS/BIZOPS only).
+  // Uses listTicketPhotos from Firebase Storage — non-blocking, best-effort.
+  const [ticketPhotoCount, setTicketPhotoCount] = useState<number | null>(null);
+  useEffect(() => {
+    const r = String(currentUserRole || "").toUpperCase();
+    const canSeeChecklist = [
+      "SUPERADMIN","ADMIN","MANAGER","CLAIMS","CLAIMS_MANAGER",
+      "BIZOPS_MANAGER","BIZOPS_SENIOR_MANAGER","FINANCE","SENIOR_BRANCH_MANAGER",
+    ].includes(r);
+    if (!canSeeChecklist || !authReady) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listTicketPhotos } = await import("@/lib/firebase/storage");
+        const cid = currentCompanyId || "COMP001";
+        const photos = await listTicketPhotos(cid, ticketNo);
+        if (!cancelled) setTicketPhotoCount(photos.length);
+      } catch {
+        if (!cancelled) setTicketPhotoCount(0);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [ticketNo, currentUserRole, authReady, currentCompanyId]);
+
   // Load ticket from centralized system
   const [ticketData, setTicketData] = useState<TicketData | null>(null);
-  // Real Supabase `tickets.id` (uuid) — distinct from ticketNo, needed for
-  // FK-based writes like Truck Stock pull requests (see truckStockRequests.ts).
-  const [ticketDbId, setTicketDbId] = useState<string | null>(null);
+  // (ticketDbId is declared earlier alongside myProfileId/profileNameById —
+  // effects above this point already depend on it.)
 
   useEffect(() => {
     // Load ticket from Supabase first; fall back to centralized/hardcoded.
@@ -1755,6 +2107,7 @@ function TicketDetailsPage() {
           serialNo: centralTicket.serial || "",
           modelVersion: (centralTicket as any).modelVersion || "",
           redoTicketNo: (centralTicket as any).originalTicketNo || "",
+          caseNumber: (centralTicket as any).caseNumber || "",
           productCategory: centralTicket.productType || "",
           purchaseDate: centralTicket.purchaseDate || "",
           warrantyType: mapServicePowerWarranty(centralTicket.warranty) || centralTicket.warranty,
@@ -1771,7 +2124,7 @@ function TicketDetailsPage() {
           callType: centralTicket.type || "",
           serviceType: (centralTicket as any).serviceType || "",
           callStatus: centralTicket.status,
-          postingDate: centralTicket.created,
+          postingDate: formatSpDate((centralTicket as any).createdAt) || centralTicket.created,
           repeatCall: centralTicket.redo ? "YES" : "NO",
           contractNo: (centralTicket as any).contractNo || "",
           copay: (centralTicket as any).copay || "",
@@ -1801,6 +2154,7 @@ function TicketDetailsPage() {
           nsaPreAuth: (centralTicket as any).nsaPreAuth || "",
           nsaCaseNumber: (centralTicket as any).nsaCaseNumber || (centralTicket as any).originalTicketNo || "",
           nsaMasterCode: (centralTicket as any).nsaMasterCode || "",
+          nsaCoverageExclusions: (centralTicket as any).nsaCoverageExclusions || "",
         };
         setTicketData(mapped);
       } else {
@@ -1886,12 +2240,17 @@ function TicketDetailsPage() {
   };
 
   // Auto-pull Call Service Information from ServicePower once the ticket has
-  // loaded. Runs once per ticket number. Reads handleSyncCallInfo lazily via
-  // a ref so the effect doesn't need it in its dep list (the function closes
-  // over `ticketNo` already).
+  // loaded. Runs once per ticket number. Skipped for NSA-sourced tickets
+  // (they don't exist in ServicePower and the call would corrupt the fields).
   useEffect(() => {
     if (!ticketData) return;
     if (autoSyncedRef.current === ticketNo) return;
+    // Skip SP auto-sync entirely for NSA tickets — SP doesn't know about them
+    // and the sync would overwrite ticketSource, account, etc. with blank/wrong values.
+    if (String(ticketData.ticketSource || "").toUpperCase().includes("NSA")) {
+      autoSyncedRef.current = ticketNo; // mark as "done" so it never retries
+      return;
+    }
     autoSyncedRef.current = ticketNo;
     // eslint-disable-next-line no-console
     console.log("[SP auto-sync] effect firing for ticket:", ticketNo);
@@ -1927,6 +2286,7 @@ function TicketDetailsPage() {
             nsaPreAuth: dispatch.preAuth ?? prev.nsaPreAuth,
             nsaCaseNumber: dispatch.caseNumber ?? prev.nsaCaseNumber,
             nsaMasterCode: dispatch.masterCode ?? prev.nsaMasterCode,
+            nsaCoverageExclusions: dispatch.coverageExclusions ?? prev.nsaCoverageExclusions,
           };
         });
       } catch (err) {
@@ -1967,9 +2327,10 @@ function TicketDetailsPage() {
   // through progressively looser destination strings so a slightly-off address
   // still resolves instead of showing "— mi".
   useEffect(() => {
-    if (!ticket) { setOfficeDistanceMiles(null); return; }
-    const office = getOfficeCoordinates(ticket.location || ticket.city || "");
-    if (!office) { setOfficeDistanceMiles(null); return; }
+    if (!ticket || !mapProvider) { setOfficeDistanceMiles(null); return; }
+    const overrideOrigin = getElectroluxHuntsvilleMileageOrigin(ticket);
+    const office = overrideOrigin ? null : getOfficeCoordinates(ticket.location || ticket.city || "");
+    if (!overrideOrigin && !office) { setOfficeDistanceMiles(null); return; }
 
     // Candidate destination strings, most specific first.
     const destinationCandidates = [
@@ -1984,13 +2345,43 @@ function TicketDetailsPage() {
     if (destinationCandidates.length === 0) { setOfficeDistanceMiles(null); return; }
 
     let cancelled = false;
+
+    // Leaflet mode: geocode via Geoapify, then get real driving distance via
+    // Geoapify's Routing API (same key) — falls back to straight-line only
+    // if the routing call itself fails.
+    if (mapProvider === "leaflet") {
+      const geocode = makeGeocoder("leaflet");
+      (async () => {
+        let destCoords: { lat: number; lng: number } | null = null;
+        for (const candidate of destinationCandidates) {
+          if (cancelled) return;
+          destCoords = await geocode(candidate);
+          if (destCoords) break;
+        }
+        if (cancelled || !destCoords) { if (!cancelled) setOfficeDistanceMiles(null); return; }
+
+        const originCoords = overrideOrigin ? await geocode(overrideOrigin) : office!;
+        if (cancelled) return;
+        if (!originCoords) { setOfficeDistanceMiles(null); return; }
+
+        const route = await routeGeoapify([originCoords, destCoords], "drive");
+        if (cancelled) return;
+        setOfficeDistanceMiles(route ? metersToMiles(route.totalDistanceMeters) : milesBetween(originCoords, destCoords));
+      })();
+      return () => { cancelled = true; };
+    }
+
     const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string;
 
     const computeDistance = () => {
       const maps = (window as Window & { google?: any }).google?.maps;
       if (!maps) return;
       const service = new maps.DistanceMatrixService();
-      const originLatLng = new maps.LatLng(office.lat, office.lng);
+      // The Distance Matrix API accepts a plain address string for origins
+      // too (it geocodes it the same way it does destinations), so the
+      // Electrolux/Huntsville override just passes its address straight
+      // through — no need to resolve it to lat/lng ourselves.
+      const origin = overrideOrigin ?? new maps.LatLng(office!.lat, office!.lng);
 
       const tryCandidate = (idx: number) => {
         if (cancelled) return;
@@ -1999,19 +2390,31 @@ function TicketDetailsPage() {
           const geocoder = new maps.Geocoder();
           geocoder.geocode({ address: destinationCandidates[0] }, (results: any, status: string) => {
             if (cancelled) return;
-            if (status === "OK" && results?.[0]) {
-              const pos = results[0].geometry.location;
-              setOfficeDistanceMiles(milesBetween(office, { lat: pos.lat(), lng: pos.lng() }));
-            } else {
-              setOfficeDistanceMiles(null);
+            if (status !== "OK" || !results?.[0]) { setOfficeDistanceMiles(null); return; }
+            const pos = results[0].geometry.location;
+            const destCoords = { lat: pos.lat(), lng: pos.lng() };
+            if (!overrideOrigin) {
+              setOfficeDistanceMiles(milesBetween(office!, destCoords));
+              return;
             }
+            // Origin is an address string here — geocode it too so the
+            // Haversine fallback has coordinates to work with.
+            geocoder.geocode({ address: overrideOrigin }, (originResults: any, originStatus: string) => {
+              if (cancelled) return;
+              if (originStatus === "OK" && originResults?.[0]) {
+                const originPos = originResults[0].geometry.location;
+                setOfficeDistanceMiles(milesBetween({ lat: originPos.lat(), lng: originPos.lng() }, destCoords));
+              } else {
+                setOfficeDistanceMiles(null);
+              }
+            });
           });
           return;
         }
 
         service.getDistanceMatrix(
           {
-            origins: [originLatLng],
+            origins: [origin],
             destinations: [destinationCandidates[idx]],
             travelMode: maps.TravelMode.DRIVING,
             unitSystem: maps.UnitSystem.IMPERIAL,
@@ -2032,25 +2435,14 @@ function TicketDetailsPage() {
       tryCandidate(0);
     };
 
-    if ((window as Window & { google?: any }).google?.maps) {
-      computeDistance();
-    } else if (apiKey) {
-      const existing = document.querySelector<HTMLScriptElement>('script[data-google-maps="ticket-distance"]');
-      if (existing) {
-        existing.addEventListener("load", computeDistance, { once: true });
-      } else {
-        const script = document.createElement("script");
-        script.dataset.googleMaps = "ticket-distance";
-        script.async = true;
-        script.defer = true;
-        script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&v=3.52`;
-        script.onload = computeDistance;
-        document.head.appendChild(script);
-      }
+    if (apiKey) {
+      loadGoogleMapsScript()
+        .then(() => { if (!cancelled) computeDistance(); })
+        .catch(() => { if (!cancelled) setOfficeDistanceMiles(null); });
     }
 
     return () => { cancelled = true; };
-  }, [ticket?.location, ticket?.address, ticket?.city, ticket?.state, ticket?.zip]);
+  }, [ticket?.account, ticket?.location, ticket?.address, ticket?.city, ticket?.state, ticket?.zip, mapProvider]);
 
   // Compute related tickets: any OTHER company ticket sharing a key field with
   // this one (email, phone, zip, customer name, address, model, or serial).
@@ -2251,6 +2643,7 @@ function TicketDetailsPage() {
         serialNo: ticket.serialNo,
         modelVersion: ticket.modelVersion,
         redoTicketNo: ticket.redoTicketNo,
+        caseNumber: ticket.caseNumber,
         productCategory: ticket.productCategory,
         purchaseDate: ticket.purchaseDate,
         warrantyType: ticket.warrantyType,
@@ -2263,7 +2656,7 @@ function TicketDetailsPage() {
   const saveProductInfo = async () => {
     if (!ticket) return;
 
-    const fieldsToCheck: Array<keyof TicketData> = ["brand", "model", "serialNo", "modelVersion", "redoTicketNo", "productCategory", "purchaseDate", "warrantyType", "claimCompany"];
+    const fieldsToCheck: Array<keyof TicketData> = ["brand", "model", "serialNo", "modelVersion", "redoTicketNo", "caseNumber", "productCategory", "purchaseDate", "warrantyType", "claimCompany"];
     fieldsToCheck.forEach((field) => {
       const oldValue = formatAuditValue(ticket[field]);
       const newValue = formatAuditValue(editedProductInfo[field]);
@@ -2288,6 +2681,7 @@ function TicketDetailsPage() {
       serial: editedProductInfo.serialNo || ticket.serialNo,
       modelVersion: editedProductInfo.modelVersion ?? ticket.modelVersion,
       originalTicketNo: editedProductInfo.redoTicketNo ?? ticket.redoTicketNo,
+      caseNumber: editedProductInfo.caseNumber ?? ticket.caseNumber,
       productType: editedProductInfo.productCategory || ticket.productCategory,
       purchaseDate: editedProductInfo.purchaseDate || ticket.purchaseDate,
       warranty: editedProductInfo.warrantyType || ticket.warrantyType,
@@ -2308,6 +2702,7 @@ function TicketDetailsPage() {
         warranty: editedProductInfo.warrantyType ?? ticket.warrantyType,
         claimCompany: editedProductInfo.claimCompany ?? ticket.claimCompany,
         originalTicketNo: editedProductInfo.redoTicketNo ?? ticket.redoTicketNo,
+        caseNumber: editedProductInfo.caseNumber ?? ticket.caseNumber,
       });
     } catch (err) {
       console.error("Failed to persist product info:", err);
@@ -2523,6 +2918,7 @@ function TicketDetailsPage() {
         triageNote: newVisitTriageNote,
         status: newVisitStatus,
         note: trimmedNote,
+        locked: false,
       })),
       by: currentEditor,
       scheduleDate: newVisitScheduleDate,
@@ -2547,6 +2943,18 @@ function TicketDetailsPage() {
     };
 
     visitEntry.updatedAt = editingVisitId ? new Date().toISOString() : undefined;
+    visitEntry.updatedBy = editingVisitId ? (myProfileId ?? undefined) : undefined;
+
+    // A brand-new visit supersedes whichever visit was previously the latest
+    // (visitLogEntries[0] — the log is newest-first). Auto-mark that one as
+    // rescheduled and lock it so it can't be edited afterward — only the
+    // newest visit's repair status should ever drive the ticket status:
+    // e.g. adding V3 flips V2 to "OP-Reschedule Follow up" and locks it,
+    // while V3's own repair status becomes the ticket's status below.
+    const previousLatestVisit = !editingVisitId ? visitLogEntries[0] ?? null : null;
+    const supersededVisit: VisitLogEntry | null = previousLatestVisit
+      ? { ...previousLatestVisit, repairStatus: "OP-Reschedule Follow up", locked: true }
+      : null;
 
     // Persist the visit to Supabase
     try {
@@ -2557,27 +2965,44 @@ function TicketDetailsPage() {
         // adopt the DB-generated id so future edits target the right row
         visitEntry.id = saved.id;
       }
-      // Sync the ticket itself with this visit: schedule date, technician, slot.
-      await sbUpdateTicketAssignment(ticketNo, {
-        technician: newVisitTechnician,
-        scheduleDate: newVisitScheduleDate,
-        timeSlot: newVisitTimeSlot,
-      }).catch((e) => console.warn("assignment sync skipped:", e));
-      // Set the ticket's status from the visit's REPAIR STATUS (not the visit status).
-      if (newVisitRepairStatus) {
-        await sbUpdateTicketStatus(ticketNo, newVisitRepairStatus).catch((e) =>
-          console.warn("status update skipped:", e)
+      if (supersededVisit) {
+        await sbUpdateTicketVisit(supersededVisit.id, supersededVisit as any).catch((e) =>
+          console.warn("previous visit reschedule sync skipped:", e)
         );
       }
-      // A CL-Cancelled status requires a reason — recorded in its own
-      // column (Ticket List's "Cancellation Reason" column), not embedded
-      // in Internal Note. Only BizOps Manager+ can actually reach this
-      // (see canSetCancelled below).
-      if (newVisitRepairStatus === "CL-Cancelled" && newVisitCancelReason) {
-        try {
-          await sbUpdateTicketFields(ticketNo, { cancellationReason: newVisitCancelReason });
-        } catch (e) {
-          console.warn("cancellation reason update skipped:", e);
+      // Only the LATEST visit should ever drive the ticket's status/
+      // assignment — adding a new visit always qualifies (it becomes the
+      // new latest), but editing an existing one only qualifies if it's
+      // still the current latest. Without this guard, editing an older
+      // visit (e.g. fixing a typo in V1's notes on a ticket that already
+      // has V2/V3) would silently overwrite the ticket's status/schedule
+      // with that older visit's values. Older visits added before the
+      // locking feature existed were never retroactively locked, so their
+      // Edit button is still clickable — this is the real backstop.
+      const isLatestVisit = !editingVisitId || editingVisitId === visitLogEntries[0]?.id;
+      if (isLatestVisit) {
+        // Sync the ticket itself with this visit: schedule date, technician, slot.
+        await sbUpdateTicketAssignment(ticketNo, {
+          technician: newVisitTechnician,
+          scheduleDate: newVisitScheduleDate,
+          timeSlot: newVisitTimeSlot,
+        }).catch((e) => console.warn("assignment sync skipped:", e));
+        // Set the ticket's status from the visit's REPAIR STATUS (not the visit status).
+        if (newVisitRepairStatus) {
+          await sbUpdateTicketStatus(ticketNo, newVisitRepairStatus).catch((e) =>
+            console.warn("status update skipped:", e)
+          );
+        }
+        // A CL-Cancelled status requires a reason — recorded in its own
+        // column (Ticket List's "Cancellation Reason" column), not embedded
+        // in Internal Note. Only BizOps Manager+ can actually reach this
+        // (see canSetCancelled below).
+        if (newVisitRepairStatus === "CL-Cancelled" && newVisitCancelReason) {
+          try {
+            await sbUpdateTicketFields(ticketNo, { cancellationReason: newVisitCancelReason });
+          } catch (e) {
+            console.warn("cancellation reason update skipped:", e);
+          }
         }
       }
     } catch (err) {
@@ -2591,7 +3016,10 @@ function TicketDetailsPage() {
         return entries.map((entry) => (entry.id === editingVisitId ? visitEntry : entry));
       }
 
-      return [visitEntry, ...entries];
+      const withReschedule = supersededVisit
+        ? entries.map((entry) => (entry.id === supersededVisit.id ? supersededVisit : entry))
+        : entries;
+      return [visitEntry, ...withReschedule];
     });
     appendAuditEntry({
       by: currentEditor,
@@ -2600,6 +3028,15 @@ function TicketDetailsPage() {
       before: existingVisit ? summarizeVisitEntry(existingVisit) : "—",
       after: summarizeVisitEntry(visitEntry),
     });
+    if (supersededVisit && previousLatestVisit) {
+      appendAuditEntry({
+        by: currentEditor,
+        action: "Auto-rescheduled prior visit",
+        field: "Visit Log",
+        before: `Visit ${previousLatestVisit.visitNo} - ${previousLatestVisit.repairStatus || "—"}`,
+        after: `Visit ${previousLatestVisit.visitNo} - OP-Reschedule Follow up`,
+      });
+    }
 
     clearVisitForm();
     setIsVisitModalOpen(false);
@@ -2611,7 +3048,7 @@ function TicketDetailsPage() {
     setNewVisitNote("");
     setNewVisitStatus("Visited");
     setNewVisitScheduleDate("");
-    setNewVisitTechnician("Memphis Admin");
+    setNewVisitTechnician(defaultTechnicianForLocation(ticket?.location));
     setNewVisitTimeSlot("");
     setNewVisitActivity("");
     setNewVisitActionType("SCHEDULE");
@@ -2795,6 +3232,12 @@ function TicketDetailsPage() {
   };
 
   const openVisitEditModal = (entry: VisitLogEntry) => {
+    // Locked (superseded) visits are still editable — notes, diagnosis,
+    // schedule, etc. can all be corrected — just not the Repair Status,
+    // which stays "OP-Reschedule Follow up" (see the Repair Status field
+    // below). isLatestVisit already keeps any edit to a non-latest visit
+    // from touching the ticket's live status/assignment, regardless of
+    // which fields changed, so this is safe to allow.
     loadVisitForEdit(entry);
     setIsVisitModalOpen(true);
   };
@@ -2802,18 +3245,25 @@ function TicketDetailsPage() {
   const loadVisitForEdit = (entry: VisitLogEntry) => {
     setVisitFormMode("edit");
     setEditingVisitId(entry.id);
-    setNewVisitStatus(entry.status || "Visited");
+    // Preserve the entry's actual stored value for every field, including
+    // when it's blank — these four (status, actionType, visited,
+    // notCompleted) previously fell back to a non-blank default ("Visited"/
+    // "No") whenever the stored value was empty. status/visited/
+    // notCompleted have no visible form control at all, so that default
+    // silently overwrote a blank field with a fabricated value on every
+    // save, no matter what the user actually edited.
+    setNewVisitStatus(entry.status || "");
     setNewVisitNote(entry.note || "");
     setNewVisitScheduleDate(entry.scheduleDate || "");
     setNewVisitTechnician(entry.technician || "");
     setNewVisitTimeSlot(entry.timeSlot || "");
     setNewVisitActivity(entry.activity || "");
-    setNewVisitActionType(entry.actionType || "Visited");
+    setNewVisitActionType(entry.actionType || "");
     setNewVisitRepairStatus(entry.repairStatus || "");
     setNewVisitRepairType(entry.repairType || "");
     setNewVisitReclaim(entry.reclaim || "");
-    setNewVisitVisited(entry.visited || "Visited");
-    setNewVisitNotCompleted(entry.notCompleted || "No");
+    setNewVisitVisited(entry.visited || "");
+    setNewVisitNotCompleted(entry.notCompleted || "");
     setNewVisitSymptomCx(entry.symptomCx || "");
     setNewVisitDiagnosis(entry.diagnosis || "");
     setNewVisitSymptomTech(entry.symptomTech || "");
@@ -2829,18 +3279,58 @@ function TicketDetailsPage() {
     setViewingVisitEntry(entry);
   };
 
-  const deleteVisitLogEntry = (visitId: string) => {
+  const deleteVisitLogEntry = async (visitId: string) => {
     if (!confirm("Remove this visit log entry?")) return;
 
     const entryToDelete = visitLogEntries.find((entry) => entry.id === visitId) ?? null;
-    setVisitLogEntries((entries) => entries.filter((entry) => entry.id !== visitId));
+    if (!entryToDelete) return;
+
+    // Deleting the current latest visit (visitLogEntries[0] — newest-first)
+    // un-supersedes whichever visit is now the latest: unlock it and put its
+    // repair status back in the driver's seat for the ticket's status.
+    const wasLatest = visitLogEntries[0]?.id === visitId;
+    const remaining = visitLogEntries.filter((entry) => entry.id !== visitId);
+    const newLatest = wasLatest ? remaining[0] ?? null : null;
+    const unlockedVisit: VisitLogEntry | null = newLatest && newLatest.locked
+      ? { ...newLatest, locked: false }
+      : null;
+
+    try {
+      await sbDeleteTicketVisit(visitId);
+      if (unlockedVisit) {
+        await sbUpdateTicketVisit(unlockedVisit.id, unlockedVisit as any);
+        if (unlockedVisit.repairStatus) {
+          await sbUpdateTicketStatus(ticketNo, unlockedVisit.repairStatus).catch((e) =>
+            console.warn("status update skipped:", e)
+          );
+        }
+      }
+    } catch (err) {
+      console.error("Failed to delete visit:", err);
+      alert(`Failed to delete visit: ${err instanceof Error ? err.message : "Unknown error"}`);
+      return;
+    }
+
+    setVisitLogEntries((entries) => {
+      const next = entries.filter((entry) => entry.id !== visitId);
+      return unlockedVisit ? next.map((entry) => (entry.id === unlockedVisit.id ? unlockedVisit : entry)) : next;
+    });
     appendAuditEntry({
       by: currentEditor,
       action: "Deleted visit log",
       field: "Visit Log",
-      before: entryToDelete ? summarizeVisitEntry(entryToDelete) : "—",
+      before: summarizeVisitEntry(entryToDelete),
       after: "Removed",
     });
+    if (unlockedVisit) {
+      appendAuditEntry({
+        by: currentEditor,
+        action: "Unlocked visit after deletion",
+        field: "Visit Log",
+        before: `Visit ${unlockedVisit.visitNo} - locked`,
+        after: `Visit ${unlockedVisit.visitNo} - unlocked, now the latest visit`,
+      });
+    }
 
     if (editingVisitId === visitId) {
       clearVisitForm();
@@ -3331,13 +3821,16 @@ function TicketDetailsPage() {
         }
       }
 
-      // Reflect changes in the grid immediately.
+      // Reflect changes in the grid immediately. Newly inserted rows go at
+      // the end, not the front — P1..Pn are assigned by array position (see
+      // the `P{index + 1}` label in the parts table) and P1 must stay the
+      // oldest part.
       setPartRows((prev) => {
         const next = prev.map((row) => {
           const u = updates.find((x) => x.id === row.id);
           return u ? u.next : row;
         });
-        return [...insertedWithIds, ...next];
+        return [...next, ...insertedWithIds];
       });
 
       // Audit log entries so the timeline shows who imported what.
@@ -4291,7 +4784,11 @@ function TicketDetailsPage() {
         before: "—",
         after: summarizePartRow(nextRow),
       });
-      return [nextRow, ...rows];
+      // Append, don't prepend — P1..Pn are assigned by array position
+      // (see the `P{index + 1}` label in the parts table), and P1 must
+      // stay the oldest part. Prepending here used to bump every existing
+      // part's number up and relabel the brand-new part P1.
+      return [...rows, nextRow];
     });
 
     // Auto-create/update PO in PO Management when part has "Need PO" status or becomes ordered
@@ -4621,7 +5118,7 @@ function TicketDetailsPage() {
         <td className="px-2 py-1.5 text-slate-500 w-10" rowSpan={2}></td>
         <td className="px-1 py-1.5">
           <div className="flex gap-1">
-            <input value={partDraft.partNo} onChange={(e) => setPartDraft((d) => ({ ...d, partNo: e.target.value }))} className="flex-1 min-w-0 rounded border border-white/15 bg-slate-950 px-2 py-1 text-white focus:outline-none focus:border-blue-500" placeholder="Part No*" />
+            <input value={partDraft.partNo} onChange={(e) => setPartDraft((d) => ({ ...d, partNo: e.target.value }))} className={`flex-1 min-w-0 rounded border border-white/15 bg-slate-950 px-2 py-1 font-semibold focus:outline-none focus:border-blue-500 ${partDraft.status ? partStatusTextClass(partDraft.status) : "text-white"}`} placeholder="Part No*" />
             <button
               type="button"
               onClick={handleMarconeLookup}
@@ -4735,6 +5232,7 @@ function TicketDetailsPage() {
             <option>RA - Qty Discrepancy</option>
             <option>SQT Received</option>
             <option>Tech Pickup</option>
+            <option>Transfer to Another Ticket</option>
             <option>Used</option>
           </select>
         </td>
@@ -4742,7 +5240,12 @@ function TicketDetailsPage() {
           <input value={partDraft.note} onChange={(e) => setPartDraft((d) => ({ ...d, note: e.target.value }))} className="w-full rounded border border-white/15 bg-slate-950 px-2 py-1 text-white focus:outline-none focus:border-blue-500" placeholder="Note" />
         </td>
         <td className="px-1 py-1.5">
-          <input value={partDraft.visitId} onChange={(e) => setPartDraft((d) => ({ ...d, visitId: e.target.value }))} className="w-full rounded border border-white/15 bg-slate-950 px-2 py-1 text-white focus:outline-none focus:border-blue-500" placeholder="Visit ID*" />
+          <select value={partDraft.visitId} onChange={(e) => setPartDraft((d) => ({ ...d, visitId: e.target.value }))} className="w-full rounded border border-white/15 bg-slate-950 px-2 py-1 text-white focus:outline-none focus:border-blue-500">
+            <option value="">Visit ID*</option>
+            {visitLogEntries.map((entry) => (
+              <option key={entry.id} value={entry.visitNo}>{entry.visitNo}</option>
+            ))}
+          </select>
         </td>
         <td className="px-1 py-1.5">
           <input value={partDraft.orderNo} onChange={(e) => setPartDraft((d) => ({ ...d, orderNo: e.target.value }))} className="w-full rounded border border-white/15 bg-slate-950 px-2 py-1 text-white focus:outline-none focus:border-blue-500" placeholder="Order #" />
@@ -4798,6 +5301,15 @@ function TicketDetailsPage() {
         </td>
       </tr>
     </>
+  );
+
+  // A locked (superseded) visit is still editable — notes, diagnosis,
+  // symptoms, resolution, etc. can all be corrected — but Repair Status,
+  // Schedule Date, and Technician stay frozen at whatever they were when
+  // superseded, since those three drive the ticket's own status/schedule/
+  // assignment and only the latest visit should ever be allowed to do that.
+  const editingLockedVisit = Boolean(
+    editingVisitId && visitLogEntries.find((entry) => entry.id === editingVisitId)?.locked
   );
 
   return (
@@ -4887,24 +5399,21 @@ function TicketDetailsPage() {
                       // (falls back to the Squaretrade landing form when
                       // no token has been saved yet).
                       const accountName = String(ticket.account || "").toLowerCase().replace(/\s+/g, "");
-                      const isSquaretrade = accountName.includes("squaretrade");
+                      const isNSA = accountName.includes("nsa") || String(ticket.ticketSource || "").toUpperCase().includes("NSA");
+                      const isSquaretrade = !isNSA && accountName.includes("squaretrade");
                       const hasSaved = isSquaretrade && Boolean(squaretradeUrl);
-                      // Squaretrade tickets jump straight to that ticket's
-                      // Appointment Completion form when we have it. When
-                      // we don't, we deep-link to the same work order in
-                      // ServicePower HUB — SP's SOAP API doesn't expose
-                      // the HUB-only conversation thread that contains
-                      // the URL, so landing on the right work order lets
-                      // claims read it off HUB and paste it via the
-                      // pencil icon.
-                      const href = isSquaretrade
-                        ? resolveSquaretradeUrl(ticketNo)
-                        : `https://hub.servicepower.com/dashboard/workorders/${encodeURIComponent(ticketNo)}`;
-                      const title = isSquaretrade
-                        ? hasSaved
-                          ? "Open this ticket's Squaretrade appointment completion form in a new tab"
-                          : "Opens this work order in ServicePower HUB so you can read the Appointment Completion URL and paste it back here via the pencil icon."
-                        : "Open this work order in ServicePower HUB";
+                      const href = isNSA
+                        ? "https://nationalservicealliance.com/login.php"
+                        : isSquaretrade
+                          ? resolveSquaretradeUrl(ticketNo)
+                          : `https://hub.servicepower.com/dashboard/workorders/${encodeURIComponent(ticketNo)}`;
+                      const title = isNSA
+                        ? "Open NSA Service Facility Portal"
+                        : isSquaretrade
+                          ? hasSaved
+                            ? "Open this ticket's Squaretrade appointment completion form in a new tab"
+                            : "Opens this work order in ServicePower HUB so you can read the Appointment Completion URL and paste it back here via the pencil icon."
+                          : "Open this work order in ServicePower HUB";
                       return (
                         <>
                           <a
@@ -5069,7 +5578,7 @@ function TicketDetailsPage() {
                       <CalendarDays className="h-4 w-4" />
                     </a>
                     <span
-                      className="text-xs font-semibold text-slate-300"
+                      className="rounded-md bg-emerald-700/30 border border-emerald-500/40 px-2.5 py-1 text-sm font-bold text-emerald-200"
                       title="Driving distance from office to customer"
                     >
                       {officeDistanceMiles != null ? `${officeDistanceMiles.toFixed(1)} mi` : "— mi"}
@@ -5107,20 +5616,53 @@ function TicketDetailsPage() {
               <div className="space-y-4 mb-8 rounded-lg border border-blue-500/30 bg-blue-900/20 p-4">
                 <h4 className="font-semibold text-slate-300 text-sm">Customer</h4>
                 {!isEditingCustomerInfo ? (
-                  <div className="grid grid-cols-3 gap-4 text-sm">
-                    <div>
-                      <div className="text-slate-500 font-semibold text-xs">Name</div>
-                      <div className="text-white font-semibold mt-1">{ticket.firstName} {ticket.lastName}</div>
+                  <>
+                    <div className="grid grid-cols-3 gap-4 text-sm">
+                      <div>
+                        <div className="text-slate-500 font-semibold text-xs">Name</div>
+                        <div className="text-white font-semibold mt-1">{ticket.firstName} {ticket.lastName}</div>
+                      </div>
+                      <div>
+                        <div className="text-slate-500 font-semibold text-xs">Phone</div>
+                        <div className="text-white font-semibold mt-1">{ticket.homePhone || ticket.cellPhone || "—"}</div>
+                      </div>
+                      <div>
+                        <div className="text-slate-500 font-semibold text-xs">Location</div>
+                        <div className="text-white font-semibold mt-1">{ticket.location || ticket.city || "—"}</div>
+                      </div>
                     </div>
-                    <div>
-                      <div className="text-slate-500 font-semibold text-xs">Phone</div>
-                      <div className="text-white font-semibold mt-1">{ticket.homePhone || ticket.cellPhone || "—"}</div>
-                    </div>
-                    <div>
-                      <div className="text-slate-500 font-semibold text-xs">Location</div>
-                      <div className="text-white font-semibold mt-1">{ticket.location || ticket.city || "—"}</div>
-                    </div>
-                  </div>
+                    {/* NSA-specific identifiers shown inside customer card */}
+                    {String(ticket.ticketSource || "").toUpperCase().includes("NSA") ? (
+                      <div className="grid grid-cols-3 gap-4 text-sm mt-3 pt-3 border-t border-orange-500/20">
+                        <div>
+                          <div className="text-slate-500 font-semibold text-xs">Account No</div>
+                          <div className="text-orange-300 font-semibold mt-1">
+                            {ticket.accountNo || "MEMPHISUAI"}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-slate-500 font-semibold text-xs">Case Number</div>
+                          <div className="text-white font-semibold mt-1">{ticket.caseNumber || ticket.nsaCaseNumber || "—"}</div>
+                        </div>
+                        <div>
+                          <div className="text-slate-500 font-semibold text-xs">Master Code</div>
+                          <div className="text-white font-semibold mt-1">{ticket.nsaMasterCode || String(ticket.ticketNo || "").slice(0, 3) || "—"}</div>
+                        </div>
+                      </div>
+                    ) : ticket.caseNumber ? (
+                      // Non-NSA ticket with a manually-entered case number
+                      // (New Ticket's "Case Number" field, tickets.case_number,
+                      // migration 0056) — same styling as the NSA callout
+                      // above, just without the NSA-only Account No / Master
+                      // Code fields, which don't apply here.
+                      <div className="grid grid-cols-3 gap-4 text-sm mt-3 pt-3 border-t border-white/10">
+                        <div>
+                          <div className="text-slate-500 font-semibold text-xs">Case Number</div>
+                          <div className="text-white font-semibold mt-1">{ticket.caseNumber}</div>
+                        </div>
+                      </div>
+                    ) : null}
+                  </>
                 ) : (
                   <div className="grid grid-cols-3 gap-4 text-sm">
                     {/* Name is intentionally read-only — only address fields
@@ -5341,6 +5883,10 @@ function TicketDetailsPage() {
                       <div className="text-white mt-1">{ticket.redoTicketNo || "NONE"}</div>
                     </div>
                     <div>
+                      <label className="text-slate-500 font-semibold">Case Number</label>
+                      <div className="text-white mt-1">{ticket.caseNumber || "—"}</div>
+                    </div>
+                    <div>
                       <label className="text-slate-500 font-semibold">Product Category</label>
                       <div className="text-white mt-1">{ticket.productCategory || "—"}</div>
                     </div>
@@ -5408,6 +5954,15 @@ function TicketDetailsPage() {
                         type="text"
                         value={editedProductInfo.redoTicketNo ?? ""}
                         onChange={(e) => setEditedProductInfo({ ...editedProductInfo, redoTicketNo: e.target.value })}
+                        className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-600 text-white text-sm focus:outline-none focus:border-blue-400"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-slate-400 font-semibold text-xs mb-1 block">Case Number</label>
+                      <input
+                        type="text"
+                        value={editedProductInfo.caseNumber ?? ""}
+                        onChange={(e) => setEditedProductInfo({ ...editedProductInfo, caseNumber: e.target.value })}
                         className="w-full px-3 py-2 rounded bg-slate-800 border border-slate-600 text-white text-sm focus:outline-none focus:border-blue-400"
                       />
                     </div>
@@ -5509,7 +6064,22 @@ function TicketDetailsPage() {
                 <div className="grid grid-cols-2 gap-4 text-sm">
                   <div>
                     <label className="text-slate-500 font-semibold">Account No</label>
-                    <div className="text-white mt-1">{ticket.accountNo || "—"}</div>
+                    <div className="text-white mt-1">
+                      {String(ticket.ticketSource || "").toUpperCase().includes("NSA") ? (
+                        <a
+                          href="https://nationalservicealliance.com/login.php"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-orange-300 hover:text-orange-200 hover:underline font-semibold"
+                          title="Open NSA Portal"
+                        >
+                          {ticket.accountNo || "NSA"}
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
+                        </a>
+                      ) : (
+                        ticket.accountNo || "—"
+                      )}
+                    </div>
                   </div>
                   <div>
                     <label className="text-slate-500 font-semibold">Manufacture ID</label>
@@ -5521,7 +6091,22 @@ function TicketDetailsPage() {
                   </div>
                   <div>
                     <label className="text-slate-500 font-semibold">Ticket Source</label>
-                    <div className="text-white mt-1">{ticket.ticketSource || "—"}</div>
+                    <div className="text-white mt-1">
+                      {String(ticket.ticketSource || "").toUpperCase().includes("NSA") ? (
+                        <a
+                          href="https://nationalservicealliance.com/login.php"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-orange-300 hover:text-orange-200 hover:underline font-semibold"
+                          title="Open NSA Portal"
+                        >
+                          {ticket.ticketSource}
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
+                        </a>
+                      ) : (
+                        ticket.ticketSource || "—"
+                      )}
+                    </div>
                   </div>
                   <div>
                     <label className="text-slate-500 font-semibold">Call Type</label>
@@ -5573,22 +6158,56 @@ function TicketDetailsPage() {
               {/* NSA Dispatch Information — only shown for NSA-sourced tickets */}
               {String(ticket.ticketSource || "").toUpperCase().includes("NSA") && (
                 <div className="space-y-4 mb-8">
-                  <div className="flex items-center gap-2">
-                    <h4 className="font-semibold text-slate-300">NSA Dispatch Information</h4>
+                  {/* Section header */}
+                  <div className="flex items-center gap-2 border-b border-orange-500/20 pb-2">
+                    <h4 className="font-semibold text-slate-300">Call (Service) Information</h4>
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-orange-500/20 text-orange-300 border border-orange-500/30 uppercase tracking-wider">NSA</span>
+                    <a
+                      href="https://nationalservicealliance.com/login.php"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="ml-auto text-xs text-orange-300 hover:text-orange-200 hover:underline flex items-center gap-1"
+                    >
+                      Open NSA Portal
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
+                    </a>
                   </div>
+
+                  {/* Row 1 — identifiers */}
                   <div className="grid grid-cols-2 gap-4 text-sm">
                     <div>
+                      <label className="text-slate-500 font-semibold">Ticket No</label>
+                      <div className="text-white mt-1 font-mono">{ticket.ticketNo || "—"}</div>
+                    </div>
+                    <div>
+                      <label className="text-slate-500 font-semibold">Posting Date</label>
+                      <div className="text-white mt-1">{ticket.postingDate || "—"}</div>
+                    </div>
+                    <div>
+                      <label className="text-slate-500 font-semibold">Account No</label>
+                      <div className="text-white mt-1">
+                        {ticket.accountNo || "MEMPHISUAI"}
+                      </div>
+                    </div>
+                    <div>
                       <label className="text-slate-500 font-semibold">Case Number</label>
-                      <div className="text-white mt-1">{ticket.nsaCaseNumber || ticket.redoTicketNo || "—"}</div>
+                      <div className="text-white mt-1">{ticket.caseNumber || ticket.nsaCaseNumber || "—"}</div>
                     </div>
                     <div>
                       <label className="text-slate-500 font-semibold">Master Code</label>
-                      <div className="text-white mt-1">{ticket.nsaMasterCode || "—"}</div>
+                      <div className="text-white mt-1">{ticket.nsaMasterCode || String(ticket.ticketNo || "").slice(0, 3) || "—"}</div>
                     </div>
                     <div>
+                      <label className="text-slate-500 font-semibold">Cx Preferred Date</label>
+                      <div className="text-white mt-1">{ticket.schedulePeriod || "—"}</div>
+                    </div>
+                  </div>
+
+                  {/* Row 2 — NSA status + routing */}
+                  <div className="grid grid-cols-2 gap-4 text-sm">
+                    <div>
                       <label className="text-slate-500 font-semibold">NSA Status</label>
-                      <div className="text-orange-300 mt-1 font-semibold capitalize">{ticket.nsaStatus || "—"}</div>
+                      <div className="text-orange-300 mt-1 font-semibold capitalize">{ticket.nsaStatus || ticket.callStatus || "—"}</div>
                     </div>
                     <div>
                       <label className="text-slate-500 font-semibold">Route Name</label>
@@ -5604,40 +6223,56 @@ function TicketDetailsPage() {
                     </div>
                     <div>
                       <label className="text-slate-500 font-semibold">Schedule ACK</label>
-                      <div className="text-white mt-1">{ticket.nsaScheduleAck ? new Date(ticket.nsaScheduleAck).toLocaleString() : "—"}</div>
+                      <div className="text-white mt-1">
+                        {ticket.nsaScheduleAck
+                          ? (() => { try { return new Date(ticket.nsaScheduleAck).toLocaleString(); } catch { return ticket.nsaScheduleAck; } })()
+                          : "—"}
+                      </div>
                     </div>
                     <div>
                       <label className="text-slate-500 font-semibold">Required Part</label>
-                      <div className="text-white mt-1">{ticket.nsaRequiredPart === "Y" ? "Yes" : ticket.nsaRequiredPart === "N" ? "No" : ticket.nsaRequiredPart || "—"}</div>
+                      <div className="text-white mt-1">{ticket.nsaRequiredPart === "Y" ? "Yes ✓" : ticket.nsaRequiredPart === "N" ? "No" : ticket.nsaRequiredPart || "—"}</div>
                     </div>
                   </div>
-                  {/* Coverage + Pre-Auth full-width rows */}
-                  <div className="grid grid-cols-1 gap-3 text-sm">
-                    {ticket.nsaValidCoverage && (
-                      <div>
-                        <label className="text-slate-500 font-semibold">Valid Coverage</label>
-                        <div className="text-white mt-1">{ticket.nsaValidCoverage}</div>
-                      </div>
-                    )}
-                    {ticket.nsaRequiredCoverage && (
-                      <div>
-                        <label className="text-slate-500 font-semibold">Required Coverage</label>
-                        <div className="text-white mt-1">{ticket.nsaRequiredCoverage}</div>
-                      </div>
-                    )}
-                    {ticket.nsaPreAuth && (
-                      <div>
-                        <label className="text-slate-500 font-semibold">Pre-Auth</label>
-                        <div className="text-white mt-1 font-mono text-xs bg-slate-800/60 rounded px-2 py-1.5 border border-slate-700">{ticket.nsaPreAuth}</div>
-                      </div>
-                    )}
-                    {ticket.nsaSpecialInstructions && (
-                      <div>
-                        <label className="text-slate-500 font-semibold">Special Instructions</label>
-                        <div className="text-amber-200 mt-1 text-xs bg-amber-950/30 rounded px-2 py-1.5 border border-amber-500/20">{ticket.nsaSpecialInstructions}</div>
-                      </div>
-                    )}
+
+                  {/* Special instructions — prominent amber box when present */}
+                  {ticket.nsaSpecialInstructions && (
+                    <div className="text-sm">
+                      <label className="text-slate-500 font-semibold">Special Instructions</label>
+                      <div className="text-amber-200 mt-1 text-xs bg-amber-950/30 rounded px-3 py-2 border border-amber-500/20 leading-relaxed">{ticket.nsaSpecialInstructions}</div>
+                    </div>
+                  )}
+
+                  {/* Problem Description isn't repeated here — the
+                      unconditional "Problem Description" section below
+                      (synced from ServicePower) already shows it for every
+                      ticket, NSA-sourced or not. */}
+
+                  {/* Coverage + Pre-Auth */}
+                  <div className="grid grid-cols-2 gap-4 text-sm">
+                    <div>
+                      <label className="text-slate-500 font-semibold">Valid Coverage</label>
+                      <div className="text-white mt-1">{ticket.nsaValidCoverage || "—"}</div>
+                    </div>
+                    <div>
+                      <label className="text-slate-500 font-semibold">Required Coverage</label>
+                      <div className="text-white mt-1">{ticket.nsaRequiredCoverage || "—"}</div>
+                    </div>
                   </div>
+
+                  {ticket.nsaCoverageExclusions && (
+                    <div className="text-sm">
+                      <label className="text-slate-500 font-semibold">Coverage Exclusions</label>
+                      <div className="text-slate-300 mt-1 text-xs bg-slate-800/40 rounded px-3 py-2 border border-slate-700">{ticket.nsaCoverageExclusions}</div>
+                    </div>
+                  )}
+
+                  {ticket.nsaPreAuth && (
+                    <div className="text-sm">
+                      <label className="text-slate-500 font-semibold">Pre-Auth</label>
+                      <div className="text-green-300 mt-1 font-mono text-xs bg-slate-800/60 rounded px-3 py-2 border border-slate-700">{ticket.nsaPreAuth}</div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -5780,6 +6415,143 @@ function TicketDetailsPage() {
                   ))}
                 </div>
               </div>
+
+              {/* Claims Readiness Checklist — visible to Admin, BizOps, Claims roles only */}
+              {(() => {
+                const r = String(currentUserRole || "").toUpperCase();
+                const canSeeChecklist = [
+                  "SUPERADMIN","ADMIN","MANAGER","CLAIMS","CLAIMS_MANAGER",
+                  "BIZOPS_MANAGER","BIZOPS_SENIOR_MANAGER","FINANCE","SENIOR_BRANCH_MANAGER",
+                ].includes(r);
+                if (!canSeeChecklist || !ticket) return null;
+
+                // Evaluate each of the 5 requirements
+                // NOTE: ticket.problemDescription is the customer's original
+                // complaint, auto-populated from NSA/ServicePower at sync
+                // time — it exists before any service happens, so it can't
+                // be used as evidence a technician documented their work.
+                const hasServiceNotes = Boolean(
+                  visitLogEntries.some(v => (v as any).resolution?.trim() || (v as any).diagnosis?.trim())
+                );
+                const hasPhotos = (ticketPhotoCount !== null && ticketPhotoCount > 0) ||
+                  partRows.some(p => (p as any).inTracking);
+                const hasCorrectPartStatus = partRows.length === 0 || partRows.every(p => {
+                  const s = String((p as any).status || "").toLowerCase();
+                  return s && s !== "tech pickup" && s !== "need po" && s !== "";
+                });
+                // Same-day: the most recent visit must have been created/updated
+                // on the same calendar day as the visit's schedule date.
+                // Also passes if there's no visit yet (nothing to check).
+                const hasSameDayUpdate = (() => {
+                  if (visitLogEntries.length === 0) return true; // no visit logged yet — N/A
+                  const latest = visitLogEntries[0];
+                  const schedDate = String((latest as any).scheduleDate || "").slice(0, 10);
+                  if (!schedDate) return true; // no date set — can't evaluate
+                  // Check the visit's own created/updated timestamp
+                  const ts = (latest as any).updatedAt || (latest as any).createdAt || (latest as any).timestamp;
+                  if (!ts) return false;
+                  const updatedDay = new Date(ts).toISOString().slice(0, 10);
+                  const onTime = updatedDay === schedDate;
+                  // Also check if photos were uploaded (if we have a photo count and the
+                  // visit was today, photos being present means same-day upload is satisfied)
+                  const visitWasToday = schedDate === new Date().toISOString().slice(0, 10);
+                  const photosSatisfied = ticketPhotoCount !== null && ticketPhotoCount > 0 && visitWasToday;
+                  return onTime || photosSatisfied;
+                })();
+                // Warranty case — check if case number / warranty agent note is present
+                const warrantyStatuses = [
+                  "unsuccessful repair", "infestation", "physical damage",
+                  "unrepairable", "model/serial mismatch", "no fault found",
+                ];
+                const needsWarrantyCall = visitLogEntries.some(v => {
+                  const rs = String((v as any).repairStatus || "").toLowerCase();
+                  return warrantyStatuses.some(w => rs.includes(w.split(" ")[0]));
+                });
+                const hasWarrantyCase = !needsWarrantyCall || Boolean(
+                  visitLogEntries.some(v =>
+                    (v as any).note?.toLowerCase().includes("case") ||
+                    (v as any).note?.toLowerCase().includes("agent")
+                  )
+                );
+
+                const items = [
+                  {
+                    label: "Warranty Call (if required)",
+                    done: hasWarrantyCase,
+                    detail: needsWarrantyCall
+                      ? "Special scenario detected — ensure case number & agent name are in visit notes"
+                      : "Not required for this ticket",
+                    skip: !needsWarrantyCall,
+                  },
+                  {
+                    label: "Service Notes Complete",
+                    done: hasServiceNotes,
+                    detail: "Diagnosis, issue found, part used/needed, repair result must be documented",
+                  },
+                  {
+                    label: "Required Photos Uploaded",
+                    done: hasPhotos,
+                    detail: ticketPhotoCount === null
+                      ? "Checking photo count…"
+                      : ticketPhotoCount > 0
+                        ? `${ticketPhotoCount} photo${ticketPhotoCount !== 1 ? "s" : ""} uploaded — work order, model/serial tag, installed parts, damage proof`
+                        : "No photos found — work order, model/serial tag, installed parts, damage proof required",
+                  },
+                  {
+                    label: "Part Status Correct",
+                    done: hasCorrectPartStatus,
+                    detail: partRows.length === 0 ? "No parts on this ticket" : "All parts marked with correct status (not stuck as Tech Pickup)",
+                    // No parts ordered yet is a genuine "nothing to check"
+                    // state, same as Warranty Call's skip — not evidence
+                    // anything was actually verified correct.
+                    skip: partRows.length === 0,
+                  },
+                  {
+                    label: "Same-Day Updates",
+                    done: hasSameDayUpdate,
+                    detail: visitLogEntries.length === 0 ? "No visit logged yet" : "Notes, photos, part status, warranty info updated same day as visit",
+                    // No visit yet means there's nothing to have been
+                    // "same-day" about — not evidence anything was verified.
+                    skip: visitLogEntries.length === 0,
+                  },
+                ];
+
+                const allDone = items.every(i => i.skip || i.done);
+                const doneCount = items.filter(i => i.skip || i.done).length;
+
+                return (
+                  <div className="mb-8 rounded-xl border border-slate-700 overflow-hidden">
+                    <div className={`flex items-center justify-between px-4 py-3 ${allDone ? "bg-emerald-900/30 border-b border-emerald-700/30" : "bg-slate-900/60 border-b border-slate-700"}`}>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold text-slate-200">Claims Readiness</span>
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${allDone ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" : "bg-amber-500/20 text-amber-300 border border-amber-500/30"}`}>
+                          {doneCount}/{items.length}
+                        </span>
+                      </div>
+                      {allDone ? (
+                        <span className="text-xs text-emerald-400 font-semibold">✓ Ready for Claims</span>
+                      ) : (
+                        <span className="text-xs text-amber-400">{items.length - doneCount} item{items.length - doneCount !== 1 ? "s" : ""} pending</span>
+                      )}
+                    </div>
+                    <div className="divide-y divide-slate-800">
+                      {items.map((item, i) => (
+                        <div key={i} className={`flex items-start gap-3 px-4 py-3 text-sm ${item.skip ? "opacity-50" : ""}`}>
+                          <div className={`mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${item.skip ? "bg-slate-700 text-slate-400" : item.done ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40" : "bg-rose-500/20 text-rose-400 border border-rose-500/40"}`}>
+                            {item.skip ? "—" : item.done ? "✓" : "✗"}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className={`font-semibold ${item.skip ? "text-slate-500" : item.done ? "text-slate-300" : "text-rose-300"}`}>
+                              {item.label}
+                            </div>
+                            <div className="text-slate-500 text-xs mt-0.5">{item.detail}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Servicer Notes */}
               <div className="space-y-4 pb-12">
@@ -5957,6 +6729,10 @@ function TicketDetailsPage() {
                     <div className="text-white mt-1">{ticket?.redoTicketNo?.trim() || "NONE"}</div>
                   )}
                 </div>
+                <div>
+                  <label className="text-slate-500 font-semibold">Case Number</label>
+                  <div className="text-white mt-1">{ticket?.caseNumber?.trim() || "—"}</div>
+                </div>
               </div>
               <div className="mt-4 flex flex-wrap gap-2">
                 <button type="button" onClick={openVisitCreateModal} className="rounded-md border border-blue-400/40 bg-blue-500/20 px-4 py-2 text-sm font-semibold text-blue-200 transition hover:bg-blue-500/30">
@@ -6018,34 +6794,59 @@ function TicketDetailsPage() {
                         <div key={entry.id} className="rounded-md border border-white/10 bg-slate-950/70 p-4 text-sm">
                           <div className="flex flex-wrap items-start justify-between gap-2">
                             <div className="flex items-center gap-3">
-                              <div className="flex h-8 w-12 items-center justify-center rounded-md bg-blue-500/20 text-xs font-bold text-blue-300 border border-blue-400/30">
+                              {/* Fixed inline colors, not Tailwind's theme-swept blue-*
+                                  classes — guarantees this stays readable in both dark
+                                  and light mode instead of depending on the light-mode
+                                  CSS overrides happening to land on good contrast. */}
+                              <div
+                                className="flex h-10 w-14 shrink-0 items-center justify-center rounded-md text-lg font-extrabold border-2"
+                                style={{ backgroundColor: "#2563eb", color: "#ffffff", borderColor: "#93c5fd" }}
+                              >
                                 {visitLabelById.get(entry.id) ?? entry.visitNo}
                               </div>
                               <div>
-                                <div className="font-semibold text-blue-300">{entry.actionType} / {entry.repairStatus || "No status"}</div>
-                                <div className="text-xs text-slate-400">{new Date(entry.timestamp).toLocaleString()}</div>
+                                <div className="flex items-center gap-2">
+                                  <span className="font-semibold text-blue-300">{entry.actionType} / {entry.repairStatus || "No status"}</span>
+                                  {entry.locked ? (
+                                    <span title="A newer visit has superseded this one — locked from further edits." className="inline-flex items-center gap-1 rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">
+                                      <Lock className="h-2.5 w-2.5" /> Locked
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <div className="text-xs text-slate-400">
+                                  {new Date(entry.timestamp).toLocaleString()}
+                                  {entry.updatedAt ? (
+                                    <span className="text-amber-300/80">
+                                      {" "}·{" "}
+                                      {entry.updatedBy
+                                        ? `Updated ${new Date(entry.updatedAt).toLocaleString()} by ${profileNameById[entry.updatedBy] || entry.updatedBy}`
+                                        : `Auto-rescheduled ${new Date(entry.updatedAt).toLocaleString()} (superseded by a newer visit)`}
+                                    </span>
+                                  ) : null}
+                                </div>
                               </div>
                             </div>
                             <div className="text-xs font-semibold text-slate-300">{entry.by}</div>
                           </div>
                           {entry.updatedAt ? (
-                            <div className="mt-2 rounded-md border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-xs">
-                              <div className="font-semibold text-amber-200">
-                                Edited: {new Date(entry.updatedAt).toLocaleString()}
-                                {entry.updatedBy ? ` by ${entry.updatedBy}` : ""}
+                            /* Schedule Information — the edited timestamp already shows at
+                               the top of the card, so this box just highlights the current
+                               schedule/tech/time slot instead of repeating it. */
+                            <div className="mt-2 rounded-md border border-amber-400/30 bg-amber-500/10 px-3 py-2">
+                              <div className="grid gap-2 text-sm md:grid-cols-3">
+                                <div><span className="font-semibold text-amber-200">Schedule:</span> <span className="font-semibold text-white">{entry.scheduleDate || "—"}</span></div>
+                                <div><span className="font-semibold text-amber-200">Technician:</span> <span className="font-semibold text-white">{entry.technician || "—"}</span></div>
+                                <div><span className="font-semibold text-amber-200">Time Slot:</span> <span className="font-semibold text-white">{entry.timeSlot || "—"}</span></div>
                               </div>
-                              {entry.updateReason ? (
-                                <div className="mt-1 text-amber-100/90">{entry.updateReason}</div>
-                              ) : null}
                             </div>
-                          ) : null}
-                          
-                          {/* Schedule Information */}
-                          <div className="mt-3 grid gap-2 text-xs text-slate-300 md:grid-cols-3">
-                            <div><span className="font-semibold text-slate-400">Schedule:</span> {entry.scheduleDate || "—"}</div>
-                            <div><span className="font-semibold text-slate-400">Technician:</span> {entry.technician || "—"}</div>
-                            <div><span className="font-semibold text-slate-400">Time Slot:</span> {entry.timeSlot || "—"}</div>
-                          </div>
+                          ) : (
+                            /* Schedule Information */
+                            <div className="mt-3 grid gap-2 text-xs text-slate-300 md:grid-cols-3">
+                              <div><span className="font-semibold text-slate-400">Schedule:</span> {entry.scheduleDate || "—"}</div>
+                              <div><span className="font-semibold text-slate-400">Technician:</span> {entry.technician || "—"}</div>
+                              <div><span className="font-semibold text-slate-400">Time Slot:</span> {entry.timeSlot || "—"}</div>
+                            </div>
+                          )}
 
                           {/* CSR Notes - Only show if has content */}
                           {(entry.schedNotes || entry.symptomCx) ? (
@@ -6094,7 +6895,12 @@ function TicketDetailsPage() {
                             <button type="button" onClick={() => loadVisitForView(entry)} className="rounded-md border border-white/15 bg-slate-900/90 px-3 py-1.5 text-xs font-semibold text-slate-100 transition hover:border-slate-200/40">
                               View
                             </button>
-                            <button type="button" onClick={() => openVisitEditModal(entry)} className="rounded-md border border-blue-400/40 bg-blue-500/15 px-3 py-1.5 text-xs font-semibold text-blue-200 transition hover:bg-blue-500/25">
+                            <button
+                              type="button"
+                              onClick={() => openVisitEditModal(entry)}
+                              title={entry.locked ? `Visit ${entry.visitNo} was superseded — Repair Status, Schedule Date, and Technician are locked, but everything else can still be edited.` : undefined}
+                              className="rounded-md border border-blue-400/40 bg-blue-500/15 px-3 py-1.5 text-xs font-semibold text-blue-200 transition hover:bg-blue-500/25"
+                            >
                               Edit
                             </button>
                             <button type="button" onClick={() => deleteVisitLogEntry(entry.id)} className="rounded-md border border-rose-400/40 bg-rose-500/15 px-3 py-1.5 text-xs font-semibold text-rose-200 transition hover:bg-rose-500/25">
@@ -6137,12 +6943,16 @@ function TicketDetailsPage() {
                       ) : null}
                       <fieldset disabled={visitFormMode === "view"} className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                         <div className="space-y-1.5">
-                          <label htmlFor="visit-schedule-date-modal" className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Schedule Date</label>
-                          <input id="visit-schedule-date-modal" type="date" value={newVisitScheduleDate} onChange={(event) => setNewVisitScheduleDate(event.target.value)} className="w-full rounded-md border border-white/15 bg-slate-950/90 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500" />
+                          <label htmlFor="visit-schedule-date-modal" className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">
+                            Schedule Date{editingLockedVisit ? <span className="ml-1.5 text-[10px] uppercase tracking-wide text-amber-400">Locked</span> : null}
+                          </label>
+                          <input id="visit-schedule-date-modal" type="date" disabled={editingLockedVisit} value={newVisitScheduleDate} onChange={(event) => setNewVisitScheduleDate(event.target.value)} className="w-full rounded-md border border-white/15 bg-slate-950/90 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed" />
                         </div>
                         <div className="space-y-1.5">
-                          <label htmlFor="visit-technician-modal" className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Technician</label>
-                          <select id="visit-technician-modal" value={newVisitTechnician} onChange={(event) => setNewVisitTechnician(event.target.value)} className="w-full rounded-md border border-white/15 bg-slate-950/90 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500">
+                          <label htmlFor="visit-technician-modal" className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">
+                            Technician{editingLockedVisit ? <span className="ml-1.5 text-[10px] uppercase tracking-wide text-amber-400">Locked</span> : null}
+                          </label>
+                          <select id="visit-technician-modal" disabled={editingLockedVisit} value={newVisitTechnician} onChange={(event) => setNewVisitTechnician(event.target.value)} className="w-full rounded-md border border-white/15 bg-slate-950/90 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed">
                             <option value="">— select —</option>
                             {technicianOptions.map((technician) => (
                               <option key={technician} value={technician}>{technician}</option>
@@ -6178,12 +6988,14 @@ function TicketDetailsPage() {
                         <div className="space-y-1.5">
                           <label htmlFor="visit-repair-status-modal" className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">
                             Repair Status <span className="text-rose-400">*</span>
+                            {editingLockedVisit ? <span className="ml-1.5 text-[10px] uppercase tracking-wide text-amber-400">Locked</span> : null}
                           </label>
                           <select
                             id="visit-repair-status-modal"
+                            disabled={editingLockedVisit}
                             value={newVisitRepairStatus}
                             onChange={(event) => setNewVisitRepairStatus(event.target.value)}
-                            className={`w-full rounded-md border bg-slate-950/90 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 ${
+                            className={`w-full rounded-md border bg-slate-950/90 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed ${
                               newVisitRepairStatus.trim() ? "border-white/15" : "border-rose-400/40"
                             }`}
                           >
@@ -6446,7 +7258,10 @@ function TicketDetailsPage() {
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Visit Details</p>
                       <h3 className="text-xl font-bold text-white">{viewingVisitEntry.actionType} / {viewingVisitEntry.repairStatus || "No status"}</h3>
-                      <p className="mt-1 text-sm text-slate-400">{new Date(viewingVisitEntry.timestamp).toLocaleString()} by {viewingVisitEntry.by}</p>
+                      <p className="mt-1 text-sm text-slate-400">
+                        {new Date(viewingVisitEntry.timestamp).toLocaleString()}
+                        {viewingVisitEntry.by ? ` by ${viewingVisitEntry.by}` : ""}
+                      </p>
                     </div>
                     <button
                       type="button"
@@ -6460,8 +7275,9 @@ function TicketDetailsPage() {
                   {viewingVisitEntry.updatedAt ? (
                     <div className="mt-3 rounded-md border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm">
                       <div className="font-semibold text-amber-200">
-                        Edited: {new Date(viewingVisitEntry.updatedAt).toLocaleString()}
-                        {viewingVisitEntry.updatedBy ? ` by ${viewingVisitEntry.updatedBy}` : ""}
+                        {viewingVisitEntry.updatedBy
+                          ? `Updated: ${new Date(viewingVisitEntry.updatedAt).toLocaleString()} by ${profileNameById[viewingVisitEntry.updatedBy] || viewingVisitEntry.updatedBy}`
+                          : `Auto-rescheduled: ${new Date(viewingVisitEntry.updatedAt).toLocaleString()} (superseded by a newer visit)`}
                       </div>
                       {viewingVisitEntry.updateReason ? (
                         <div className="mt-1 text-amber-100/90">{viewingVisitEntry.updateReason}</div>
@@ -6534,17 +7350,19 @@ function TicketDetailsPage() {
                     <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
                       <div>
                         <div className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Change Log</div>
-                        <div className="text-sm text-slate-300">Every tracked edit on this ticket</div>
+                        <div className="text-sm text-slate-300">Changes to this visit</div>
                       </div>
-                      <div className="text-xs font-semibold text-blue-300">{auditCountLabel}</div>
+                      <div className="text-xs font-semibold text-blue-300">
+                        {visitChangeLogEntries.length} change{visitChangeLogEntries.length === 1 ? "" : "s"} logged
+                      </div>
                     </div>
                     <div className="mt-4 space-y-3">
-                      {auditEntries.length === 0 ? (
+                      {visitChangeLogEntries.length === 0 ? (
                         <div className="px-4 py-8 text-center text-slate-400">
                           No tracked changes yet.
                         </div>
                       ) : (
-                        auditEntries.map((entry) => (
+                        visitChangeLogEntries.map((entry) => (
                           <div key={entry.id} className="border border-white/10 rounded-lg bg-slate-900/30 hover:bg-slate-900/50 transition">
                             {/* Header Row */}
                             <div className="grid grid-cols-4 gap-3 px-4 py-3 border-b border-white/10 bg-blue-900/20">
@@ -6558,11 +7376,11 @@ function TicketDetailsPage() {
                               </div>
                               <div>
                                 <div className="text-xs text-blue-300 font-semibold mb-1">Action</div>
-                                <div className="text-sm text-slate-300">{entry.action}</div>
+                                <div className="text-sm text-slate-300">{formatAuditAction(entry.action)}</div>
                               </div>
                               <div>
                                 <div className="text-xs text-blue-300 font-semibold mb-1">Field</div>
-                                <div className="text-sm text-slate-300">{entry.field}</div>
+                                <div className="text-sm text-slate-300">{formatAuditField(entry.field)}</div>
                               </div>
                             </div>
                             
@@ -6774,7 +7592,7 @@ function TicketDetailsPage() {
                                 <span className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-blue-400" title="Unsaved changes — click Update to save" />
                               ) : null}
                             </td>
-                            <td className={cellWrap}><input value={String(val("partNo") ?? "")} onChange={(e) => set("partNo", e.target.value)} disabled={partsEditDisabled} className={`${inputCls} text-blue-300 font-semibold`} placeholder="Part No*" /></td>
+                            <td className={cellWrap}><input value={String(val("partNo") ?? "")} onChange={(e) => set("partNo", e.target.value)} disabled={partsEditDisabled} className={`w-full rounded border border-white/10 bg-slate-950/80 px-2 py-1 font-semibold focus:outline-none focus:border-blue-500 disabled:opacity-50 ${val("status") ? partStatusTextClass(String(val("status"))) : "text-blue-300"}`} placeholder="Part No*" /></td>
                             <td className={cellWrap}>
                               <select value={String(val("partDist") ?? "")} onChange={(e) => set("partDist", e.target.value)} disabled={partsEditDisabled} className={selectCls}>
                                 <option value="">Dist.*</option>
@@ -6840,11 +7658,25 @@ function TicketDetailsPage() {
                                 <option>RA - Qty Discrepancy</option>
                                 <option>SQT Received</option>
                                 <option>Tech Pickup</option>
+                                <option>Transfer to Another Ticket</option>
                                 <option>Used</option>
                               </select>
                             </td>
                             <td className={cellWrap}><input value={String(val("note") ?? "")} onChange={(e) => set("note", e.target.value)} disabled={partsEditDisabled} className={inputCls} placeholder="Note" /></td>
-                            <td className={cellWrap}><input value={String(val("visitId") ?? "")} onChange={(e) => set("visitId", e.target.value)} disabled={partsEditDisabled} className={inputCls} placeholder="Visit ID*" /></td>
+                            <td className={cellWrap}>
+                              <select value={String(val("visitId") ?? "")} onChange={(e) => set("visitId", e.target.value)} disabled={partsEditDisabled} className={selectCls}>
+                                <option value="">Visit ID*</option>
+                                {visitLogEntries.map((entry) => (
+                                  <option key={entry.id} value={entry.visitNo}>{entry.visitNo}</option>
+                                ))}
+                                {/* Stale value from before this became a dropdown, or a
+                                    since-deleted visit — keep it selectable so it isn't
+                                    silently blanked out. */}
+                                {String(val("visitId") ?? "") && !visitLogEntries.some((entry) => entry.visitNo === String(val("visitId") ?? "")) && (
+                                  <option value={String(val("visitId") ?? "")}>{String(val("visitId"))} (not found)</option>
+                                )}
+                              </select>
+                            </td>
                             <td className={cellWrap}><input value={String(val("orderNo") ?? "")} onChange={(e) => set("orderNo", e.target.value)} disabled={partsEditDisabled} className={inputCls} placeholder="Order #" /></td>
                             <td className={cellWrap}><input type="date" value={String(val("eta") ?? "")} onChange={(e) => set("eta", e.target.value)} disabled={partsEditDisabled} className={inputCls} /></td>
                             <td className={cellWrap}><input value={String(val("inTracking") ?? "")} onChange={(e) => set("inTracking", e.target.value)} disabled={partsEditDisabled} className={inputCls} placeholder="In Track #" /></td>
@@ -6936,7 +7768,7 @@ function TicketDetailsPage() {
                     </span>
                   ) : null}
                   {officeDistanceMiles != null ? (
-                    <span className="rounded-md bg-emerald-700/30 border border-emerald-500/40 px-2 py-0.5 text-[10px] font-semibold text-emerald-200">
+                    <span className="rounded-md bg-emerald-700/30 border border-emerald-500/40 px-2.5 py-1 text-sm font-bold text-emerald-200">
                       {officeDistanceMiles.toFixed(1)} mi
                     </span>
                   ) : null}
@@ -7413,14 +8245,9 @@ function TicketDetailsPage() {
                             <div className="flex items-start justify-between gap-3">
                               <div className="flex-1">
                                 <div className="flex items-center gap-2 mb-2">
-                                  <h4 className="text-base font-semibold text-white">{part.partNo}</h4>
+                                  <h4 className={`text-base font-semibold ${part.status ? partStatusTextClass(part.status) : "text-white"}`}>{part.partNo}</h4>
                                   {part.status ? (
-                                    <span className={`rounded px-2 py-0.5 text-xs font-semibold ${
-                                      part.status === 'PO Made' ? 'bg-green-500/20 text-green-300' :
-                                      part.status === 'Need PO' ? 'bg-amber-500/20 text-amber-300' :
-                                      part.status === 'Tech Pickup' ? 'bg-blue-500/20 text-blue-300' :
-                                      'bg-slate-500/20 text-slate-300'
-                                    }`}>
+                                    <span className="rounded border border-white/15 bg-white/5 px-2 py-0.5 text-xs font-semibold text-slate-300">
                                       {part.status}
                                     </span>
                                   ) : null}
@@ -7466,7 +8293,18 @@ function TicketDetailsPage() {
                   <div className="flex flex-wrap items-start justify-between gap-3 border-b border-white/10 pb-4">
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Part Details</p>
-                      <h3 className="text-xl font-bold text-white">{viewingPartEntry.partNo} — {viewingPartEntry.status || "No status"}</h3>
+                      <h3 className="flex items-center gap-2 text-xl font-bold">
+                        <span className={viewingPartEntry.status ? partStatusTextClass(viewingPartEntry.status) : "text-white"}>
+                          {viewingPartEntry.partNo}
+                        </span>
+                        {viewingPartEntry.status ? (
+                          <span className="rounded border border-white/15 bg-white/5 px-2 py-0.5 text-xs font-semibold text-slate-300">
+                            {viewingPartEntry.status}
+                          </span>
+                        ) : (
+                          <span className="text-sm font-normal text-slate-400">No status</span>
+                        )}
+                      </h3>
                       <p className="text-sm text-slate-400 mt-1">Added {new Date(viewingPartEntry.id).toLocaleString()} by {viewingPartEntry.createdBy}</p>
                     </div>
                     <button
@@ -7482,7 +8320,12 @@ function TicketDetailsPage() {
                   <div className="mt-4">
                     <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">Part Information</div>
                     <div className="grid gap-3 md:grid-cols-3 text-sm text-slate-200">
-                      <div className="rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"><span className="font-semibold text-slate-400">Part No:</span> {viewingPartEntry.partNo || "—"}</div>
+                      <div className="rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2">
+                        <span className="font-semibold text-slate-400">Part No:</span>{" "}
+                        <span className={viewingPartEntry.status ? `font-semibold ${partStatusTextClass(viewingPartEntry.status)}` : undefined}>
+                          {viewingPartEntry.partNo || "—"}
+                        </span>
+                      </div>
                       <div className="rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"><span className="font-semibold text-slate-400">Distributor:</span> {viewingPartEntry.partDist || "—"}</div>
                       <div className="rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"><span className="font-semibold text-slate-400">Description:</span> {viewingPartEntry.partDesc || "—"}</div>
                       <div className="rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"><span className="font-semibold text-slate-400">Status:</span> {viewingPartEntry.status || "—"}</div>
