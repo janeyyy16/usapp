@@ -1,4 +1,5 @@
 import { useMemo, useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { Link } from "@tanstack/react-router";
 import { ChevronDown, Check, Filter, Search } from "lucide-react";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
@@ -46,6 +47,8 @@ const USER_TYPES: { value: string; label: string }[] = [
   { value: "MANAGER", label: "Manager" },
   { value: "TECHNICIAN", label: "Technician" },
   { value: "TECHNICIAN_MANAGER", label: "Tech Manager" },
+  { value: "TECHNICAL_DIRECTOR", label: "Technical Director" },
+  { value: "TECHNICAL_ASSISTANT_DIRECTOR", label: "Technical Assistant Director" },
   { value: "CLAIMS", label: "Claims" },
   { value: "HR", label: "HR" },
   { value: "IT", label: "IT" },
@@ -57,12 +60,13 @@ const USER_TYPES: { value: string; label: string }[] = [
   { value: "BRANCH_MANAGER", label: "Branch Manager" },
   { value: "SENIOR_BRANCH_MANAGER", label: "Senior Branch Manager" },
   { value: "CLAIMS_MANAGER", label: "Claims Manager" },
+  { value: "CLAIMS_TEAM_LEADER", label: "Claims Team Leader" },
   { value: "PARTS_MANAGER", label: "Parts Manager" },
   { value: "BIZOPS_MANAGER", label: "BizOps Manager" },
   { value: "BIZOPS_SENIOR_MANAGER", label: "BizOps Senior Manager" },
-  { value: "TRIAGE_USER", label: "Triage User" },
-  { value: "TRIAGE_MANAGER", label: "Triage Manager" },
-];
+  { value: "TRIAGE_USER", label: "Technical Support" },
+  { value: "TRIAGE_MANAGER", label: "Technical Support Manager" },
+].sort((a, b) => a.label.localeCompare(b.label));
 
 // Sentinel for the "All Locations" entry in Branch Access. Picking this clears
 // every individual selection — the user can see every branch. Stored as-is so
@@ -385,6 +389,18 @@ function ColumnFilter({
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
+  // Portaled to <body> with `fixed` positioning computed from the trigger's
+  // getBoundingClientRect() — the table wraps in a div with `overflow-x-auto`,
+  // which per the CSS spec forces `overflow-y: auto` too (a non-"visible" X
+  // value can't pair with a "visible" Y value), so an `absolute`-positioned
+  // menu here would get clipped by that same overflow box instead of
+  // floating above the table. That clipping was ALSO why clicks on it did
+  // nothing — the clipped-away portion isn't just invisible, it's outside
+  // the scrollable region and never receives the click at all.
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
   const visible = useMemo(
     () => options.filter((o) => !search || o.toLowerCase().includes(search.toLowerCase())),
     [options, search],
@@ -395,7 +411,16 @@ function ColumnFilter({
   const active = (selected.size > 0 && selected.size < options.length) || selected.has("__none__");
 
   const toggle = (opt: string) => {
-    const base = selected.size === 0 ? new Set(options) : new Set(selected);
+    // Coming from "__none__" (Select All was just unchecked), start a fresh
+    // selection with just this option rather than carrying the sentinel
+    // forward — leaving it in would make every subsequent pick still match
+    // `sel.has("__none__")` in the filter below and hide every row forever,
+    // no matter what got checked afterward.
+    const base = selected.has("__none__")
+      ? new Set<string>()
+      : selected.size === 0
+        ? new Set(options)
+        : new Set(selected);
     if (base.has(opt)) base.delete(opt);
     else base.add(opt);
     onChange(base.size === options.length ? new Set<string>() : base);
@@ -405,31 +430,55 @@ function ColumnFilter({
     else onChange(new Set<string>());
   };
 
+  const openMenu = () => {
+    const rect = btnRef.current?.getBoundingClientRect();
+    if (rect) setPos({ top: rect.bottom + 4, left: rect.left });
+    setOpen(true);
+  };
+
   useEffect(() => {
     if (!open) return;
-    const handler = (e: MouseEvent) => {
-      const el = document.getElementById(`umfilter-${field}`);
-      if (el && !el.contains(e.target as Node)) setOpen(false);
+    // `capture: true` so scrolling the page (which this fixed-position menu
+    // doesn't track) closes it — but that also catches scroll events from
+    // the menu's own internal checkbox list, so ignore those specifically
+    // (same fix as the Daily Activity Report's chart line filter).
+    const closeOnScroll = (e: Event) => {
+      if (menuRef.current && e.target instanceof Node && menuRef.current.contains(e.target)) return;
+      setOpen(false);
     };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open, field]);
+    window.addEventListener("scroll", closeOnScroll, { capture: true, passive: true });
+    const closeOnOutsideClick = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (btnRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    return () => {
+      window.removeEventListener("scroll", closeOnScroll, { capture: true });
+      document.removeEventListener("mousedown", closeOnOutsideClick);
+    };
+  }, [open]);
 
   return (
-    <span id={`umfilter-${field}`} className="relative inline-flex items-center">
+    <span className="relative inline-flex items-center">
       <button
+        ref={btnRef}
         type="button"
         onClick={(e) => {
           e.stopPropagation();
-          setOpen((o) => !o);
+          open ? setOpen(false) : openMenu();
         }}
         className={`ml-1 inline-grid h-4 w-4 place-items-center rounded ${active ? "text-blue-100" : "text-blue-300/60"} hover:text-white`}
         title={`Filter by ${label}`}
       >
         <Filter className="h-3 w-3" fill={active ? "currentColor" : "none"} />
       </button>
-      {open && (
-        <div className="absolute left-0 top-6 z-50 w-60 rounded-lg border border-white/15 bg-slate-900 shadow-2xl p-2 text-left normal-case">
+      {open && pos && createPortal(
+        <div
+          ref={menuRef}
+          className="fixed z-50 w-60 rounded-lg border border-white/15 bg-slate-900 shadow-2xl p-2 text-left normal-case"
+          style={{ top: pos.top, left: pos.left }}
+        >
           <div className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
             Filter by {label}
           </div>
@@ -473,7 +522,8 @@ function ColumnFilter({
               <div className="px-1 py-2 text-xs text-slate-500">No matches</div>
             )}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </span>
   );
@@ -489,6 +539,13 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
   const [colFilters, setColFilters] = useState<Record<string, Set<string>>>({});
   const setColFilter = (field: string, next: Set<string>) =>
     setColFilters((prev) => ({ ...prev, [field]: next }));
+  // Column filters AND together silently — narrowing one column and then a
+  // different one without clearing the first can leave zero rows matching
+  // both at once, which looks like the whole filter system broke when it's
+  // really just an old filter still active on another column. Surface how
+  // many columns are currently narrowed, plus a one-click way to clear them.
+  const activeFilterCount = Object.values(colFilters).filter((sel) => sel && sel.size > 0).length;
+  const clearAllFilters = () => setColFilters({});
   const [showAddUserModal, setShowAddUserModal] = useState(false);
   const [users, setUsers] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -741,6 +798,16 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
                 )}
               </div>
             </div>
+            {activeFilterCount > 0 && (
+              <button
+                type="button"
+                onClick={clearAllFilters}
+                className="flex items-center gap-1.5 rounded-md border border-blue-400/40 bg-blue-500/15 px-3 py-1.5 text-xs font-semibold text-blue-200 hover:bg-blue-500/25"
+                title="Column filters narrow the table by ANDing every active column together — clear them all here."
+              >
+                {activeFilterCount} column filter{activeFilterCount === 1 ? "" : "s"} active — Clear all
+              </button>
+            )}
             <div className="ml-auto w-full max-w-md">
               <label className="block text-xs font-semibold uppercase tracking-[0.04em] text-slate-400">Search</label>
               <input
