@@ -117,6 +117,43 @@ function supabaseTokenDevPlugin() {
   };
 }
 
+// Dev-only middleware: serve /api/admin-update-email locally (vite dev does
+// not run the serverless api/ folder). Uses the SAME runtime-agnostic bridge
+// as the production Worker so dev and prod behave identically.
+function adminUpdateEmailDevPlugin() {
+  return {
+    name: "admin-update-email-dev",
+    configureServer(server: any) {
+      server.middlewares.use("/api/admin-update-email", async (req: any, res: any) => {
+        try {
+          const chunks: Buffer[] = [];
+          for await (const c of req) chunks.push(c);
+          const body = Buffer.concat(chunks).toString("utf8");
+
+          const { handleAdminUpdateEmailRequest } = await server.ssrLoadModule(
+            "/src/lib/server/adminUpdateEmailBridge.ts"
+          );
+          const webReq = new Request("http://localhost/api/admin-update-email", {
+            method: req.method,
+            headers: { "content-type": req.headers["content-type"] ?? "application/json" },
+            body: req.method === "POST" ? body : undefined,
+          });
+          const mergedEnv = { ...process.env, ...readDotEnv() } as Record<string, string | undefined>;
+          const webRes: Response = await handleAdminUpdateEmailRequest(webReq, mergedEnv);
+
+          res.statusCode = webRes.status;
+          webRes.headers.forEach((v: string, k: string) => res.setHeader(k, v));
+          res.end(await webRes.text());
+        } catch (err) {
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Email update failed" }));
+        }
+      });
+    },
+  };
+}
+
 // Dev-only middleware: serve /api/servicepower locally (vite dev does not run
 // the serverless api/ folder). Uses the SAME runtime-agnostic bridge as the
 // production Worker so dev and prod behave identically.
@@ -246,7 +283,7 @@ export default defineConfig({
     // W-4/W-8BEN/W-9 templates (src/assets/*.pdf) resolve to a URL via a
     // plain `import` the same way the logo/ribbon/footer PNGs already do.
     assetsInclude: ["**/*.pdf"],
-    plugins: [supabaseTokenDevPlugin(), servicePowerDevPlugin(), marconeDevPlugin(), nsaDevPlugin()],
+    plugins: [supabaseTokenDevPlugin(), adminUpdateEmailDevPlugin(), servicePowerDevPlugin(), marconeDevPlugin(), nsaDevPlugin()],
     build: {
       chunkSizeWarningLimit: 800,
       // See the rmSync call above — we clean dist/ ourselves once, up

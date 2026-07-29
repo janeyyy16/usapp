@@ -442,6 +442,10 @@ export async function updateCompanyUser(
   profileId: string,
   fields: Partial<{
     displayName: string;
+    /** Only pass this after the caller has already updated the user's real
+     *  Firebase Auth email via /api/admin-update-email — see
+     *  adminUpdateEmailBridge.ts for why the two must never be set independently. */
+    email: string;
     role: UserRole;
     /** Additional roles beyond the primary (e.g. a manager who is also a TECHNICIAN). */
     extraRoles: UserRole[];
@@ -463,6 +467,7 @@ export async function updateCompanyUser(
 ): Promise<void> {
   const payload: Record<string, unknown> = {};
   if (fields.displayName !== undefined) payload.display_name = fields.displayName;
+  if (fields.email !== undefined) payload.email = fields.email;
   if (fields.role !== undefined) payload.role = fields.role;
   if (fields.extraRoles !== undefined) {
     // Dedupe + remove the primary role from extras so it isn't double-stored.

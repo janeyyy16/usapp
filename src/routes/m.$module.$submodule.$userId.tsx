@@ -11,6 +11,7 @@ import { WORK_PLAN_DAYS, SLOT_OPTIONS, type WorkPlan } from "@/lib/workPlan";
 import { getUserByUsername, getCompanyUsers, type UserAccount } from "@/lib/firebase/users";
 import { getProfileByUsername, getProfileEmployeeInfo, saveProfileEmployeeInfo } from "@/lib/supabase/users";
 import { useAuth } from "@/lib/auth";
+import { auth as firebaseAuth } from "@/lib/firebase/config";
 
 const TABS = [
   "General Information",
@@ -445,13 +446,22 @@ const WEEK_DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 function UserDetailsPage() {
   const { module, submodule, userId } = Route.useLoaderData();
-  const { ready } = useAuth();
+  const { ready, role: viewerRole } = useAuth();
+  // Only Admin/SuperAdmin may edit a user's email — it's the actual Firebase
+  // Auth login credential (landing.tsx's username-login path resolves a
+  // username to profiles.email before calling Firebase), not just contact
+  // info, so changing it has to go through /api/admin-update-email (see
+  // adminUpdateEmailBridge.ts) rather than a plain Supabase field edit.
+  const canEditEmail = viewerRole === "ADMIN" || viewerRole === "SUPERADMIN";
 
   const [loading, setLoading] = useState(true);
   const [notFoundUser, setNotFoundUser] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [profileId, setProfileId] = useState<string>("");
+  // The email as loaded from the server — compared against form.email in
+  // handleSave to know whether the Firebase Auth update call is needed at all.
+  const [originalEmail, setOriginalEmail] = useState<string>("");
   const [seqId, setSeqId] = useState<string>("");
   const [activeTab, setActiveTab] = useState<(typeof USER_TABS)[number]>("General Information");
   const [form, setForm] = useState({
@@ -492,6 +502,7 @@ function UserDetailsPage() {
           return;
         }
         setProfileId(p.id);
+        setOriginalEmail(p.email || "");
         try {
           const all = await getCompanyUsers();
           const idx = all.findIndex((u) => u.id === p.id);
@@ -573,11 +584,30 @@ function UserDetailsPage() {
     setStatus(null);
     try {
       const { updateCompanyUser } = await import("@/lib/supabase/users");
+
+      // Email changed — update the ACTUAL Firebase Auth credential first via
+      // the admin-only server endpoint. Only once that succeeds do we fold
+      // the new address into the Supabase update below, so profiles.email
+      // and Firebase Auth never end up desynced from a partial failure.
+      const emailChanged = canEditEmail && form.email.trim() !== originalEmail.trim();
+      if (emailChanged) {
+        const idToken = await firebaseAuth?.currentUser?.getIdToken();
+        if (!idToken) throw new Error("Could not verify your session. Please re-login and try again.");
+        const res = await fetch("/api/admin-update-email", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ idToken, targetProfileId: profileId, newEmail: form.email.trim() }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.error || "Failed to update login email");
+      }
+
       // First role in the list is the primary; the rest land in extra_roles.
       const primaryRole = (form.roles[0] || form.role || "") as any;
       const extraRoles = form.roles.slice(1) as any;
       await updateCompanyUser(profileId, {
         displayName: form.displayName,
+        ...(emailChanged ? { email: form.email.trim() } : {}),
         role: primaryRole,
         extraRoles,
         phoneNumber: form.phoneNumber,
@@ -591,6 +621,7 @@ function UserDetailsPage() {
         workPlan: workPlan,
         isActive: form.isActive,
       });
+      if (emailChanged) setOriginalEmail(form.email.trim());
       // Persist Employee Information (powers Work Map house pins).
       try {
         const { saveProfileEmployeeInfo } = await import("@/lib/supabase/users");
@@ -736,8 +767,22 @@ function UserDetailsPage() {
                         </select>
                       </label>
                       <label className="space-y-1.5 text-sm">
-                        <span className={labelCls}>Email</span>
-                        <input value={form.email} disabled className={readonlyCls} />
+                        <span className={labelCls}>
+                          Email
+                          {canEditEmail && (
+                            <span className="normal-case text-[10px] text-slate-500"> (this is the login credential — changing it updates their sign-in email too)</span>
+                          )}
+                        </span>
+                        {canEditEmail ? (
+                          <input
+                            type="email"
+                            value={form.email}
+                            onChange={(e) => update("email", e.target.value)}
+                            className={inputCls}
+                          />
+                        ) : (
+                          <input value={form.email} disabled className={readonlyCls} />
+                        )}
                       </label>
 
                       <label className="space-y-1.5 text-sm">

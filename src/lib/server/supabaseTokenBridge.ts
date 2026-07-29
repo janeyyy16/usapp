@@ -70,7 +70,7 @@ async function getGoogleJwks(): Promise<Record<string, Jwk>> {
   return keys;
 }
 
-interface FirebaseClaims {
+export interface FirebaseClaims {
   sub: string;
   email?: string;
   aud: string;
@@ -79,8 +79,14 @@ interface FirebaseClaims {
   [k: string]: unknown;
 }
 
-/** Verify a Firebase ID token (RS256) with Web Crypto. Throws if invalid. */
-async function verifyFirebaseToken(idToken: string, projectId: string): Promise<FirebaseClaims> {
+/**
+ * Verify a Firebase ID token (RS256) with Web Crypto. Throws if invalid.
+ * Exported so other server bridges (e.g. adminUpdateEmailBridge.ts) that need
+ * to confirm "this request really comes from a logged-in Firebase user" can
+ * reuse the same vetted verification logic instead of re-implementing RS256
+ * + JWKS handling a second time.
+ */
+export async function verifyFirebaseToken(idToken: string, projectId: string): Promise<FirebaseClaims> {
   const parts = idToken.split(".");
   if (parts.length !== 3) throw new Error("Malformed token");
   const [headerB64, payloadB64, signatureB64] = parts;
