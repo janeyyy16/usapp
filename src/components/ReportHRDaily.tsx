@@ -4352,6 +4352,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
               {pendingPtoRequests.map((r) => {
                 const canManagerAct = r.managerStatus === "pending" && canReviewPtoStage(r, "manager", myProfileId, myRole);
                 const canHrAct = r.hrStatus === "pending" && canReviewPtoStage(r, "hr", myProfileId, myRole);
+                const canAccountingAct = r.accountingStatus === "pending" && canReviewPtoStage(r, "accounting", myProfileId, myRole);
                 return (
                   <div key={r.id} className="border border-white/10 rounded-lg p-3">
                     <div className="flex items-start justify-between gap-3">
@@ -4376,6 +4377,14 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                             HR: {r.hrStatus.charAt(0).toUpperCase() + r.hrStatus.slice(1)}
                             {r.hrReviewedBy ? ` — ${profileName(r.hrReviewedBy)}` : ""}
                           </span>
+                          <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-semibold border ${
+                            r.accountingStatus === "approved" ? "bg-green-500/20 text-green-300 border-green-500/30"
+                            : r.accountingStatus === "rejected" ? "bg-red-500/20 text-red-300 border-red-500/30"
+                            : "bg-yellow-500/20 text-yellow-300 border-yellow-500/30"
+                          }`}>
+                            Accounting: {r.accountingStatus.charAt(0).toUpperCase() + r.accountingStatus.slice(1)}
+                            {r.accountingReviewedBy ? ` — ${profileName(r.accountingReviewedBy)}` : ""}
+                          </span>
                         </div>
                       </div>
                       <div className="flex flex-col gap-2 shrink-0">
@@ -4391,7 +4400,13 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                             <button type="button" onClick={() => handlePtoStageAction(r, "hr", "rejected")} className="px-2 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-xs font-semibold transition">Reject</button>
                           </div>
                         )}
-                        {!canManagerAct && !canHrAct && <span className="text-xs text-muted-foreground">Awaiting other approver</span>}
+                        {canAccountingAct && (
+                          <div className="flex gap-1">
+                            <button type="button" onClick={() => handlePtoStageAction(r, "accounting", "approved")} className="px-2 py-1 bg-green-600 hover:bg-green-700 text-white rounded text-xs font-semibold transition">Approve (Acct)</button>
+                            <button type="button" onClick={() => handlePtoStageAction(r, "accounting", "rejected")} className="px-2 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-xs font-semibold transition">Reject</button>
+                          </div>
+                        )}
+                        {!canManagerAct && !canHrAct && !canAccountingAct && <span className="text-xs text-muted-foreground">{r.managerStatus === "pending" ? "Awaiting manager" : "Awaiting HR/Accounting"}</span>}
                       </div>
                     </div>
                   </div>

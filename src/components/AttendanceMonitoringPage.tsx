@@ -1003,6 +1003,14 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                               HR: {request.hrStatus.charAt(0).toUpperCase() + request.hrStatus.slice(1)}
                               {request.hrReviewedBy ? ` — ${profileName(request.hrReviewedBy)}` : ""}
                             </span>
+                            <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-semibold border ${
+                              request.accountingStatus === "approved" ? "bg-green-500/20 text-green-300 border-green-500/30"
+                              : request.accountingStatus === "rejected" ? "bg-red-500/20 text-red-300 border-red-500/30"
+                              : "bg-yellow-500/20 text-yellow-300 border-yellow-500/30"
+                            }`}>
+                              Accounting: {request.accountingStatus.charAt(0).toUpperCase() + request.accountingStatus.slice(1)}
+                              {request.accountingReviewedBy ? ` — ${profileName(request.accountingReviewedBy)}` : ""}
+                            </span>
                           </div>
                         </td>
                         <td className="px-3 py-3">
@@ -1029,9 +1037,21 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                                 </button>
                               </div>
                             )}
+                            {request.accountingStatus === "pending" && canReviewPtoStage(request, "accounting", myProfileId, role) && (
+                              <div className="flex gap-1">
+                                <span className="text-[10px] text-slate-500 self-center">Acct:</span>
+                                <button type="button" title="Approve as Accounting" onClick={() => handlePtoStageAction(request, "accounting", "approved")} className="px-2 py-1 bg-green-600 hover:bg-green-700 text-white rounded text-xs transition flex items-center gap-1">
+                                  <CheckCircle className="h-3 w-3" />
+                                </button>
+                                <button type="button" title="Reject as Accounting" onClick={() => handlePtoStageAction(request, "accounting", "rejected")} className="px-2 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-xs transition flex items-center gap-1">
+                                  <XCircle className="h-3 w-3" />
+                                </button>
+                              </div>
+                            )}
                             {!(request.managerStatus === "pending" && canReviewPtoStage(request, "manager", myProfileId, role)) &&
-                             !(request.hrStatus === "pending" && canReviewPtoStage(request, "hr", myProfileId, role)) && (
-                              <span className="text-xs text-slate-500">Awaiting other approver</span>
+                             !(request.hrStatus === "pending" && canReviewPtoStage(request, "hr", myProfileId, role)) &&
+                             !(request.accountingStatus === "pending" && canReviewPtoStage(request, "accounting", myProfileId, role)) && (
+                              <span className="text-xs text-slate-500">{request.managerStatus === "pending" ? "Awaiting manager" : "Awaiting HR/Accounting"}</span>
                             )}
                           </div>
                         </td>
@@ -1067,6 +1087,9 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                           </p>
                           <p className="text-xs text-slate-500">
                             HR: {request.hrStatus}{request.hrReviewedBy ? ` by ${profileName(request.hrReviewedBy)}` : ""}{request.hrReviewedAt ? ` on ${request.hrReviewedAt.slice(0, 10)}` : ""}
+                          </p>
+                          <p className="text-xs text-slate-500">
+                            Accounting: {request.accountingStatus}{request.accountingReviewedBy ? ` by ${profileName(request.accountingReviewedBy)}` : ""}{request.accountingReviewedAt ? ` on ${request.accountingReviewedAt.slice(0, 10)}` : ""}
                           </p>
                         </div>
                       </div>
