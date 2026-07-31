@@ -21,6 +21,8 @@ import { fillW9Pdf, loadBlankW9Bytes } from "@/lib/w9PdfFill";
 import type { W9FormData, W9TaxClassification } from "@/lib/w9FormTemplate";
 import { getOrCreateDmThread, sendMessage } from "@/lib/supabase/messaging";
 import { logActivity } from "@/lib/supabase/hrActivityLog";
+import { getHrNotificationSettings } from "@/lib/supabase/companySettings";
+import { notifyHrRoleUsers } from "@/lib/supabase/hrRoleNotify";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
 interface Props {
@@ -263,6 +265,15 @@ export function FillW9Page({ docId }: Props) {
         });
       }
 
+      // Opt-in broadcast — see Notifications Settings (migration 0090).
+      getHrNotificationSettings()
+        .then(({ taxForms }) => {
+          if (!taxForms) return;
+          const excludeIds = doc.createdBy ? [doc.createdBy] : [];
+          void notifyHrRoleUsers(myProfileId, displayName || "Employee", excludeIds, `📄 W-9 form for ${finalData.name} has been completed and submitted.`);
+        })
+        .catch((err) => console.error("[w9] hr notify check failed:", err));
+
       setDoc({ ...doc, status: "signed", pdfUrl, formData: finalData as unknown as Record<string, any>, signatures: { employee: entry }, signedAt });
       void logActivity({ action: "w9_form_signed", targetType: "employee", targetLabel: finalData.name });
       setSubmitted(true);
@@ -274,7 +285,9 @@ export function FillW9Page({ docId }: Props) {
   };
 
   const isRecipient = !!doc && !!myProfileId && doc.recipientId === myProfileId;
-  const isSuperadmin = role === "SUPERADMIN";
+  // Platform-level SUPERSUPERADMIN only — the per-company SUPERADMIN role
+  // should NOT see every employee's private documents, just its own like ADMIN.
+  const isSuperadmin = role === "SUPERSUPERADMIN";
 
   const overlayStyle = (r: { x: number; y: number; w: number; h: number }): React.CSSProperties => ({
     position: "absolute",

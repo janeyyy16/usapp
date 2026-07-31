@@ -10,7 +10,10 @@ import {
   saveEntry as sbSaveEntry,
   deleteEntry as sbDeleteEntry,
   getMyProfileSchedule,
+  resolveScheduledShiftHours,
 } from "@/lib/supabase/timecards";
+import { getMyProfileId } from "@/lib/supabase/users";
+import { getMyPayslips, payslipStatusLabel, type MyPayslipRow } from "@/lib/supabase/payslips";
 import { getCompanyPtoRequests, type PtoRequestRow } from "@/lib/supabase/pto";
 
 /** Human label for each pto_type, matching the labels used in EmployeeSelfServicePage. */
@@ -70,6 +73,8 @@ function FullTimecardPage({ uid, ready }: { uid: string | null; ready: boolean }
   const [profileId, setProfileId] = useState<string | null>(null);
   const [requiredCheckIn, setRequiredCheckIn] = useState("");
   const [requiredCheckOut, setRequiredCheckOut] = useState("");
+  const [workingHours, setWorkingHours] = useState<number | null>(null);
+  const [mealMinutes, setMealMinutes] = useState<number | null>(null);
   const [editingDate, setEditingDate] = useState<string | null>(null);
   const [modalEntry, setModalEntry] = useState<TimeEntry | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
@@ -85,6 +90,8 @@ function FullTimecardPage({ uid, ready }: { uid: string | null; ready: boolean }
         setProfileId(s.profileId);
         setRequiredCheckIn(s.requiredCheckIn);
         setRequiredCheckOut(s.requiredCheckOut);
+        setWorkingHours(s.workingHours);
+        setMealMinutes(s.mealMinutes);
       })
       .catch((err) => console.error("Failed to resolve profile:", err));
     return () => { cancelled = true; };
@@ -157,20 +164,24 @@ function FullTimecardPage({ uid, ready }: { uid: string | null; ready: boolean }
   const ptoForDate = (dateKey: string): PtoRequestRow | undefined =>
     myApprovedPto.find((r) => dateKey >= r.startDate && dateKey <= r.endDate);
 
+  // Includes seconds so payroll can compute hours (and therefore pay) to
+  // sub-minute precision instead of rounding every punch to the minute.
   const getNowTime = (): string => {
     const now = new Date();
     return (
       String(now.getHours()).padStart(2, "0") +
       ":" +
-      String(now.getMinutes()).padStart(2, "0")
+      String(now.getMinutes()).padStart(2, "0") +
+      ":" +
+      String(now.getSeconds()).padStart(2, "0")
     );
   };
 
   const timeDiff = (t1: string, t2: string): number => {
     if (!t1 || !t2) return 0;
-    const [h1, m1] = t1.split(":").map(Number);
-    const [h2, m2] = t2.split(":").map(Number);
-    return ((h2 * 60 + m2) - (h1 * 60 + m1)) / 60;
+    const [h1, m1, s1 = 0] = t1.split(":").map(Number);
+    const [h2, m2, s2 = 0] = t2.split(":").map(Number);
+    return ((h2 * 3600 + m2 * 60 + s2) - (h1 * 3600 + m1 * 60 + s1)) / 3600;
   };
 
   const calcHours = (entry: TimeEntry): number => {
@@ -261,17 +272,22 @@ function FullTimecardPage({ uid, ready }: { uid: string | null; ready: boolean }
       alert("Please log time in first.");
       return;
     }
+    if (modalEntry.checkOut) {
+      alert("You've already timed out for the day.");
+      return;
+    }
 
     // Lunch eligibility is based on the SCHEDULED shift length (set at account
-    // creation), not actual hours worked. Lunch is allowed only if the scheduled
-    // shift is 8 hours or more.
-    const scheduledShift = timeDiff(requiredCheckIn, requiredCheckOut);
-    if (!requiredCheckIn || !requiredCheckOut) {
+    // creation, or the explicit Working Hours override), not actual hours
+    // worked. Shifts of 6 hours or less have no meal break at all — Time In /
+    // Time Out only.
+    if ((!requiredCheckIn || !requiredCheckOut) && !workingHours) {
       alert("No scheduled shift is set for your account. Contact your admin to set your required schedule.");
       return;
     }
-    if (scheduledShift < 8) {
-      alert(`Lunch break is only available for scheduled shifts of 8 hours or more. Your scheduled shift is ${scheduledShift.toFixed(1)} hours.`);
+    const scheduledShift = resolveScheduledShiftHours(requiredCheckIn, requiredCheckOut, workingHours, mealMinutes);
+    if (scheduledShift <= 6) {
+      alert(`Lunch break is only available for scheduled shifts of more than 6 hours. Your scheduled shift is ${scheduledShift.toFixed(1)} hours.`);
       return;
     }
 
@@ -613,7 +629,7 @@ function FullTimecardPage({ uid, ready }: { uid: string | null; ready: boolean }
                             }
                           }}
                           className="flex-1 px-4 py-3 bg-orange-600 hover:bg-orange-700 disabled:bg-slate-600 disabled:opacity-50 text-white rounded-lg font-semibold transition"
-                          disabled={!!modalEntry.mealEnd}
+                          disabled={!!modalEntry.mealEnd || !!modalEntry.checkOut}
                         >
                           {!modalEntry.mealStart
                             ? "🍽 Meal In"
@@ -665,45 +681,53 @@ interface MobilePayRow {
   periodLabel: string;
   periodEnd: string;
   amount: number;
-  status: "Paid" | "Pending" | "Processing" | "On Hold";
+  status: ReturnType<typeof payslipStatusLabel>;
+  payslip: MyPayslipRow;
 }
 
 function MobilePayrollPage() {
   const navigate = useNavigate();
-  const { email, displayName } = useAuth();
+  const { uid, email, displayName } = useAuth();
 
-  // Seed 12 recent bi-weekly periods, most recent first. Amounts fluctuate
-  // so the table isn't uniform. Status skews to "Paid" for older periods,
-  // "Processing"/"Pending" for the most recent ones.
-  const rows = useMemo<MobilePayRow[]>(() => {
-    const out: MobilePayRow[] = [];
-    const today = new Date();
-    // Start from the current pay-period end, walk back in 14-day steps.
-    const endDate = new Date(today);
-    for (let i = 0; i < 12; i += 1) {
-      const start = new Date(endDate);
-      start.setDate(endDate.getDate() - 13);
-      const label =
-        start.toLocaleDateString("en-US") + " – " + endDate.toLocaleDateString("en-US");
-      const iso = endDate.toISOString().slice(0, 10);
-      // Amount: base $850 + $50 × (index * 7 % 10) so the numbers vary.
-      const amount = 850 + ((i * 137) % 620);
-      let status: MobilePayRow["status"];
-      if (i === 0) status = "Processing";
-      else if (i === 1) status = "Pending";
-      else if (i === 4) status = "On Hold";
-      else status = "Paid";
-      out.push({
-        id: "TP-" + iso,
-        periodLabel: label,
-        periodEnd: iso,
-        amount,
-        status,
-      });
-      endDate.setDate(endDate.getDate() - 14);
-    }
-    return out;
-  }, []);
+  const [payslips, setPayslips] = useState<MyPayslipRow[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!uid) return;
+    (async () => {
+      setLoading(true);
+      try {
+        const profileId = await getMyProfileId(uid);
+        const rows = profileId ? await getMyPayslips(profileId) : [];
+        if (!cancelled) setPayslips(rows);
+      } catch (e) {
+        console.error("payroll: load payslips failed", e);
+        if (!cancelled) setPayslips([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [uid]);
+
+  const fmtDate = (iso: string) => {
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? iso : d.toLocaleDateString("en-US");
+  };
+
+  const rows = useMemo<MobilePayRow[]>(
+    () =>
+      payslips.map((p) => ({
+        id: p.runId,
+        periodLabel: `${fmtDate(p.periodStart)} – ${fmtDate(p.periodEnd)}`,
+        periodEnd: p.periodEnd,
+        amount: p.netPay,
+        status: payslipStatusLabel(p.status),
+        payslip: p,
+      })),
+    [payslips],
+  );
 
   const displayLabel = displayName || email || "User";
 
@@ -712,7 +736,7 @@ function MobilePayrollPage() {
       Paid: { bg: "bg-emerald-500/15", text: "text-emerald-300", border: "border-emerald-400/40" },
       Pending: { bg: "bg-amber-500/15", text: "text-amber-300", border: "border-amber-400/40" },
       Processing: { bg: "bg-blue-500/15", text: "text-blue-300", border: "border-blue-400/40" },
-      "On Hold": { bg: "bg-rose-500/15", text: "text-rose-300", border: "border-rose-400/40" },
+      Approved: { bg: "bg-violet-500/15", text: "text-violet-300", border: "border-violet-400/40" },
     };
     const c = map[status];
     return (
@@ -753,7 +777,7 @@ function MobilePayrollPage() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5">
           <div className="rounded-lg border border-white/10 bg-white/5 px-4 py-3">
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-              YTD Paid (last 12 periods)
+              Paid
             </p>
             <p className="mt-1 text-2xl font-bold text-emerald-300">
               ${totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
@@ -772,6 +796,10 @@ function MobilePayrollPage() {
         </div>
 
         {/* Table */}
+        {loading && <p className="text-sm text-slate-400 mb-3">Loading payroll…</p>}
+        {!loading && rows.length === 0 && (
+          <p className="text-sm text-slate-400 mb-3">No payroll runs yet.</p>
+        )}
         <div className="rounded-lg border border-white/10 bg-slate-900/50 overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -803,11 +831,15 @@ function MobilePayrollPage() {
                           type="button"
                           className="inline-flex items-center gap-1.5 rounded-md border border-blue-400/40 bg-blue-500/15 px-2.5 py-1 text-xs font-semibold text-blue-200 hover:bg-blue-500/25 transition"
                           title="View payroll details"
-                          onClick={() =>
+                          onClick={() => {
+                            const p = row.payslip;
                             alert(
-                              `Pay period ${row.periodLabel}\nAmount: $${row.amount.toFixed(2)}\nStatus: ${row.status}`,
-                            )
-                          }
+                              `Pay period ${row.periodLabel}\nStatus: ${row.status}\n\n` +
+                                `Hours: ${p.hoursWorked.toFixed(2)} (+ ${p.overtimeHours.toFixed(2)} OT)\n` +
+                                `Regular Pay: $${p.regularPay.toFixed(2)}\nOvertime Pay: $${p.overtimePay.toFixed(2)}\n` +
+                                `Gross Pay: $${p.grossPay.toFixed(2)}\nNet Pay: $${p.netPay.toFixed(2)}`,
+                            );
+                          }}
                         >
                           <FileText className="h-3 w-3" />
                           View

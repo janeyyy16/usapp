@@ -4,6 +4,7 @@ import { Link, useSearch } from "@tanstack/react-router";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 import { useAuth } from "@/lib/auth";
 import { getEmployeeFromEmail } from "@/lib/userDataSync";
+import { usePersistedTab } from "@/lib/usePersistedTab";
 import { LOCATIONS } from "@/lib/locations";
 import {
   type AttendanceRow,
@@ -434,7 +435,11 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
   const search = (useSearch({ strict: false }) as { tab?: string }) ?? {};
   const employee = getEmployeeFromEmail(email);
 
-  const [activeTab, setActiveTab] = useState<"dashboard" | "payroll" | "attendance" | "requests" | "manage">("dashboard");
+  const [activeTab, setActiveTab] = usePersistedTab<"dashboard" | "payroll" | "attendance" | "requests" | "manage">(
+    "ahs:employee-self-service-active-tab",
+    ["dashboard", "payroll", "attendance", "requests", "manage"],
+    "dashboard",
+  );
   const [expandedPayslip, setExpandedPayslip] = useState<string | null>(null);
   const [payslipModalOpen, setPayslipModalOpen] = useState(false);
   const [selectedPayslipId, setSelectedPayslipId] = useState<string | null>(null);
@@ -506,6 +511,8 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
           {
             requiredCheckIn: schedule.requiredCheckIn,
             requiredCheckOut: schedule.requiredCheckOut,
+            workingHours: schedule.workingHours,
+            mealMinutes: schedule.mealMinutes,
           }
         );
         if (cancelled) return;
@@ -644,7 +651,7 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
     [myRequests, requestTypeFilter]
   );
 
-  const canManageRequests = ["ADMIN", "HR", "FINANCE"].includes((role || "").toUpperCase());
+  const canManageRequests = ["ADMIN", "SUPERADMIN", "HR", "FINANCE"].includes((role || "").toUpperCase());
 
   // PTO eligibility: 1 year of tenure from hire date (falls back to account
   // creation date if HR hasn't set a hire date yet).
@@ -688,8 +695,8 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
     const recipients = companyProfiles.filter((p) => {
       if (p.id === myProfileId) return false;
       const primary = (p.role || "").toUpperCase();
-      if (["ADMIN", "HR", "FINANCE"].includes(primary)) return true;
-      return (p.extra_roles || []).some((r) => ["ADMIN", "HR", "FINANCE"].includes((r || "").toUpperCase()));
+      if (["ADMIN", "SUPERADMIN", "HR", "FINANCE"].includes(primary)) return true;
+      return (p.extra_roles || []).some((r) => ["ADMIN", "SUPERADMIN", "HR", "FINANCE"].includes((r || "").toUpperCase()));
     });
     await Promise.all(
       recipients.map((r) =>
@@ -837,7 +844,7 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
             for (const p of companyProfiles) {
               if (p.id === myProfileId) continue;
               const primary = (p.role || "").toUpperCase();
-              if (primary === "HR" || (!managerProfile && primary === "ADMIN")) recipients.set(p.id, p);
+              if (primary === "HR" || (!managerProfile && (primary === "ADMIN" || primary === "SUPERADMIN"))) recipients.set(p.id, p);
             }
             await Promise.all(
               Array.from(recipients.values()).map((r) =>
@@ -1017,6 +1024,8 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
           {
             requiredCheckIn: schedule?.requiredCheckIn,
             requiredCheckOut: schedule?.requiredCheckOut,
+            workingHours: schedule?.workingHours,
+            mealMinutes: schedule?.mealMinutes,
           }
         );
         if (cancelled) return;
@@ -1374,6 +1383,7 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
                           absent: { label: "Absent", className: "bg-red-500/20 text-red-300" },
                           "missing-in": { label: "Missing Time-In", className: "bg-amber-500/20 text-amber-300" },
                           "missing-out": { label: "Missing Time-Out", className: "bg-amber-500/20 text-amber-300" },
+                          "missing-meal": { label: "Meal Not Taken", className: "bg-orange-500/20 text-orange-300" },
                         };
                         const meta = statusLabel[record.status];
                         return (

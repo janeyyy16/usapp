@@ -1,11 +1,20 @@
 import { useMemo, useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "@tanstack/react-router";
-import { ChevronDown, Check, Filter, Search } from "lucide-react";
+import { ChevronDown, ChevronLeft, Check, Filter, Search } from "lucide-react";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 import { type UserManagementRecord } from "@/lib/user-management";
 import { useAuth } from "@/lib/auth";
-import { createCompanyUser, getCompanyUsers, deleteCompanyUser, type ProfileRow } from "@/lib/supabase/users";
+import { createCompanyUser, getCompanyUsers, updateCompanyUser, setMustChangePassword, type ProfileRow } from "@/lib/supabase/users";
+import { usePersistedTab } from "@/lib/usePersistedTab";
+import { ROLE_LABELS, normalizeRole } from "@/lib/roleLabels";
+import { auth as firebaseAuth } from "@/lib/firebase/config";
+
+/** Readable role text for display — e.g. "BIZOPS_MANAGER" -> "BizOps Manager". Falls back to the raw value for anything not in ROLE_LABELS (legacy free-text roles like "CSR Manager" already read fine as-is). */
+function roleDisplay(role: string | null | undefined): string {
+  if (!role) return "";
+  return ROLE_LABELS[normalizeRole(role)] || role;
+}
 
 type ViewMode = "list" | "hierarchy";
 
@@ -24,6 +33,8 @@ interface NewUserFormData {
   poInitials: string;
   requiredCheckIn: string;
   requiredCheckOut: string;
+  workingHours: string;
+  mealMinutes: string;
   selectedOffDays: number[];
 }
 
@@ -45,8 +56,11 @@ const LOCATIONS = [
 const USER_TYPES: { value: string; label: string }[] = [
   { value: "ADMIN", label: "Admin" },
   { value: "MANAGER", label: "Manager" },
+  { value: "SENIOR_MANAGER", label: "Senior Manager" },
+  { value: "CSR", label: "CSR" },
   { value: "TECHNICIAN", label: "Technician" },
   { value: "TECHNICIAN_MANAGER", label: "Tech Manager" },
+  { value: "DISPATCHER", label: "Dispatcher" },
   { value: "TECHNICAL_DIRECTOR", label: "Technical Director" },
   { value: "TECHNICAL_ASSISTANT_DIRECTOR", label: "Technical Assistant Director" },
   { value: "CLAIMS", label: "Claims" },
@@ -62,6 +76,7 @@ const USER_TYPES: { value: string; label: string }[] = [
   { value: "CLAIMS_MANAGER", label: "Claims Manager" },
   { value: "CLAIMS_TEAM_LEADER", label: "Claims Team Leader" },
   { value: "PARTS_MANAGER", label: "Parts Manager" },
+  { value: "PARTS_TEAM_LEADER", label: "Parts Team Leader" },
   { value: "BIZOPS_MANAGER", label: "BizOps Manager" },
   { value: "BIZOPS_SENIOR_MANAGER", label: "BizOps Senior Manager" },
   { value: "TRIAGE_USER", label: "Technical Support" },
@@ -98,7 +113,11 @@ function colValue(record: { id: string; loginName: string; userName: string; typ
     case "id":            return String(record.id ?? "");
     case "loginName":     return String(record.loginName ?? "");
     case "userName":      return String(record.userName ?? "");
-    case "type":          return String(record.type ?? "");
+    // Readable label, not the raw role code/legacy free-text value - two
+    // rows stored differently (e.g. "PARTS_MANAGER" vs legacy "Parts
+    // Manager") must collapse into one funnel entry and filter together,
+    // not show up as two visually-identical checkboxes.
+    case "type":          return roleDisplay(record.type);
     case "email":         return String(record.email ?? "");
     case "manager":       return String(record.manager ?? "");
     case "technicianId":  return String(record.technicianId ?? "");
@@ -287,14 +306,24 @@ function RoleMultiSelect({
   }, []);
   const labelByValue = useMemo(() => {
     const m: Record<string, string> = {};
-    for (const o of options) m[o.value] = o.label;
+    for (const o of options) m[normalizeRole(o.value)] = o.label;
     return m;
   }, [options]);
+  // Compare normalized forms, not exact strings — a profile carrying a
+  // legacy free-text role (e.g. "CSR Manager" instead of "CSR_MANAGER")
+  // would otherwise match none of this list's option values, so its
+  // checkbox would never show checked and could never be toggled off,
+  // leaving the primary role stuck on that legacy value forever.
   const toggle = (val: string) => {
-    onChange(values.includes(val) ? values.filter((v) => v !== val) : [...values, val]);
+    const norm = normalizeRole(val);
+    onChange(
+      values.some((v) => normalizeRole(v) === norm)
+        ? values.filter((v) => normalizeRole(v) !== norm)
+        : [...values, val]
+    );
   };
   const summary = values.length
-    ? `${values.length} selected: ${values.map((v) => labelByValue[v] || v).join(", ")}`
+    ? `${values.length} selected: ${values.map((v) => labelByValue[normalizeRole(v)] || v).join(", ")}`
     : placeholder;
   return (
     <div className="relative" ref={ref}>
@@ -309,8 +338,8 @@ function RoleMultiSelect({
       {open && (
         <div className="absolute z-50 mt-1 w-full max-h-56 overflow-y-auto rounded-lg border border-white/10 bg-slate-900 shadow-xl">
           {options.map((opt) => {
-            const checked = values.includes(opt.value);
-            const isPrimary = values[0] === opt.value;
+            const checked = values.some((v) => normalizeRole(v) === normalizeRole(opt.value));
+            const isPrimary = values.length > 0 && normalizeRole(values[0]) === normalizeRole(opt.value);
             return (
               <button
                 key={opt.value}
@@ -336,7 +365,7 @@ function RoleMultiSelect({
 
 // Map a Supabase profile row to the table's UserManagementRecord shape.
 // Row shape for the table: UserManagementRecord plus the Supabase profile id
-// (needed for the delete action).
+// (needed for the delete action and for forcing a password change).
 type UserRow = UserManagementRecord & { profileId: string };
 
 function mapProfilesToRecords(profiles: ProfileRow[]): UserRow[] {
@@ -351,6 +380,7 @@ function mapProfilesToRecords(profiles: ProfileRow[]): UserRow[] {
     technicianId: p.technician_id || "",
     office: p.assigned_branch || "",
     locations: p.branch_access || "",
+    isActive: p.is_active,
   }));
 }
 
@@ -365,6 +395,61 @@ function UserLink({ moduleSlug, submoduleSlug, userId, children }: { moduleSlug:
     >
       {children}
     </Link>
+  );
+}
+
+const EMPTY_ANCESTORS: ReadonlySet<string> = new Set();
+
+/**
+ * One row of the Hierarchy tree, recursing into its own direct reports.
+ * A manager gets a filled dot + its children indented under a connecting
+ * line; a leaf (no reports) just gets a short tick mark — same visual
+ * language as a standard file/org-chart tree. `ancestors` guards against a
+ * bad manager chain (e.g. two people accidentally set as each other's
+ * manager) recursing forever — free-text manager names have no DB
+ * constraint stopping that.
+ */
+function HierarchyTreeNode({
+  record, childrenByManagerName, moduleSlug, submoduleSlug, ancestors,
+}: {
+  record: UserManagementRecord;
+  childrenByManagerName: Map<string, UserManagementRecord[]>;
+  moduleSlug: string;
+  submoduleSlug: string;
+  ancestors: ReadonlySet<string>;
+}) {
+  const children = ancestors.has(record.userName) ? [] : (childrenByManagerName.get(record.userName) ?? []);
+  const hasChildren = children.length > 0;
+  const childAncestors = useMemo(() => new Set(ancestors).add(record.userName), [ancestors, record.userName]);
+
+  return (
+    <div>
+      <div className="flex items-center gap-2.5 py-1.5">
+        <div className="flex h-4 w-4 shrink-0 items-center justify-center">
+          {hasChildren ? <span className="h-2 w-2 rounded-full bg-blue-400" /> : <span className="h-px w-2.5 bg-white/25" />}
+        </div>
+        <div className="flex items-baseline gap-1.5 min-w-0">
+          <UserLink moduleSlug={moduleSlug} submoduleSlug={submoduleSlug} userId={record.loginName}>
+            {record.userName}
+          </UserLink>
+          <span className="text-xs text-slate-400 whitespace-nowrap">({roleDisplay(record.type)})</span>
+        </div>
+      </div>
+      {hasChildren && (
+        <div className="ml-[7px] border-l border-white/15 pl-[17px]">
+          {children.map((child) => (
+            <HierarchyTreeNode
+              key={child.loginName}
+              record={child}
+              childrenByManagerName={childrenByManagerName}
+              moduleSlug={moduleSlug}
+              submoduleSlug={submoduleSlug}
+              ancestors={childAncestors}
+            />
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -531,7 +616,7 @@ function ColumnFilter({
 
 export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) {
   const auth = useAuth();
-  const [viewMode, setViewMode] = useState<ViewMode>("list");
+  const [viewMode, setViewMode] = usePersistedTab<ViewMode>("ahs:admin-user-management-view-mode", ["list", "hierarchy"], "list");
   const [search, setSearch] = useState("");
   // Per-column funnel filters: { fieldName: Set<allowed values> }
   // Empty set or missing key = no filter on that column.
@@ -547,6 +632,9 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
   const activeFilterCount = Object.values(colFilters).filter((sel) => sel && sel.size > 0).length;
   const clearAllFilters = () => setColFilters({});
   const [showAddUserModal, setShowAddUserModal] = useState(false);
+  const [deactivateTarget, setDeactivateTarget] = useState<UserRow | null>(null);
+  const [resetModal, setResetModal] = useState<{ mode: "single"; row: UserRow } | { mode: "all" } | null>(null);
+  const [resettingPassword, setResettingPassword] = useState(false);
   const [users, setUsers] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [newUserForm, setNewUserForm] = useState<NewUserFormData>({
@@ -562,6 +650,8 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
     poInitials: "",
     requiredCheckIn: "08:00",
     requiredCheckOut: "17:00",
+    workingHours: "",
+    mealMinutes: "",
     selectedOffDays: [5, 6], // Saturday and Sunday by default
   });
 
@@ -589,7 +679,7 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
 
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
-    return users.filter((record) => {
+    const matches = users.filter((record) => {
       // Free-text search across the visible fields.
       if (query) {
         const blob = [record.id, record.loginName, record.userName, record.type, record.email, record.manager, record.technicianId, record.office, record.locations]
@@ -606,7 +696,26 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
       }
       return true;
     });
+    if (!query) return matches;
+    // The blob search above matches ANY field, including "Manager" - so
+    // searching a manager's own name previously surfaced every one of
+    // their direct reports (whose row also contains that name) ahead of
+    // the manager themselves, in whatever order the data happened to load.
+    // Sort (stably) so a match on the person's own login/username always
+    // outranks a match that only came from some other field.
+    const isDirectMatch = (r: UserRow) =>
+      r.loginName.toLowerCase().includes(query) || r.userName.toLowerCase().includes(query);
+    return [...matches].sort((a, b) => Number(isDirectMatch(b)) - Number(isDirectMatch(a)));
   }, [search, users, colFilters]);
+
+  // Manager cells store a free-text display name (profiles.manager_name),
+  // not a real foreign key - so linking to "the manager" needs this lookup
+  // to find the actual profile (and its real loginName) behind that name.
+  const loginNameByDisplayName = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const u of users) if (u.userName) map.set(u.userName, u.loginName);
+    return map;
+  }, [users]);
 
   // Distinct values per column for the funnel dropdowns. Built from the
   // free-text-filtered set so column dropdowns shrink with the search.
@@ -620,21 +729,38 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
     return map;
   }, [users]);
 
-  const managerGroups = useMemo(() => {
-    const groups = new Map<string, UserManagementRecord[]>();
-    filtered.forEach((record) => {
-      const key = record.manager || "Unassigned";
-      groups.set(key, [...(groups.get(key) ?? []), record]);
-    });
-    return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
+  // manager is free text (matched against real profiles by display name —
+  // see resolveTeamLeadOrManager in notifyRouting.ts), so building the tree
+  // is just: group everyone by their manager's name, then start from
+  // whoever's own manager name doesn't resolve to a real person in view
+  // (blank, "Unassigned", or a typo/former manager) — those are the roots.
+  const usersByName = useMemo(() => {
+    const map = new Map<string, UserManagementRecord>();
+    filtered.forEach((r) => { if (r.userName) map.set(r.userName, r); });
+    return map;
   }, [filtered]);
+
+  const childrenByManagerName = useMemo(() => {
+    const map = new Map<string, UserManagementRecord[]>();
+    filtered.forEach((record) => {
+      if (!record.manager) return;
+      map.set(record.manager, [...(map.get(record.manager) ?? []), record]);
+    });
+    for (const list of map.values()) list.sort((a, b) => a.userName.localeCompare(b.userName));
+    return map;
+  }, [filtered]);
+
+  const hierarchyRoots = useMemo(
+    () => filtered.filter((record) => !record.manager || !usersByName.has(record.manager)).sort((a, b) => a.userName.localeCompare(b.userName)),
+    [filtered, usersByName],
+  );
 
   // Manager dropdown candidates: real users with a manager-ish or admin
   // role, not the old hardcoded name list. Stored as free-text (manager_name
   // matched against real profiles by display name — see resolveTeamLeadOrManager
   // in src/lib/notifyRouting.ts), so the option value is the display name.
   const managerCandidates = useMemo(() => {
-    const eligible = users.filter((u) => (u.type || "").toUpperCase() === "ADMIN" || (u.type || "").toUpperCase().includes("MANAGER"));
+    const eligible = users.filter((u) => ["ADMIN", "SUPERADMIN"].includes((u.type || "").toUpperCase()) || (u.type || "").toUpperCase().includes("MANAGER"));
     return Array.from(new Set(eligible.map((u) => u.userName).filter(Boolean))).sort((a, b) => a.localeCompare(b));
   }, [users]);
 
@@ -651,17 +777,42 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
     }));
   };
 
-  const handleDeleteUser = async (row: UserRow) => {
-    if (!confirm(`Delete ${row.userName} (${row.email})? This removes their profile from the system.`)) {
-      return;
-    }
+  const handleToggleUserActive = async (row: UserRow) => {
+    const reactivating = row.isActive === false;
     try {
-      await deleteCompanyUser(row.profileId);
+      await updateCompanyUser(row.profileId, { isActive: reactivating });
       const profiles = await getCompanyUsers();
       setUsers(mapProfilesToRecords(profiles));
     } catch (error) {
-      console.error("Delete error:", error);
-      alert(`Error deleting user: ${error instanceof Error ? error.message : "Unknown error"}`);
+      console.error("Toggle active error:", error);
+      alert(`Error ${reactivating ? "reactivating" : "deactivating"} user: ${error instanceof Error ? error.message : "Unknown error"}`);
+    } finally {
+      setDeactivateTarget(null);
+    }
+  };
+
+  const handleConfirmResetPassword = async () => {
+    if (!resetModal) return;
+    const targets = resetModal.mode === "single" ? [resetModal.row] : users;
+    if (
+      resetModal.mode === "all" &&
+      !confirm(`Force ALL ${targets.length} users in this company to change their password on next login? This cannot be undone.`)
+    ) {
+      return;
+    }
+    setResettingPassword(true);
+    try {
+      await setMustChangePassword(targets.map((u) => u.profileId), true);
+      alert(
+        resetModal.mode === "single"
+          ? `${resetModal.row.userName} will be asked to change their password next time they log in.`
+          : `All ${targets.length} users will be asked to change their password next time they log in.`
+      );
+      setResetModal(null);
+    } catch (error) {
+      alert(`Error: ${error instanceof Error ? error.message : "Unknown error"}`);
+    } finally {
+      setResettingPassword(false);
     }
   };
 
@@ -701,6 +852,8 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
         poInitials: newUserForm.poInitials,
         requiredCheckIn: newUserForm.requiredCheckIn,
         requiredCheckOut: newUserForm.requiredCheckOut,
+        workingHours: newUserForm.workingHours.trim() ? Number(newUserForm.workingHours) : undefined,
+        mealMinutes: newUserForm.mealMinutes.trim() ? Number(newUserForm.mealMinutes) : undefined,
       });
 
       // Save schedule / off-days / PO initials to localStorage (until employees domain is wired)
@@ -733,6 +886,8 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
         poInitials: "",
         requiredCheckIn: "08:00",
         requiredCheckOut: "17:00",
+        workingHours: "",
+        mealMinutes: "",
         selectedOffDays: [5, 6],
       });
       setShowAddUserModal(false);
@@ -745,23 +900,17 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
   return (
     <main className="flex-1 bg-slate-950 py-6">
       <div className="max-w-[1500px] mx-auto px-6">
-        {/* Back Button */}
-        <Link 
-          to="/m/$module" 
-          params={{ module: mod.slug }}
-          className="inline-flex items-center gap-2 text-slate-300 hover:text-white mb-4 transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-          </svg>
-          Back to {mod.label}
-        </Link>
-        
         <div className="rounded-xl border border-white/15 bg-white/8 p-5 text-white backdrop-blur-md">
           <div className="flex flex-wrap items-start justify-between gap-4">
-            <div className="min-w-0 flex-1">
-              <h1 className="text-3xl font-bold tracking-tight">{sub.title}</h1>
-              <p className="mt-1 text-sm text-slate-300">{sub.description}</p>
+            <div className="flex min-w-0 flex-1 items-center gap-3">
+              <Link to="/m/$module" params={{ module: mod.slug }} className="btn">
+                <ChevronLeft className="h-4 w-4" />
+                {mod.label}
+              </Link>
+              <div className="min-w-0">
+                <h1 className="text-3xl font-bold tracking-tight">{sub.title}</h1>
+                <p className="mt-1 text-sm text-slate-300">{sub.description}</p>
+              </div>
             </div>
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-2 rounded-full border border-white/15 bg-slate-900/80 p-1">
@@ -776,6 +925,14 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
                   </button>
                 ))}
               </div>
+              <button
+                type="button"
+                onClick={() => setResetModal({ mode: "all" })}
+                disabled={users.length === 0}
+                className="btn whitespace-nowrap border border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 disabled:opacity-40"
+              >
+                Reset All Passwords
+              </button>
               <button
                 type="button"
                 onClick={() => setShowAddUserModal(true)}
@@ -823,59 +980,59 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
 
         {viewMode === "list" ? (
           <div className="mt-5 overflow-x-auto rounded-xl border border-white/15 bg-white/8 backdrop-blur-md">
-            <table className="w-full text-sm">
+            <table className="w-full text-xs leading-tight">
               <thead>
                 <tr className="bg-slate-900/90 text-blue-200">
-                  <th className="px-4 py-3 text-left">
+                  <th className="px-2 py-1.5 text-left">
                     <span className="inline-flex items-center">ID
                       <ColumnFilter field="id" label="ID" options={columnOptions["id"] || []}
                         selected={colFilters["id"] || new Set()} onChange={(n) => setColFilter("id", n)} />
                     </span>
                   </th>
-                  <th className="px-4 py-3 text-left">
+                  <th className="px-2 py-1.5 text-left">
                     <span className="inline-flex items-center">Login Name
                       <ColumnFilter field="loginName" label="Login Name" options={columnOptions["loginName"] || []}
                         selected={colFilters["loginName"] || new Set()} onChange={(n) => setColFilter("loginName", n)} />
                     </span>
                   </th>
-                  <th className="px-4 py-3 text-left">
+                  <th className="px-2 py-1.5 text-left">
                     <span className="inline-flex items-center">User Name
                       <ColumnFilter field="userName" label="User Name" options={columnOptions["userName"] || []}
                         selected={colFilters["userName"] || new Set()} onChange={(n) => setColFilter("userName", n)} />
                     </span>
                   </th>
-                  <th className="px-4 py-3 text-left">
+                  <th className="px-2 py-1.5 text-left">
                     <span className="inline-flex items-center">Type
                       <ColumnFilter field="type" label="Type" options={columnOptions["type"] || []}
                         selected={colFilters["type"] || new Set()} onChange={(n) => setColFilter("type", n)} />
                     </span>
                   </th>
-                  <th className="px-4 py-3 text-left">
+                  <th className="px-2 py-1.5 text-left">
                     <span className="inline-flex items-center">Email
                       <ColumnFilter field="email" label="Email" options={columnOptions["email"] || []}
                         selected={colFilters["email"] || new Set()} onChange={(n) => setColFilter("email", n)} />
                     </span>
                   </th>
-                  <th className="px-4 py-3 text-left">
+                  <th className="px-2 py-1.5 text-left">
                     <span className="inline-flex items-center">Manager
                       <ColumnFilter field="manager" label="Manager" options={columnOptions["manager"] || []}
                         selected={colFilters["manager"] || new Set()} onChange={(n) => setColFilter("manager", n)} />
                     </span>
                   </th>
-                  <th className="px-4 py-3 text-left">
+                  <th className="px-2 py-1.5 text-left">
                     <span className="inline-flex items-center">Technician ID
                       <ColumnFilter field="technicianId" label="Technician ID" options={columnOptions["technicianId"] || []}
                         selected={colFilters["technicianId"] || new Set()} onChange={(n) => setColFilter("technicianId", n)} />
                     </span>
                   </th>
-                  <th className="px-4 py-3 text-left">
+                  <th className="px-2 py-1.5 text-left">
                     <span className="inline-flex items-center">Assigned Branch
                       <ColumnFilter field="office" label="Assigned Branch" options={columnOptions["office"] || []}
                         selected={colFilters["office"] || new Set()} onChange={(n) => setColFilter("office", n)} />
                     </span>
                   </th>
-                  <th className="px-4 py-3 text-left">Branch Access</th>
-                  <th className="px-4 py-3 text-left">Actions</th>
+                  <th className="px-2 py-1.5 text-left">Branch Access</th>
+                  <th className="px-2 py-1.5 text-left">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/10 bg-slate-950/60 text-slate-200">
@@ -894,23 +1051,36 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
                 ) : (
                   filtered.map((record) => (
                     <tr key={`${record.id}-${record.loginName}`} className="hover:bg-white/5">
-                      <td className="px-4 py-3 whitespace-nowrap">{record.id}</td>
-                      <td className="px-4 py-3 whitespace-nowrap"><UserLink moduleSlug={mod.slug} submoduleSlug={sub.slug} userId={record.loginName}>{record.loginName}</UserLink></td>
-                      <td className="px-4 py-3 whitespace-nowrap"><UserLink moduleSlug={mod.slug} submoduleSlug={sub.slug} userId={record.loginName}>{record.userName}</UserLink></td>
-                      <td className="px-4 py-3 whitespace-nowrap">{record.type}</td>
-                      <td className="px-4 py-3 whitespace-nowrap text-slate-300">{record.email || "—"}</td>
-                      <td className="px-4 py-3 whitespace-nowrap"><UserLink moduleSlug={mod.slug} submoduleSlug={sub.slug} userId={record.manager || record.loginName}>{record.manager || "—"}</UserLink></td>
-                      <td className="px-4 py-3 whitespace-nowrap text-slate-300">{record.technicianId || "—"}</td>
-                      <td className="px-4 py-3 whitespace-nowrap text-slate-300">{record.office}</td>
-                      <td className="px-4 py-3 text-slate-300">{record.locations}</td>
-                      <td className="px-4 py-3 whitespace-nowrap">
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteUser(record)}
-                          className="rounded border border-red-500/40 bg-red-500/10 px-2 py-1 text-xs font-semibold text-red-300 hover:bg-red-500/20"
-                        >
-                          Delete
-                        </button>
+                      <td className="px-2 py-1.5 whitespace-nowrap">{record.id}</td>
+                      <td className="px-2 py-1.5 whitespace-nowrap"><UserLink moduleSlug={mod.slug} submoduleSlug={sub.slug} userId={record.loginName}>{record.loginName}</UserLink></td>
+                      <td className="px-2 py-1.5 whitespace-nowrap"><UserLink moduleSlug={mod.slug} submoduleSlug={sub.slug} userId={record.loginName}>{record.userName}</UserLink></td>
+                      <td className="px-2 py-1.5 whitespace-nowrap">{roleDisplay(record.type)}</td>
+                      <td className="px-2 py-1.5 whitespace-nowrap text-slate-300">{record.email || "—"}</td>
+                      <td className="px-2 py-1.5 whitespace-nowrap"><UserLink moduleSlug={mod.slug} submoduleSlug={sub.slug} userId={loginNameByDisplayName.get(record.manager) || record.manager || record.loginName}>{record.manager || "—"}</UserLink></td>
+                      <td className="px-2 py-1.5 whitespace-nowrap text-slate-300">{record.technicianId || "—"}</td>
+                      <td className="px-2 py-1.5 whitespace-nowrap text-slate-300">{record.office}</td>
+                      <td className="px-2 py-1.5 text-slate-300">{record.locations}</td>
+                      <td className="px-2 py-1.5 whitespace-nowrap">
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setResetModal({ mode: "single", row: record })}
+                            className="rounded border border-blue-500/40 bg-blue-500/10 px-2 py-1 text-xs font-semibold text-blue-300 hover:bg-blue-500/20"
+                          >
+                            Reset Password
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDeactivateTarget(record)}
+                            className={
+                              record.isActive === false
+                                ? "rounded border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20"
+                                : "rounded border border-red-500/40 bg-red-500/10 px-2 py-1 text-xs font-semibold text-red-300 hover:bg-red-500/20"
+                            }
+                          >
+                            {record.isActive === false ? "Reactivate" : "Deactivate"}
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -919,27 +1089,21 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
             </table>
           </div>
         ) : (
-          <div className="mt-5 grid gap-4 lg:grid-cols-2">
-            {managerGroups.map(([managerName, users]) => (
-              <section key={managerName} className="rounded-xl border border-white/15 bg-white/8 p-4 text-white backdrop-blur-md">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-lg font-semibold">{managerName}</div>
-                    <div className="text-xs uppercase tracking-[0.18em] text-slate-400">{users.length} direct reports</div>
-                  </div>
-                  <UserLink moduleSlug={mod.slug} submoduleSlug={sub.slug} userId={users[0]?.loginName ?? managerName}>
-                    Open
-                  </UserLink>
-                </div>
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {users.map((record) => (
-                    <UserLink key={record.loginName} moduleSlug={mod.slug} submoduleSlug={sub.slug} userId={record.loginName}>
-                      {record.userName}
-                    </UserLink>
-                  ))}
-                </div>
-              </section>
-            ))}
+          <div className="mt-5 rounded-xl border border-white/15 bg-white/8 p-5 text-white backdrop-blur-md">
+            {hierarchyRoots.length === 0 ? (
+              <p className="py-6 text-center text-sm text-slate-400">No hierarchy to show yet.</p>
+            ) : (
+              hierarchyRoots.map((root) => (
+                <HierarchyTreeNode
+                  key={root.loginName}
+                  record={root}
+                  childrenByManagerName={childrenByManagerName}
+                  moduleSlug={mod.slug}
+                  submoduleSlug={sub.slug}
+                  ancestors={EMPTY_ANCESTORS}
+                />
+              ))
+            )}
           </div>
         )}
       </div>
@@ -1086,6 +1250,30 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
                       className="px-3 py-2 bg-slate-700 border border-white/20 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
                     />
                   </label>
+                  <label className="flex flex-col gap-2">
+                    <span className="text-xs text-slate-400">Working Hours <span className="normal-case text-[10px] text-slate-500">(overrides Check-In/Out for meal eligibility)</span></span>
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.5}
+                      placeholder="e.g. 8"
+                      value={newUserForm.workingHours}
+                      onChange={(e) => handleAddUserFormChange("workingHours", e.target.value)}
+                      className="px-3 py-2 bg-slate-700 border border-white/20 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-2">
+                    <span className="text-xs text-slate-400">Meal Time (minutes)</span>
+                    <input
+                      type="number"
+                      min={0}
+                      step={5}
+                      placeholder="e.g. 30"
+                      value={newUserForm.mealMinutes}
+                      onChange={(e) => handleAddUserFormChange("mealMinutes", e.target.value)}
+                      className="px-3 py-2 bg-slate-700 border border-white/20 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+                    />
+                  </label>
                 </div>
               </div>
 
@@ -1120,6 +1308,58 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
                 <p className="mb-2">• Default password: <span className="text-blue-300 font-mono">Welcome2024!</span> (user should change on first login)</p>
                 <p>• Username will be auto-generated from display name (FirstName.LastName format)</p>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {resetModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 py-6 backdrop-blur-sm">
+          <div className="relative w-full max-w-md rounded-xl border border-white/15 bg-slate-950/95 shadow-2xl shadow-black/60">
+            <div className="border-b border-white/10 px-5 py-4">
+              <h2 className="text-xl font-bold tracking-tight">
+                {resetModal.mode === "single" ? `Reset Password — ${resetModal.row.userName}` : `Reset ALL Passwords (${users.length} users)`}
+              </h2>
+              <p className="mt-1 text-sm text-slate-300">
+                {resetModal.mode === "single"
+                  ? `${resetModal.row.userName} keeps logging in with their current password — but the next time they sign in, they'll be sent straight to My Profile and required to set a new password before they can reach any dashboard.`
+                  : `Every one of the ${users.length} users currently loaded keeps logging in with their current password — but the next time each signs in, they'll be sent straight to My Profile and required to set a new password before reaching any dashboard.`}
+              </p>
+            </div>
+            <div className="flex items-center justify-end gap-3 border-t border-white/10 px-5 py-4">
+              <button type="button" onClick={() => setResetModal(null)} className="btn hover:bg-slate-800" disabled={resettingPassword}>
+                Cancel
+              </button>
+              <button type="button" onClick={handleConfirmResetPassword} className="btn btn-primary" disabled={resettingPassword}>
+                {resettingPassword ? "Applying…" : "Force Password Change"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deactivateTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 py-6 backdrop-blur-sm">
+          <div className="relative w-full max-w-sm rounded-xl border border-white/15 bg-slate-950/95 p-5 shadow-2xl shadow-black/60">
+            <h2 className="text-lg font-bold text-white">
+              {deactivateTarget.isActive === false ? "Reactivate user?" : "Deactivate user?"}
+            </h2>
+            <p className="mt-2 text-sm text-slate-300">
+              {deactivateTarget.isActive === false
+                ? `Reactivate ${deactivateTarget.userName} (${deactivateTarget.email})? They'll be able to log in again.`
+                : `Deactivate ${deactivateTarget.userName} (${deactivateTarget.email})? They won't be able to log in, but their records stay intact.`}
+            </p>
+            <div className="mt-5 flex justify-end gap-3">
+              <button type="button" onClick={() => setDeactivateTarget(null)} className="btn hover:bg-slate-800">
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => handleToggleUserActive(deactivateTarget)}
+                className={deactivateTarget.isActive === false ? "btn btn-primary" : "btn btn-danger"}
+              >
+                {deactivateTarget.isActive === false ? "Reactivate" : "Deactivate"}
+              </button>
             </div>
           </div>
         </div>

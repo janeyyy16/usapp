@@ -30,6 +30,13 @@ import { getAllAgentNotes, getPendingAgentNotes, reviewAgentNote, addAgentNote, 
 import { parseBranchAccess } from "@/lib/locations";
 import { OnboardingApplicantDocuments } from "./OnboardingApplicantDocuments";
 import { getOnboardingDocumentCategoriesByProfileIds } from "@/lib/supabase/onboardingDocuments";
+import {
+  getOnboardingDocumentColumns,
+  addOnboardingDocumentColumn,
+  deleteOnboardingDocumentColumn,
+  type OnboardingDocumentColumn,
+  type OnboardingGroupKey,
+} from "@/lib/supabase/onboardingDocumentColumns";
 import { uploadCoeCertificate, uploadWarningForm, uploadW8benForm, uploadW4Form } from "@/lib/firebase/storage";
 import { captureHtmlToPdfBlob, loadAssetDataUrl as loadImageDataUrl } from "@/lib/pdfCapture";
 import {
@@ -43,6 +50,7 @@ import {
   type SignableDocument,
 } from "@/lib/supabase/signableDocuments";
 import { buildWarningFormBodyMarkup, warningFormStyles, type WarningFormData, type SignatureSlot } from "@/lib/warningFormTemplate";
+import { buildWarningFormDocxBlob } from "@/lib/warningFormDocx";
 import type { W8benFormData, W8benAddress } from "@/lib/w8benFormTemplate";
 import { fillW8benPdf } from "@/lib/w8benPdfFill";
 import type { W4FormData } from "@/lib/w4FormTemplate";
@@ -56,47 +64,48 @@ import { getCompanyTimecardEntries, calcWorkedHours, hoursDiff, type CompanyTime
 import { getCompanyTimecardCorrections, reviewCorrectionStage, canReviewCorrectionStage, type TimecardCorrectionRow, type CorrectionStage } from "@/lib/supabase/timecardCorrections";
 import { getCompanyEmployeeRequests, updateEmployeeRequestStatus, type EmployeeRequestRow, type EmployeeRequestStatus } from "@/lib/supabase/employeeRequests";
 import { getAppUrl } from "@/lib/appUrl";
-import { getCompanyCoeBodyTemplate, setCompanyCoeBodyTemplate } from "@/lib/supabase/companySettings";
+import { getCompanyCoeBodyTemplate, setCompanyCoeBodyTemplate, getHrNotificationSettings } from "@/lib/supabase/companySettings";
+import { notifyHrRoleUsers } from "@/lib/supabase/hrRoleNotify";
 import { getCompanyCoeDocuments, addCoeDocument, type CoeDocument } from "@/lib/supabase/coeDocuments";
 import { getJotformSubmissions, getDeletedJotformSubmissions, updateJotformSubmissionStatus, softDeleteJotformSubmission, restoreJotformSubmission, type JotformSubmission, type JotformSubmissionStatus } from "@/lib/supabase/jotformSubmissions";
+import { getCustomFormSubmissions } from "@/lib/supabase/customForms";
+import { CustomFormsPanel } from "./CustomFormsPanel";
+
+// Formats a <input type="date"> value ("YYYY-MM-DD") as a long-form date
+// ("July 17, 2026") via the multi-arg Date constructor (new Date(y, m-1, d),
+// parsed in LOCAL time) — NOT `new Date(str).toLocaleDateString()`. A
+// date-only ISO string passed as a single string is parsed as UTC midnight;
+// formatting it back out in the browser's local timezone (anything behind
+// UTC, i.e. all of the US) rolls it back a day, e.g. printing "since July 5,
+// 2026" on a COE for an employee who actually started July 6.
+function formatDateOnlyLong(isoDate: string): string {
+  const [y, m, d] = isoDate.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+}
 
 // Certificate of Employment's editable body — the prose paragraphs between
 // the greeting and the signature block (see companySettings.ts's
-// getCompanyCoeBodyTemplate/setCompanyCoeBodyTemplate, migration 0058).
+// getCompanyCoeBodyTemplate/setCompanyCoeBodyTemplate, migration 0063).
 // Placeholders are substituted in at generation time; this default matches
 // the original hardcoded text exactly, so nothing changes until an Admin
 // edits it. Paragraphs are separated by a blank line.
-const COE_BODY_PLACEHOLDERS = ["date", "employeeName", "startDate", "jobTitle", "amount", "month", "authorizedRep", "email", "phone"] as const;
-// The "===OFFICE USE===" marker splits the letter body (above it) from the
-// boxed "For Office Use Only" stamp (below it) — both are rendered through
-// the same paragraph-splitting logic, just into two different containers so
-// the stamp keeps its own visual box. Everything here is plain text/
-// placeholders — no HTML — so an Admin editing this never has to touch markup.
-const DEFAULT_COE_BODY_TEMPLATE = `Date: {{date}}
+const COE_BODY_PLACEHOLDERS = ["honorific", "employeeName", "startDate", "jobTitle", "reason", "he", "his"] as const;
+// This is the free-flowing letter prose only — Admin-editable via "Edit
+// Template" — everything here is plain text/placeholders, no HTML, so
+// editing it never means touching markup. The "For Office Use Only" stamp
+// that follows it on the actual certificate is NOT part of this template —
+// it's a fixed-layout box built directly in buildCoeBodyMarkup from the
+// Generate COE form's own office-use fields (Name/Title/Signature/Number),
+// matching the reference certificate's 2-column layout exactly; letting an
+// Admin freely rearrange that structured stamp via free text isn't
+// meaningful the way editing prose paragraphs is.
+const DEFAULT_COE_BODY_TEMPLATE = `This is to certify that {{employeeName}} has been employed with US IN HOME SERVICES since {{startDate}}.
 
-To Whom It May Concern,
+{{honorific}} {{employeeName}} is currently employed as a {{jobTitle}}. Throughout {{his}} employment, {{he}} has demonstrated professionalism and has remained a valued employee in good standing with our organization.
 
-This is to certify that {{employeeName}} has been employed with US IN HOME SERVICES since {{startDate}}.
+This certification is issued upon {{his}} request for {{reason}}.
 
-During their employment, {{employeeName}} has been serving as {{jobTitle}} and has been a member of our organization in good standing. The employee receives a gross compensation of \${{amount}} per {{month}}, subject to applicable deductions and company policies.
-
-This certificate is issued upon the employee's request for whatever lawful purpose it may serve.
-
-Should you require any additional information, please feel free to contact us.
-
-Sincerely,
-
-{{authorizedRep}}
-Authorized Representative
-US IN HOME SERVICES
-Email: {{email}}
-Phone: {{phone}}
-
-===OFFICE USE===
-For Office Use Only:
-Name: Naveen Lakhani
-Title: BizOps Senior Manager
-Signature: Naveen Lakhani`;
+Should you require any additional information or verification regarding {{his}} employment, please do not hesitate to contact us.`;
 
 const PTO_TYPE_LABEL: Record<PtoType, string> = {
   vacation: "Vacation",
@@ -114,7 +123,7 @@ const PH_BRANCH_NAMES = new Set(LOCATIONS_DATA.filter(l => l.isPhilippines).map(
 // HR/Admin/Superadmin/Manager see every candidate and can finalize hires;
 // Branch Managers only see + decide on their own branch's applicants —
 // they run the final interview, HR finalizes the hire.
-const HR_ADMIN_ROLES = new Set(["HR", "ADMIN", "SUPERADMIN", "MANAGER"]);
+const HR_ADMIN_ROLES = new Set(["HR", "ADMIN", "SUPERADMIN", "MANAGER", "SENIOR_MANAGER"]);
 const BRANCH_MANAGER_ROLES = new Set(["BRANCH_MANAGER", "SENIOR_BRANCH_MANAGER"]);
 
 const CANDIDATE_STATUS_LABEL: Record<CandidateStatus, string> = {
@@ -256,7 +265,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   // Reviews, the Approved log, the department trend chart, and the full
   // Employee Directory all on top of each other, forcing a long scroll to
   // reach anything below Hiring.
-  const [activeTab, setActiveTab] = useState<"hiring" | "warnings" | "directory" | "jotform" | "jotformDocuments" | "onboarding" | "hiringReports" | "report" | "coe" | "warningForm" | "employeeRequestManager" | "w8ben">("hiring");
+  const [activeTab, setActiveTab] = useState<"hiring" | "warnings" | "directory" | "jotform" | "jotformDocuments" | "customForms" | "onboarding" | "hiringReports" | "report" | "coe" | "warningForm" | "employeeRequestManager" | "w8ben">("hiring");
   const [openCategory, setOpenCategory] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -269,7 +278,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const navigate = useNavigate();
   const hrSearchParams = (useSearch({ strict: false }) as { tab?: string; submissionId?: string; profileId?: string }) ?? {};
   const initialHrSearchRef = useRef(hrSearchParams);
-  const VALID_HR_TABS = ["hiring", "warnings", "directory", "jotform", "jotformDocuments", "onboarding", "hiringReports", "report", "coe", "warningForm", "employeeRequestManager", "w8ben"] as const;
+  const VALID_HR_TABS = ["hiring", "warnings", "directory", "jotform", "jotformDocuments", "customForms", "onboarding", "hiringReports", "report", "coe", "warningForm", "employeeRequestManager", "w8ben"] as const;
   useEffect(() => {
     const tab = initialHrSearchRef.current.tab;
     if (tab && (VALID_HR_TABS as readonly string[]).includes(tab)) setActiveTab(tab as typeof activeTab);
@@ -324,6 +333,25 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     void loadJotformSubmissions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, canViewJotformTab]);
+
+  // Fetched here (not left to CustomFormsPanel's own internal state) purely
+  // so the "Custom Forms" tab can show a "N new" badge before the tab's
+  // ever been opened this session — same reasoning/pattern as
+  // jotformSubmissions above. CustomFormsPanel still does its own separate
+  // fetch when actually opened; a little duplicated work, same trade-off
+  // already accepted for the Jotform tab.
+  const [newCustomFormSubmissionsCount, setNewCustomFormSubmissionsCount] = useState(0);
+  useEffect(() => {
+    if (!ready) return;
+    (async () => {
+      try {
+        const subs = await getCustomFormSubmissions();
+        setNewCustomFormSubmissionsCount(subs.filter((s) => s.status === "new").length);
+      } catch (err) {
+        console.error("Failed to load custom form submissions count:", err);
+      }
+    })();
+  }, [ready]);
 
   useEffect(() => {
     if (!ready || !companyId || !canViewJotformTab) return;
@@ -1196,15 +1224,18 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   };
 
   const [coeForm, setCoeForm] = useState({
-    date: todayStr,
+    honorific: "Mr.",
     employeeName: "",
     employeeStartDate: "",
     jobTitle: "",
-    amount: "",
-    month: "",
+    reason: "",
     authorizedRep: "",
-    email: "",
-    phone: "",
+    authorizedRepEmail: "",
+    authorizedRepPhone: "800-779-3579",
+    officeUseName: "",
+    officeUseTitle: "",
+    officeUseSignature: "",
+    officeUseNumber: "800-779-3579",
   });
   const [coeGenerating, setCoeGenerating] = useState(false);
   const updateCoeField = (field: keyof typeof coeForm, value: string) =>
@@ -1244,14 +1275,6 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       .map((para) => `<p>${para.replace(/\n/g, "<br/>")}</p>`)
       .join("\n");
   };
-  /** Splits the raw template on the "===OFFICE USE===" marker into the main letter and the boxed stamp — done before escaping/substitution so the marker itself never needs escaping. */
-  const splitCoeTemplate = (template: string): { letter: string; officeUse: string } => {
-    const marker = /\n?[=]{3}\s*OFFICE USE\s*[=]{3}\n?/i;
-    const match = template.match(marker);
-    if (!match || match.index === undefined) return { letter: template, officeUse: "" };
-    return { letter: template.slice(0, match.index), officeUse: template.slice(match.index + match[0].length) };
-  };
-
   // Employee Name, Job Title, and Authorized Representative are all
   // typeable filters — the input's value doubles as both the filter query
   // and the field's final text (so a name/title not in either suggestion
@@ -1270,13 +1293,29 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     return q ? COE_JOB_TITLE_OPTIONS.filter((t) => t.toLowerCase().includes(q)) : COE_JOB_TITLE_OPTIONS;
   };
 
-  // Authorized Representative suggestions — Admin/HR/BizOps roles are the
-  // people who'd realistically sign a certificate like this.
-  const COE_AUTHORIZED_REP_ROLES = new Set(["ADMIN", "HR", "BIZOPS_MANAGER", "BIZOPS_SENIOR_MANAGER"]);
+  // "For Office Use Only — Name" and "Authorized Representative" suggestions
+  // — Admin/HR/BizOps roles are the people who'd realistically sign off on
+  // a certificate like this. These are two independent signers (e.g. the
+  // reference certificate has "Frederick Ian Cabilao" as the letter's
+  // Authorized Representative and a different person, "Raul Bayuyos", in
+  // the Office Use box), so each gets its own dropdown/state.
+  const COE_OFFICE_USE_ROLES = new Set(["ADMIN", "SUPERADMIN", "HR", "BIZOPS_MANAGER", "BIZOPS_SENIOR_MANAGER"]);
+  // Office Use box signer is any manager (Branch, CSR, Parts, BizOps, etc.
+  // — anything with "MANAGER" in the role code) as well as Admin/HR/BizOps,
+  // since a branch-level manager like the reference's "CSR Manager" isn't
+  // covered by COE_OFFICE_USE_ROLES's fixed BizOps-only list above.
+  const isCoeOfficeUseEligible = (role: string) => role.includes("MANAGER") || role === "ADMIN" || role === "SUPERADMIN" || role === "HR" || role.includes("BIZOPS");
+  const [coeOfficeUseNameDropdownOpen, setCoeOfficeUseNameDropdownOpen] = useState(false);
+  const filteredCoeOfficeUseNameOptions = (query: string) => {
+    const q = query.trim().toLowerCase();
+    const candidates = employees.filter((e) => isCoeOfficeUseEligible(normalizeRole(e.position))).sort((a, b) => a.name.localeCompare(b.name));
+    return q ? candidates.filter((e) => e.name.toLowerCase().includes(q)) : candidates;
+  };
+
   const [coeAuthorizedRepDropdownOpen, setCoeAuthorizedRepDropdownOpen] = useState(false);
   const filteredCoeAuthorizedRepOptions = (query: string) => {
     const q = query.trim().toLowerCase();
-    const candidates = employees.filter((e) => COE_AUTHORIZED_REP_ROLES.has(normalizeRole(e.position))).sort((a, b) => a.name.localeCompare(b.name));
+    const candidates = employees.filter((e) => COE_OFFICE_USE_ROLES.has(normalizeRole(e.position))).sort((a, b) => a.name.localeCompare(b.name));
     return q ? candidates.filter((e) => e.name.toLowerCase().includes(q)) : candidates;
   };
 
@@ -1290,12 +1329,20 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     .coe-container .header img.logo { width: 115px; height: 115px; object-fit: contain; }
     .coe-container .header img.ribbon { width: 260px; height: auto; }
     .coe-container h1 { text-align: center; font-size: 20px; letter-spacing: 0.3px; margin-bottom: 22px; }
-    .coe-container p { font-size: 13.5px; line-height: 1.7; margin-bottom: 14px; text-align: justify; }
-    .coe-container .sign-block { margin-top: 36px; }
-    .coe-container .sign-line { width: 260px; margin-bottom: 6px; font-weight: 600; }
-    .coe-container .office-use { margin-top: 44px; border-top: 1px solid #9ca3af; padding: 14px 8px 0; }
-    .coe-container .office-use .row { display: flex; gap: 90px; align-items: flex-end; margin-top: 8px; }
-    .coe-container .office-use u { text-decoration: underline; }
+    .coe-container p { font-size: 13.5px; line-height: 1.3; margin-bottom: 17px; text-align: justify; }
+    .coe-container .date-line { margin-bottom: 17px; }
+    .coe-container .sign-block { margin-top: 4px; }
+    .coe-container .sign-block p { text-align: left; margin-bottom: 2px; }
+    .coe-container .sign-line { margin-bottom: 6px; font-weight: 600; }
+    .coe-container .office-use { margin-top: 58px; }
+    .coe-container .office-use-rule { border: none; border-top: 1.5px solid #9ca3af; margin: 0 0 14px; }
+    .coe-container .office-use-rule.bottom { margin: 14px 0 0; }
+    .coe-container .office-use p { font-size: 13.5px; line-height: 1.3; margin-bottom: 8px; text-align: left; }
+    .coe-container .office-use-heading { font-weight: 700; margin-bottom: 10px; }
+    .coe-container .office-use .row { display: flex; gap: 90px; align-items: flex-start; margin-bottom: 8px; }
+    .coe-container .office-use .row p { margin-bottom: 8px; }
+    .coe-container .office-use-col:last-child p { margin-bottom: 0; }
+    .coe-container .office-use u { text-decoration: underline; font-style: italic; }
     .coe-container .footer-wrap { margin-top: 70px; }
     .coe-container .footer-graphic img { display: block; width: 100%; height: auto; }
   `;
@@ -1303,18 +1350,19 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const buildCoeBodyMarkup = (logoDataUrl: string, ribbonDataUrl: string, footerDataUrl: string) => {
     const f = coeForm;
     const blank = (v: string) => (v.trim() ? escapeHtml(v) : "&nbsp;");
+    // "Ms."/"Mrs." both read as female for pronoun purposes; anything else
+    // (including "Mr.") defaults to male since it's the only other option
+    // in the Honorific dropdown.
+    const isFemale = f.honorific === "Ms." || f.honorific === "Mrs.";
     const values = {
-      date: blank(f.date ? new Date(f.date).toLocaleDateString() : ""),
+      honorific: blank(f.honorific),
       employeeName: blank(f.employeeName),
-      startDate: blank(f.employeeStartDate ? new Date(f.employeeStartDate).toLocaleDateString() : ""),
+      startDate: blank(f.employeeStartDate ? formatDateOnlyLong(f.employeeStartDate) : ""),
       jobTitle: blank(f.jobTitle),
-      amount: blank(f.amount),
-      month: blank(f.month),
-      authorizedRep: blank(f.authorizedRep),
-      email: blank(f.email),
-      phone: blank(f.phone),
+      reason: blank(f.reason),
+      he: isFemale ? "she" : "he",
+      his: isFemale ? "her" : "his",
     };
-    const { letter, officeUse } = splitCoeTemplate(coeBodyTemplate);
     return `
       <div class="coe-container">
         <div class="header">
@@ -1324,10 +1372,35 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
 
         <h1>CERTIFICATE OF EMPLOYMENT<br/>US IN HOME SERVICES</h1>
 
-        ${renderCoeBodyHtml(letter, values)}
+        <p class="date-line">Date: ${escapeHtml(new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }))}</p>
+
+        <p>To Whom It May Concern,</p>
+
+        ${renderCoeBodyHtml(coeBodyTemplate, values)}
+
+        <div class="sign-block">
+          <p>Sincerely,</p>
+          <p class="sign-line">${blank(f.authorizedRep)}</p>
+          <p>Authorized Representative</p>
+          <p>US IN HOME SERVICES</p>
+          <p>Email: ${blank(f.authorizedRepEmail)}</p>
+          <p>Phone: ${blank(f.authorizedRepPhone)}</p>
+        </div>
 
         <div class="office-use">
-          ${renderCoeBodyHtml(officeUse, values)}
+          <hr class="office-use-rule" />
+          <p class="office-use-heading">For Office Use Only:</p>
+          <div class="row">
+            <div class="office-use-col">
+              <p>Name: ${blank(f.officeUseName)}</p>
+              <p>Title: ${blank(f.officeUseTitle)}</p>
+            </div>
+            <div class="office-use-col">
+              <p>Signature: <u>${blank(f.officeUseSignature)}</u></p>
+            </div>
+          </div>
+          <p>Contact Number: ${blank(f.officeUseNumber)}</p>
+          <hr class="office-use-rule bottom" />
         </div>
 
         <div class="footer-wrap">
@@ -1453,11 +1526,20 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipientName = employees.find((e) => e.id === coeRecipientId)?.name;
       void logActivity({ action: "coe_sent", targetType: "employee", targetLabel: employeeLabel, details: { to: recipientName ?? "" } });
       // Best-effort — the certificate has already been sent above by this
-      // point, so a failure here (e.g. migration 0059 not run yet) must
+      // point, so a failure here (e.g. migration 0064 not run yet) must
       // never surface as "failed to send" or block closing the dialog.
       addCoeDocument({ employeeName: employeeLabel, documentUrl: url, recipientId: coeRecipientId })
         .then(() => void loadCoeDocuments())
         .catch((err) => console.error("Failed to record COE sent-history row:", err));
+
+      // Opt-in broadcast — see Notifications Settings (migration 0090).
+      // COE has no separate "submission" step, so the send itself is the event.
+      getHrNotificationSettings()
+        .then(({ coe }) => {
+          if (!coe) return;
+          void notifyHrRoleUsers(myProfileId, displayName || "HR", [coeRecipientId], `📄 Certificate of Employment sent — ${employeeLabel} (to ${recipientName ?? "recipient"}).`);
+        })
+        .catch((err) => console.error("[coe] hr notify check failed:", err));
 
       setCoePreviewOpen(false);
       setCoeRecipientId("");
@@ -1545,6 +1627,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     previousWarnings: warnPreviousWarnings,
     recipientSlot,
     recipientName,
+    recipientNames: recipientName ? { [recipientSlot]: recipientName } : undefined,
   });
 
   const [warnLogoDataUrl, setWarnLogoDataUrl] = useState("");
@@ -1556,6 +1639,18 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const [warnRecipientSlot, setWarnRecipientSlot] = useState<SignatureSlot>("manager");
   const [warnSending, setWarnSending] = useState(false);
   const [warnSendError, setWarnSendError] = useState<string | null>(null);
+  // "teammate" = today's flow: pick a real AHS profile, requires them to log
+  // in to sign, auto-DMs them. "external" = a freely-typed name with no AHS
+  // account at all — generates a link (no DM, since there's no profile to
+  // DM) that opens src/components/ExternalSignDocumentPage.tsx.
+  const [warnSendMode, setWarnSendMode] = useState<"teammate" | "external">("teammate");
+  const [warnExternalName, setWarnExternalName] = useState("");
+  // Set right after a successful send — the modal switches to a "here's the
+  // link" confirmation instead of closing immediately, since the automatic
+  // DM alone isn't always enough (e.g. the recipient hasn't checked AHS
+  // messages yet, or HR wants to send it through email/Slack/text too).
+  const [warnSentLink, setWarnSentLink] = useState<{ link: string; recipientName: string } | null>(null);
+  const [warnSentLinkCopied, setWarnSentLinkCopied] = useState(false);
   const filteredWarnRecipients = useMemo(() => {
     const q = warnRecipientSearch.trim().toLowerCase();
     const sorted = [...employees].sort((a, b) => a.name.localeCompare(b.name));
@@ -1568,7 +1663,10 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       setWarnLogoDataUrl(await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
       setWarnRecipientId("");
       setWarnRecipientSearch("");
+      setWarnSendMode("teammate");
+      setWarnExternalName("");
       setWarnSendError(null);
+      setWarnSentLink(null);
       setWarnPreviewOpen(true);
     } finally {
       setWarnGenerating(false);
@@ -1579,6 +1677,23 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     const previewData = buildWarnFormData(warnRecipientSlot, "");
     const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Employee Warning Form</title><style>*{margin:0;padding:0;box-sizing:border-box;}body{background:#fff;}${warningFormStyles}@media print{@page{margin:0;}}</style></head><body>${buildWarningFormBodyMarkup(previewData, warnLogoDataUrl, {})}</body></html>`;
     openPrintWindow(html);
+  };
+
+  const [warnDocxGenerating, setWarnDocxGenerating] = useState(false);
+  const handleDownloadWarningFormWord = async () => {
+    setWarnDocxGenerating(true);
+    try {
+      const previewData = buildWarnFormData(warnRecipientSlot, "");
+      const blob = await buildWarningFormDocxBlob(previewData, warnLogoDataUrl);
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = `Employee Warning Form - ${previewData.employeeName || "Untitled"}.docx`;
+      a.click();
+      URL.revokeObjectURL(blobUrl);
+    } finally {
+      setWarnDocxGenerating(false);
+    }
   };
 
   // Shared between Confirm Warning (below) and — previously — the initial
@@ -1770,6 +1885,16 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleCopyW8benLink = async (doc: SignableDocument) => {
     try {
       await navigator.clipboard.writeText(`${getAppUrl()}/fill-w8ben/${doc.id}`);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  /** The signing link is already delivered automatically via an in-app DM when the form is sent (teammate mode) — this just lets HR grab that same link again to share through any other channel (email, Slack, text), same as the Copy Link action the tax forms already have. External-recipient documents have no DM at all, so this is their only way to get the link back if it was lost. */
+  const handleCopyWarningFormLink = async (doc: SignableDocument) => {
+    try {
+      const path = doc.recipientId ? "sign-document" : "sign-external";
+      await navigator.clipboard.writeText(`${getAppUrl()}/${path}/${doc.id}`);
     } catch (err) {
       console.error("Failed to copy link:", err);
     }
@@ -2205,7 +2330,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   };
 
   const handleSendWarningForm = async () => {
-    if (!warnForm.employeeId || !warnRecipientId || !uid) return;
+    if (!warnForm.employeeName.trim() || !warnRecipientId || !uid) return;
     setWarnSending(true);
     setWarnSendError(null);
     try {
@@ -2237,19 +2362,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
 
       void logActivity({ action: "warning_form_sent", targetType: "employee", targetId: warnForm.employeeId, targetLabel: warnForm.employeeName, details: { to: recipient.name, slot: warnRecipientSlot } });
 
-      setWarnPreviewOpen(false);
-      setWarnForm({
-        employeeId: "",
-        employeeName: "",
-        role: "",
-        branch: "",
-        warningDate: todayStr,
-        level: "",
-        reasons: { absence: false, tardiness: false, inappropriateBehavior: false, insubordination: false, policyViolation: false, equipmentDamage: false, other: false },
-        otherReasonText: "",
-        description: "",
-        correctiveActions: "",
-      });
+      setWarnSentLink({ link: signLink, recipientName: recipient.name });
       await loadSentWarningForms();
     } catch (err) {
       setWarnSendError(err instanceof Error ? err.message : "Failed to send warning form.");
@@ -2258,18 +2371,85 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     }
   };
 
+  /** No AHS profile to tie this to, so no DM — the link itself (shown in the same post-send confirmation view) is the only way the recipient finds out, which is why it always lands there instead of just closing. */
+  const handleGenerateExternalWarningLink = async () => {
+    if (!warnForm.employeeName.trim() || !warnExternalName.trim()) return;
+    setWarnSending(true);
+    setWarnSendError(null);
+    try {
+      const formData = buildWarnFormData(warnRecipientSlot, warnExternalName.trim());
+      const pdfBlob = await captureHtmlToPdfBlob(buildWarningFormBodyMarkup(formData, warnLogoDataUrl, {}), warningFormStyles);
+      const pdfUrl = await uploadWarningForm(companyId ?? "", warnForm.employeeName, pdfBlob);
+
+      const doc = await createSignableDocument({
+        documentType: "warning_form",
+        formData: formData as unknown as Record<string, any>,
+        recipientName: warnExternalName.trim(),
+        recipientSlot: warnRecipientSlot,
+        pdfUrl,
+      });
+
+      void logActivity({ action: "warning_form_sent", targetType: "employee", targetId: warnForm.employeeId, targetLabel: warnForm.employeeName, details: { to: warnExternalName.trim(), slot: warnRecipientSlot, external: true } });
+
+      setWarnSentLink({ link: `${getAppUrl()}/sign-external/${doc.id}`, recipientName: warnExternalName.trim() });
+      await loadSentWarningForms();
+    } catch (err) {
+      setWarnSendError(err instanceof Error ? err.message : "Failed to generate link.");
+    } finally {
+      setWarnSending(false);
+    }
+  };
+
+  const handleCopyWarnSentLink = async () => {
+    if (!warnSentLink) return;
+    try {
+      await navigator.clipboard.writeText(warnSentLink.link);
+      setWarnSentLinkCopied(true);
+      setTimeout(() => setWarnSentLinkCopied(false), 1500);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  const handleCloseWarnPreview = () => {
+    setWarnPreviewOpen(false);
+    setWarnSentLink(null);
+    setWarnForm({
+      employeeId: "",
+      employeeName: "",
+      role: "",
+      branch: "",
+      warningDate: todayStr,
+      level: "",
+      reasons: { absence: false, tardiness: false, inappropriateBehavior: false, insubordination: false, policyViolation: false, equipmentDamage: false, other: false },
+      otherReasonText: "",
+      description: "",
+      correctiveActions: "",
+    });
+  };
+
   // ── Sent Warning Forms tracking table actions ──
   const [warnActionBusyId, setWarnActionBusyId] = useState<string | null>(null);
   const [warnActionError, setWarnActionError] = useState<string | null>(null);
 
   const handleConfirmWarningForm = async (doc: SignableDocument) => {
-    if (!window.confirm("Confirm this warning? This finalizes it and adds it to the employee's official warning record.")) return;
+    const data = doc.formData as unknown as WarningFormData;
+    // A warning typed in manually (no matching AHS employee picked) has no
+    // real profile to attach a conduct note to — the document can still be
+    // finalized, it just won't count toward anyone's official warning
+    // history, so the confirmation makes that trade-off explicit.
+    const confirmMessage = data.employeeId
+      ? "Confirm this warning? This finalizes it and adds it to the employee's official warning record."
+      : `Confirm this warning? "${data.employeeName}" isn't a matched AHS employee, so this will finalize the document but won't count toward any employee's official warning record.`;
+    if (!window.confirm(confirmMessage)) return;
     setWarnActionBusyId(doc.id);
     setWarnActionError(null);
     try {
-      const data = doc.formData as unknown as WarningFormData;
-      const noteText = buildWarnNoteText(data);
-      const noteId = await addAgentNote({ agentProfileId: data.employeeId, type: "warning", note: noteText, fastTrackToApproved: true });
+      let noteId: string | null = null;
+      if (data.employeeId) {
+        const noteText = buildWarnNoteText(data);
+        noteId = await addAgentNote({ agentProfileId: data.employeeId, type: "warning", note: noteText, fastTrackToApproved: true });
+      }
       await confirmSignableDocument(doc.id, noteId);
       await Promise.all([loadSentWarningForms(), (async () => setAllNotes(await getAllAgentNotes()))()]);
       void logActivity({ action: "warning_form_confirmed", targetType: "employee", targetId: data.employeeId, targetLabel: data.employeeName });
@@ -2327,6 +2507,14 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const [reassignRecipientSearch, setReassignRecipientSearch] = useState("");
   const [reassignRecipientDropdownOpen, setReassignRecipientDropdownOpen] = useState(false);
   const [reassignSlot, setReassignSlot] = useState<SignatureSlot>("senior_manager");
+  const [reassignMode, setReassignMode] = useState<"teammate" | "external">("teammate");
+  const [reassignExternalName, setReassignExternalName] = useState("");
+  // Set right after a successful external reassign — shown inline in this
+  // same dialog (unlike the initial send's warnSentLink view, this dialog
+  // can be opened from the tracker table with the main preview modal
+  // closed, so there's no other modal already open to show it in).
+  const [reassignSentLink, setReassignSentLink] = useState<string | null>(null);
+  const [reassignSentLinkCopied, setReassignSentLinkCopied] = useState(false);
   const filteredReassignRecipients = useMemo(() => {
     const q = reassignRecipientSearch.trim().toLowerCase();
     const sorted = [...employees].sort((a, b) => a.name.localeCompare(b.name));
@@ -2334,18 +2522,37 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   }, [employees, reassignRecipientSearch]);
 
   const handleSendToNextRecipient = async () => {
-    if (!reassignDialog || !reassignRecipientId || !uid) return;
+    if (!reassignDialog || !uid) return;
+    const employeeName = (reassignDialog.formData as unknown as WarningFormData).employeeName || "the employee";
+
+    if (reassignMode === "external") {
+      if (!reassignExternalName.trim()) return;
+      setWarnActionBusyId(reassignDialog.id);
+      setWarnActionError(null);
+      try {
+        await reassignSignableDocument(reassignDialog.id, { recipientName: reassignExternalName.trim() }, reassignSlot);
+        void logActivity({ action: "warning_form_reassigned", targetType: "employee", targetLabel: employeeName, details: { to: reassignExternalName.trim(), slot: reassignSlot, external: true } });
+        setReassignSentLink(`${getAppUrl()}/sign-external/${reassignDialog.id}`);
+        await loadSentWarningForms();
+      } catch (err) {
+        setWarnActionError(err instanceof Error ? err.message : "Failed to reassign.");
+      } finally {
+        setWarnActionBusyId(null);
+      }
+      return;
+    }
+
+    if (!reassignRecipientId) return;
     setWarnActionBusyId(reassignDialog.id);
     setWarnActionError(null);
     try {
       const recipient = employees.find((e) => e.id === reassignRecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
-      await reassignSignableDocument(reassignDialog.id, reassignRecipientId, reassignSlot);
+      await reassignSignableDocument(reassignDialog.id, { recipientId: reassignRecipientId, recipientName: recipient.name }, reassignSlot);
 
       const myProfileId = await getMyProfileId(uid);
       if (!myProfileId) throw new Error("Could not resolve your profile.");
       const thread = await getOrCreateDmThread(myProfileId, reassignRecipientId);
-      const employeeName = (reassignDialog.formData as unknown as WarningFormData).employeeName || "the employee";
       const signLink = `${getAppUrl()}/sign-document/${reassignDialog.id}`;
       await sendMessage({
         dmThreadId: thread.id,
@@ -2365,6 +2572,26 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     } finally {
       setWarnActionBusyId(null);
     }
+  };
+
+  const handleCopyReassignSentLink = async () => {
+    if (!reassignSentLink) return;
+    try {
+      await navigator.clipboard.writeText(reassignSentLink);
+      setReassignSentLinkCopied(true);
+      setTimeout(() => setReassignSentLinkCopied(false), 1500);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  const handleCloseReassignDialog = () => {
+    setReassignDialog(null);
+    setReassignRecipientId("");
+    setReassignRecipientSearch("");
+    setReassignMode("teammate");
+    setReassignExternalName("");
+    setReassignSentLink(null);
   };
 
   /**
@@ -3024,11 +3251,60 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const [onboardingSearch, setOnboardingSearch] = useState("");
   // Clicking a name drills into that applicant's document repository (drag-and-drop from the Jotform inbox + manual upload) instead of the checklist grid.
   const [onboardingSelectedEmployee, setOnboardingSelectedEmployee] = useState<{ id: string; name: string; docList: string[] } | null>(null);
+
+  // Extra columns HR has added from the "+ Add Column" button, per group —
+  // merged with the hardcoded TECHNICIAN/PARTS_MANAGER/PH_ONBOARDING_DOCS
+  // lists below. A custom column behaves exactly like a hardcoded one: it's
+  // just another free-text category name, so the same YES/NO lookup and the
+  // same per-employee drop zone work for it with no other changes.
+  const [customOnboardingColumns, setCustomOnboardingColumns] = useState<OnboardingDocumentColumn[]>([]);
+  const [addColumnGroup, setAddColumnGroup] = useState<OnboardingGroupKey | null>(null);
+  const [newColumnLabel, setNewColumnLabel] = useState("");
+  const [addColumnSaving, setAddColumnSaving] = useState(false);
+  const [addColumnError, setAddColumnError] = useState<string | null>(null);
+
+  const defaultOnboardingDocsFor = (groupKey: OnboardingGroupKey) =>
+    groupKey === "PH" ? PH_ONBOARDING_DOCS
+    : groupKey === "TECHNICIAN" ? TECHNICIAN_ONBOARDING_DOCS
+    : PARTS_MANAGER_ONBOARDING_DOCS;
+  const onboardingDocsForGroup = (groupKey: OnboardingGroupKey) => [
+    ...defaultOnboardingDocsFor(groupKey),
+    ...customOnboardingColumns.filter((c) => c.groupKey === groupKey).map((c) => c.label),
+  ];
+
+  const handleAddOnboardingColumn = async () => {
+    if (!addColumnGroup || !newColumnLabel.trim()) return;
+    setAddColumnSaving(true);
+    setAddColumnError(null);
+    try {
+      await addOnboardingDocumentColumn(addColumnGroup, newColumnLabel);
+      setCustomOnboardingColumns(await getOnboardingDocumentColumns());
+      setAddColumnGroup(null);
+      setNewColumnLabel("");
+    } catch (err) {
+      setAddColumnError(err instanceof Error ? err.message : "Failed to add column.");
+    } finally {
+      setAddColumnSaving(false);
+    }
+  };
+  const handleRemoveOnboardingColumn = async (col: OnboardingDocumentColumn) => {
+    if (!window.confirm(`Remove the "${col.label}" column? This won't delete any files already filed under it.`)) return;
+    setCustomOnboardingColumns((prev) => prev.filter((c) => c.id !== col.id));
+    try {
+      await deleteOnboardingDocumentColumn(col.id);
+    } catch (err) {
+      console.error("Failed to remove onboarding column:", err);
+      setCustomOnboardingColumns(await getOnboardingDocumentColumns());
+    }
+  };
+
   // Same US-Technician/US-other/PH split as onboardingEmployees above, just evaluated for one specific employee — used to pick their document list regardless of whichever group tab happens to be selected at click-time.
   const getOnboardingDocListForEmployee = (employee: { country: string; position: string }) =>
-    employee.country === "PH" ? PH_ONBOARDING_DOCS
-    : normalizeRole(employee.position) === "TECHNICIAN" ? TECHNICIAN_ONBOARDING_DOCS
-    : PARTS_MANAGER_ONBOARDING_DOCS;
+    onboardingDocsForGroup(
+      employee.country === "PH" ? "PH"
+      : normalizeRole(employee.position) === "TECHNICIAN" ? "TECHNICIAN"
+      : "PARTS_MANAGER"
+    );
   const onboardingEmployees = useMemo(() => {
     const byGroup =
       onboardingGroup === "PH" ? employees.filter((e) => e.country === "PH")
@@ -3063,10 +3339,18 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     } as any);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, onboardingSelectedEmployee?.id]);
-  const onboardingDocColumns =
-    onboardingGroup === "TECHNICIAN" ? TECHNICIAN_ONBOARDING_DOCS
-    : onboardingGroup === "PARTS_MANAGER" ? PARTS_MANAGER_ONBOARDING_DOCS
-    : PH_ONBOARDING_DOCS;
+  const onboardingDocColumns = onboardingDocsForGroup(onboardingGroup);
+
+  // Custom columns are company-wide (not filtered by the currently visible
+  // employee list), so just load them once when the tab is first opened.
+  const customOnboardingColumnsLoadedRef = useRef(false);
+  useEffect(() => {
+    if (activeTab !== "onboarding" || customOnboardingColumnsLoadedRef.current) return;
+    customOnboardingColumnsLoadedRef.current = true;
+    getOnboardingDocumentColumns()
+      .then(setCustomOnboardingColumns)
+      .catch((err) => console.error("Failed to load custom onboarding columns:", err));
+  }, [activeTab]);
 
   // YES/NO on the checklist grid reflects whether a real document has
   // actually been filed (uploaded, linked, or dragged in from Jotform) for
@@ -3187,16 +3471,19 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   // floating sidebar, so the two stay in sync automatically. Categories and
   // the tabs within them are kept in alphabetical order. ──
   const tabGroups = [
-    {
+    // Automated Forms (COE, Warning Form, tax forms, Jotform docs) is
+    // AH Solutions-only for now — other companies don't use these forms.
+    ...(companyId === "COMP001" ? [{
       group: "Automated Forms",
       icon: Paperclip,
       tabs: [
         ...(canViewJotformTab ? [{ key: "jotformDocuments", label: "Applicant Documents", count: newJotformSubmissionsCount, icon: Forward }] as const : []),
+        { key: "customForms", label: "Custom Forms", count: newCustomFormSubmissionsCount, icon: FileText },
         { key: "coe", label: "Certificate of Employment", count: 0, icon: CheckCircle },
         { key: "warningForm", label: "Employee Warning Form", count: 0, icon: FileText },
         { key: "w8ben", label: "W-8 / W-9 / W-4 Forms", count: 0, icon: Landmark },
       ] as const,
-    },
+    }] : []),
     {
       group: "Generate Reports",
       icon: Download,
@@ -3296,21 +3583,26 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
         </Link>
       </div>
 
-      {/* ── KPI overview ── */}
+      {/* ── KPI overview — every tile is clickable, same as Attendance: it jumps straight to the tab/filter that explains the number instead of just displaying it. ── */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 mb-4">
         {[
-          { label: "Candidates", value: kpi.candidates, color: "text-blue-300", icon: <Users className="h-4 w-4" /> },
-          { label: "Scheduled for Interview", value: kpi.scheduled, color: "text-yellow-300", icon: <Clock className="h-4 w-4" /> },
-          { label: "Rejected", value: kpi.rejected, color: "text-red-300", icon: <XCircle className="h-4 w-4" /> },
-          { label: "Hired", value: kpi.hired, color: "text-green-300", icon: <UserCheck className="h-4 w-4" /> },
-          { label: "Terminated", value: kpi.terminated, color: "text-red-400", icon: <UserX className="h-4 w-4" /> },
-          { label: "Resigned", value: kpi.resigned, color: "text-slate-300", icon: <UserMinus className="h-4 w-4" /> },
+          { label: "Candidates", value: kpi.candidates, color: "text-blue-300", icon: <Users className="h-4 w-4" />, onClick: () => { setActiveTab("hiring"); setHiringStatusFilter(""); } },
+          { label: "Scheduled for Interview", value: kpi.scheduled, color: "text-yellow-300", icon: <Clock className="h-4 w-4" />, onClick: () => { setActiveTab("hiring"); setHiringStatusFilter("interviewing"); } },
+          { label: "Rejected", value: kpi.rejected, color: "text-red-300", icon: <XCircle className="h-4 w-4" />, onClick: () => { setActiveTab("hiring"); setHiringStatusFilter("rejected"); } },
+          { label: "Hired", value: kpi.hired, color: "text-green-300", icon: <UserCheck className="h-4 w-4" />, onClick: () => { setActiveTab("hiring"); setHiringStatusFilter("hired"); } },
+          { label: "Terminated", value: kpi.terminated, color: "text-red-400", icon: <UserX className="h-4 w-4" />, onClick: () => { setActiveTab("directory"); setEmployeeFilters((prev) => ({ ...prev, status: "terminated" })); } },
+          { label: "Resigned", value: kpi.resigned, color: "text-slate-300", icon: <UserMinus className="h-4 w-4" />, onClick: () => { setActiveTab("directory"); setEmployeeFilters((prev) => ({ ...prev, status: "resigned" })); } },
         ].map((k) => (
-          <div key={k.label} className="panel p-3 text-center">
+          <button
+            key={k.label}
+            type="button"
+            onClick={k.onClick}
+            className="panel p-3 text-center hover:bg-white/5 transition-colors cursor-pointer"
+          >
             <div className="flex justify-center mb-1 text-muted-foreground">{k.icon}</div>
             <p className={`text-xl font-bold ${k.color}`}>{k.value}</p>
             <p className="text-[10px] text-muted-foreground uppercase tracking-wide mt-0.5">{k.label}</p>
-          </div>
+          </button>
         ))}
         <button
           type="button"
@@ -3421,7 +3713,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       )}
 
       {/* ── Tab navigation — collapsed into 3 category dropdowns to save space ── */}
-      <div className="mb-4 border-b border-white/10 pb-3 relative">
+      {/* z-30 on the wrapper itself (not just the z-20 dropdown inside it) —
+          the tab content below (e.g. the W-8BEN panel) uses backdrop-filter,
+          which creates its own stacking context and, without this, paints
+          over the open dropdown regardless of the dropdown's own z-index. */}
+      <div className="mb-4 border-b border-white/10 pb-3 relative z-30">
         <div className="flex flex-wrap gap-2">
           {tabGroups.map((section) => {
             const activeInGroup = section.tabs.some((t) => t.key === activeTab);
@@ -4182,6 +4478,9 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       </div>
       )}
 
+      {/* ── Custom Forms — the in-house Form Maker, runs alongside Jotform ── */}
+      {activeTab === "customForms" && <CustomFormsPanel />}
+
       {/* ── Applicant Documents preview modal ── */}
       {jotformPreview && (
         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setJotformPreview(null)}>
@@ -4575,6 +4874,13 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                 className="glass-input text-xs py-1.5 pl-8 pr-3 rounded-md w-40 h-7.5"
               />
             </div>
+            <button
+              type="button"
+              onClick={() => { setAddColumnGroup(onboardingGroup); setNewColumnLabel(""); setAddColumnError(null); }}
+              className="btn text-xs px-3 py-1.5 h-7.5 flex items-center gap-1"
+            >
+              <Plus className="h-3.5 w-3.5" /> Add Column
+            </button>
           </div>
         </div>
 
@@ -4584,9 +4890,24 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
               <tr className="border-b border-white/10 bg-white/5">
                 <th className="px-1.5 py-2 text-left text-[10px] text-muted-foreground uppercase w-[9%]">Name</th>
                 <th className="px-1.5 py-2 text-left text-[10px] text-muted-foreground uppercase w-[7%]">{onboardingGroup === "PH" ? "Dept." : "Branch"}</th>
-                {onboardingDocColumns.map((doc) => (
-                  <th key={doc} className="px-1 py-2 text-center text-[9px] leading-tight text-muted-foreground uppercase break-words">{doc}</th>
-                ))}
+                {onboardingDocColumns.map((doc) => {
+                  const customCol = customOnboardingColumns.find((c) => c.groupKey === onboardingGroup && c.label === doc);
+                  return (
+                    <th key={doc} className="px-1 py-2 text-center text-[9px] leading-tight text-muted-foreground uppercase break-words">
+                      {doc}
+                      {customCol && (
+                        <button
+                          type="button"
+                          onClick={() => void handleRemoveOnboardingColumn(customCol)}
+                          title="Remove this column"
+                          className="ml-1 text-muted-foreground hover:text-red-300 normal-case"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </th>
+                  );
+                })}
               </tr>
             </thead>
             <tbody>
@@ -4632,6 +4953,43 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
           </table>
         </div>
       </div>
+      )}
+
+      {/* Add Column dialog — new document category for the group open when the button was clicked, works exactly like the built-in columns once saved (free-text category, matched the same way on the checklist grid and the per-employee Documents page). */}
+      {addColumnGroup && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setAddColumnGroup(null)}>
+          <div className="bg-slate-800 border border-white/10 rounded-lg p-6 max-w-sm w-full" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-bold mb-2">Add Column</h3>
+            <p className="text-sm text-muted-foreground mb-4">
+              New document column for{" "}
+              <span className="font-semibold text-white">
+                {addColumnGroup === "PH" ? "Philippines" : addColumnGroup === "TECHNICIAN" ? "Technician" : "Parts Manager"}
+              </span>
+              . It works exactly like the others — upload or link a file for it from each employee's Documents page.
+            </p>
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Document Name</label>
+            <input
+              type="text"
+              value={newColumnLabel}
+              onChange={(e) => setNewColumnLabel(e.target.value)}
+              placeholder="e.g. Background Check"
+              autoFocus
+              onKeyDown={(e) => { if (e.key === "Enter") void handleAddOnboardingColumn(); }}
+              className="glass-input text-sm py-1.5 px-3 rounded-md w-full mt-1 mb-3"
+            />
+            {addColumnError && <p className="text-xs text-red-300 mb-3">{addColumnError}</p>}
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => setAddColumnGroup(null)} className="btn text-sm px-4 py-2">Cancel</button>
+              <button
+                onClick={() => void handleAddOnboardingColumn()}
+                disabled={!newColumnLabel.trim() || addColumnSaving}
+                className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
+              >
+                {addColumnSaving ? "Adding…" : "Add"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ── Generate Report ── */}
@@ -4937,8 +5295,16 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
 
         <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="flex flex-col gap-1">
-            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Date</label>
-            <input type="date" value={coeForm.date} onChange={(e) => updateCoeField("date", e.target.value)} className="glass-input text-sm py-1.5 px-3 rounded-md" />
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Honorific</label>
+            <select
+              value={coeForm.honorific}
+              onChange={(e) => updateCoeField("honorific", e.target.value)}
+              className="glass-input text-sm py-1.5 px-3 rounded-md"
+            >
+              <option value="Mr.">Mr.</option>
+              <option value="Ms.">Ms.</option>
+              <option value="Mrs.">Mrs.</option>
+            </select>
           </div>
           <div className="flex flex-col gap-1 relative">
             <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Employee Name</label>
@@ -5006,19 +5372,16 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
               </div>
             )}
           </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Amount</label>
-            <div className="relative">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm pointer-events-none">$</span>
-              <input type="text" value={coeForm.amount} onChange={(e) => updateCoeField("amount", e.target.value)} placeholder="2,500.00" className="glass-input text-sm py-1.5 pl-6 pr-3 rounded-md w-full" />
-            </div>
+          <div className="flex flex-col gap-1 md:col-span-2">
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Reason</label>
+            <input type="text" value={coeForm.reason} onChange={(e) => updateCoeField("reason", e.target.value)} placeholder="e.g. visa application, loan application" className="glass-input text-sm py-1.5 px-3 rounded-md" />
           </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Month</label>
-            <input type="text" value={coeForm.month} onChange={(e) => updateCoeField("month", e.target.value)} placeholder="e.g. month" className="glass-input text-sm py-1.5 px-3 rounded-md" />
+
+          <div className="md:col-span-2 pt-2 mt-1 border-t border-white/10">
+            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Authorized Representative (Sincerely — Sign-off)</p>
           </div>
           <div className="flex flex-col gap-1 relative">
-            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Authorized Representative</label>
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Name</label>
             <input
               type="text"
               value={coeForm.authorizedRep}
@@ -5038,7 +5401,10 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                       key={e.id}
                       type="button"
                       onMouseDown={(ev) => ev.preventDefault()}
-                      onClick={() => { updateCoeField("authorizedRep", e.name); setCoeAuthorizedRepDropdownOpen(false); }}
+                      onClick={() => {
+                        setCoeForm((prev) => ({ ...prev, authorizedRep: e.name, authorizedRepEmail: e.email }));
+                        setCoeAuthorizedRepDropdownOpen(false);
+                      }}
                       className="w-full text-left px-3 py-2 text-sm hover:bg-white/10"
                     >
                       {e.name} <span className="text-muted-foreground text-xs">— {ROLE_LABELS[normalizeRole(e.position)] ?? e.position}</span>
@@ -5050,11 +5416,61 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Email</label>
-            <input type="email" value={coeForm.email} onChange={(e) => updateCoeField("email", e.target.value)} placeholder="e.g. admin@usinhomeservices.com" className="glass-input text-sm py-1.5 px-3 rounded-md" />
+            <input type="text" value={coeForm.authorizedRepEmail} onChange={(e) => updateCoeField("authorizedRepEmail", e.target.value)} placeholder="e.g. name@usinhomeservices.com" className="glass-input text-sm py-1.5 px-3 rounded-md" />
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Phone</label>
-            <input type="text" value={coeForm.phone} onChange={(e) => updateCoeField("phone", e.target.value)} placeholder="e.g. (555) 123-4567" className="glass-input text-sm py-1.5 px-3 rounded-md" />
+            <input type="text" value={coeForm.authorizedRepPhone} onChange={(e) => updateCoeField("authorizedRepPhone", e.target.value)} placeholder="e.g. 800-779-3579" className="glass-input text-sm py-1.5 px-3 rounded-md" />
+          </div>
+
+          <div className="md:col-span-2 pt-2 mt-1 border-t border-white/10">
+            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">For Office Use Only</p>
+          </div>
+          <div className="flex flex-col gap-1 relative">
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Name</label>
+            <input
+              type="text"
+              value={coeForm.officeUseName}
+              onChange={(e) => { updateCoeField("officeUseName", e.target.value); setCoeOfficeUseNameDropdownOpen(true); }}
+              onFocus={() => setCoeOfficeUseNameDropdownOpen(true)}
+              onBlur={() => setTimeout(() => setCoeOfficeUseNameDropdownOpen(false), 150)}
+              placeholder="Signer's name"
+              className="glass-input text-sm py-1.5 px-3 rounded-md"
+            />
+            {coeOfficeUseNameDropdownOpen && (
+              <div className="absolute z-10 top-full mt-1 w-full max-h-48 overflow-y-auto rounded-md border border-white/15 bg-slate-800 shadow-lg">
+                {filteredCoeOfficeUseNameOptions(coeForm.officeUseName).length === 0 ? (
+                  <p className="px-3 py-2 text-xs text-muted-foreground">No matching Admin/HR/BizOps accounts — your typed text will be used as-is.</p>
+                ) : (
+                  filteredCoeOfficeUseNameOptions(coeForm.officeUseName).map((e) => (
+                    <button
+                      key={e.id}
+                      type="button"
+                      onMouseDown={(ev) => ev.preventDefault()}
+                      onClick={() => {
+                        setCoeForm((prev) => ({ ...prev, officeUseName: e.name, officeUseTitle: ROLE_LABELS[normalizeRole(e.position)] ?? e.position }));
+                        setCoeOfficeUseNameDropdownOpen(false);
+                      }}
+                      className="w-full text-left px-3 py-2 text-sm hover:bg-white/10"
+                    >
+                      {e.name} <span className="text-muted-foreground text-xs">— {ROLE_LABELS[normalizeRole(e.position)] ?? e.position}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Title</label>
+            <input type="text" value={coeForm.officeUseTitle} onChange={(e) => updateCoeField("officeUseTitle", e.target.value)} placeholder="e.g. CSR Manager" className="glass-input text-sm py-1.5 px-3 rounded-md" />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Signature</label>
+            <input type="text" value={coeForm.officeUseSignature} onChange={(e) => updateCoeField("officeUseSignature", e.target.value)} placeholder="Typed name as signature" className="glass-input text-sm py-1.5 px-3 rounded-md" />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Contact Number</label>
+            <input type="text" value={coeForm.officeUseNumber} onChange={(e) => updateCoeField("officeUseNumber", e.target.value)} placeholder="e.g. 800-779-3579" className="glass-input text-sm py-1.5 px-3 rounded-md" />
           </div>
         </div>
 
@@ -5308,6 +5724,9 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                 )}
               </div>
             )}
+            {!warnForm.employeeId && warnForm.employeeName.trim() && (
+              <p className="text-[10px] text-yellow-400/80 mt-0.5">No matching AHS employee — you can still continue, but this won't count toward anyone's official warning record once confirmed.</p>
+            )}
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Branch Location</label>
@@ -5401,7 +5820,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
         <div className="px-4 py-4 border-t border-white/10 flex justify-end">
           <button
             onClick={handleOpenWarnPreview}
-            disabled={warnGenerating || !warnForm.employeeId}
+            disabled={warnGenerating || !warnForm.employeeName.trim()}
             className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-1.5 disabled:opacity-50"
           >
             <Download className="h-3.5 w-3.5" /> {warnGenerating ? "Loading…" : "Preview & Send"}
@@ -5446,7 +5865,9 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                         </button>
                       </td>
                       <td className="px-4 py-3 text-muted-foreground">{doc.createdByName ?? "—"}</td>
-                      <td className="px-4 py-3 text-muted-foreground">{recipient?.name ?? "—"} <span className="text-[10px] uppercase">({doc.recipientSlot.replace("_", " ")})</span></td>
+                      <td className="px-4 py-3 text-muted-foreground">
+                        {recipient?.name ?? doc.recipientName ?? "—"} <span className="text-[10px] uppercase">({doc.recipientSlot.replace("_", " ")}{!doc.recipientId ? " · external" : ""})</span>
+                      </td>
                       <td className="px-4 py-3">
                         <span className={`px-2 py-1 rounded text-xs font-semibold ${
                           doc.status === "confirmed" ? "bg-green-500/20 text-green-300"
@@ -5460,27 +5881,30 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                       <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{new Date(doc.createdAt).toLocaleDateString()}</td>
                       <td className="px-4 py-3">
                         <div className="flex flex-wrap items-center gap-1.5">
+                          {doc.status === "pending_signature" && (
+                            <button type="button" onClick={() => handleCopyWarningFormLink(doc)} className="btn text-[10px] px-2 py-1">
+                              Copy Link
+                            </button>
+                          )}
                           {(doc.status === "pending_signature" || doc.status === "signed") && (
                             <>
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => { setReassignDialog(doc); setReassignRecipientId(""); setReassignRecipientSearch(""); setReassignSlot(doc.recipientSlot); setReassignMode("teammate"); setReassignExternalName(""); setReassignSentLink(null); }}
+                                className="btn text-[10px] px-2 py-1 disabled:opacity-50"
+                              >
+                                {doc.status === "signed" ? "Send to Next Recipient" : "Send to Another Recipient"}
+                              </button>
                               {doc.status === "signed" && (
-                                <>
-                                  <button
-                                    type="button"
-                                    disabled={busy}
-                                    onClick={() => { setReassignDialog(doc); setReassignRecipientId(""); setReassignRecipientSearch(""); }}
-                                    className="btn text-[10px] px-2 py-1 disabled:opacity-50"
-                                  >
-                                    Send to Next Recipient
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={busy}
-                                    onClick={() => handleConfirmWarningForm(doc)}
-                                    className="btn text-[10px] px-2 py-1 bg-green-600 hover:bg-green-700 text-white disabled:opacity-50"
-                                  >
-                                    Confirm Warning
-                                  </button>
-                                </>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => handleConfirmWarningForm(doc)}
+                                  className="btn text-[10px] px-2 py-1 bg-green-600 hover:bg-green-700 text-white disabled:opacity-50"
+                                >
+                                  Confirm Warning
+                                </button>
                               )}
                               <button
                                 type="button"
@@ -6191,69 +6615,111 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
         </div>
       )}
 
-      {/* Send to Next Recipient — reassign a signed-back document to another signer */}
+      {/* Reassign the recipient — either redirecting a not-yet-signed document to the right person (e.g. it was sent to the wrong teammate), or forwarding an already-signed one to the next stage in the chain. */}
       {reassignDialog && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-slate-800 border border-white/10 rounded-lg p-6 max-w-sm w-full">
-            <h3 className="text-lg font-bold mb-2">Send to Next Recipient</h3>
-            <p className="text-sm text-muted-foreground mb-4">
-              Forward <span className="font-semibold text-white">{(reassignDialog.formData as unknown as WarningFormData).employeeName}</span>'s warning form to another signer.
-            </p>
-            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recipient</label>
-            <div className="relative mt-1 mb-3">
-              <input
-                type="text"
-                value={reassignRecipientSearch}
-                onChange={(e) => { setReassignRecipientSearch(e.target.value); setReassignRecipientId(""); setReassignRecipientDropdownOpen(true); }}
-                onFocus={() => setReassignRecipientDropdownOpen(true)}
-                onBlur={() => setTimeout(() => setReassignRecipientDropdownOpen(false), 150)}
-                placeholder="Search a teammate…"
-                className="glass-input text-sm py-1.5 px-3 rounded-md w-full"
-              />
-              {reassignRecipientDropdownOpen && (
-                <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto rounded-md border border-white/15 bg-slate-800 shadow-lg">
-                  {filteredReassignRecipients.length === 0 ? (
-                    <p className="px-3 py-2 text-xs text-muted-foreground">No matching teammates.</p>
-                  ) : (
-                    filteredReassignRecipients.map((e) => (
-                      <button
-                        key={e.id}
-                        type="button"
-                        onMouseDown={(ev) => ev.preventDefault()}
-                        onClick={() => {
-                          setReassignRecipientId(e.id);
-                          setReassignRecipientSearch(`${e.name} — ${ROLE_LABELS[normalizeRole(e.position)] ?? e.position}`);
-                          setReassignRecipientDropdownOpen(false);
-                        }}
-                        className={`w-full text-left px-3 py-2 text-sm hover:bg-white/10 ${reassignRecipientId === e.id ? "bg-blue-500/20 text-blue-300" : ""}`}
-                      >
-                        {e.name} <span className="text-muted-foreground text-xs">— {ROLE_LABELS[normalizeRole(e.position)] ?? e.position}</span>
-                      </button>
-                    ))
-                  )}
+            {reassignSentLink ? (
+              <>
+                <h3 className="text-lg font-bold mb-2">Link Generated</h3>
+                <div className="rounded-md border border-green-500/30 bg-green-500/10 px-3 py-2.5 mb-3">
+                  <p className="text-sm font-semibold text-green-300">Reassigned to {reassignExternalName}</p>
+                  <p className="text-xs text-muted-foreground mt-1">No AHS account needed — copy this link and send it any way you like.</p>
                 </div>
-              )}
-            </div>
-            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Signing as</label>
-            <select value={reassignSlot} onChange={(e) => setReassignSlot(e.target.value as SignatureSlot)} className="glass-input text-sm py-1.5 px-3 rounded-md w-full mt-1 mb-4">
-              <option value="manager">Manager</option>
-              <option value="senior_manager">Senior Manager</option>
-              <option value="hr_staff">HR Staff</option>
-              <option value="employee">Employee</option>
-            </select>
-            {warnActionError && (
-              <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2 mb-3">{warnActionError}</p>
+                <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Sign link</label>
+                <div className="flex gap-2 mt-1 mb-4">
+                  <input type="text" readOnly value={reassignSentLink} onFocus={(e) => e.target.select()} className="glass-input text-xs py-1.5 px-3 rounded-md flex-1" />
+                  <button onClick={handleCopyReassignSentLink} className="btn text-xs px-3 py-1.5 shrink-0">{reassignSentLinkCopied ? "Copied!" : "Copy"}</button>
+                </div>
+                <div className="flex justify-end">
+                  <button onClick={handleCloseReassignDialog} className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white">Done</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h3 className="text-lg font-bold mb-2">{reassignDialog.status === "signed" ? "Send to Next Recipient" : "Send to Another Recipient"}</h3>
+                <p className="text-sm text-muted-foreground mb-4">
+                  {reassignDialog.status === "signed" ? "Forward" : "Redirect"} <span className="font-semibold text-white">{(reassignDialog.formData as unknown as WarningFormData).employeeName}</span>'s warning form to another signer.
+                </p>
+
+                <div className="flex rounded-md overflow-hidden border border-white/15 h-7.5 w-fit mb-3">
+                  <button type="button" onClick={() => setReassignMode("teammate")} className={`px-3 text-xs font-medium transition-colors ${reassignMode === "teammate" ? "bg-blue-600 text-white" : "bg-transparent text-muted-foreground hover:text-foreground hover:bg-white/5"}`}>AHS Teammate</button>
+                  <button type="button" onClick={() => setReassignMode("external")} className={`px-3 text-xs font-medium transition-colors border-l border-white/15 ${reassignMode === "external" ? "bg-blue-600 text-white" : "bg-transparent text-muted-foreground hover:text-foreground hover:bg-white/5"}`}>External Link</button>
+                </div>
+
+                {reassignMode === "teammate" ? (
+                  <>
+                    <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recipient</label>
+                    <div className="relative mt-1 mb-3">
+                      <input
+                        type="text"
+                        value={reassignRecipientSearch}
+                        onChange={(e) => { setReassignRecipientSearch(e.target.value); setReassignRecipientId(""); setReassignRecipientDropdownOpen(true); }}
+                        onFocus={() => setReassignRecipientDropdownOpen(true)}
+                        onBlur={() => setTimeout(() => setReassignRecipientDropdownOpen(false), 150)}
+                        placeholder="Search a teammate…"
+                        className="glass-input text-sm py-1.5 px-3 rounded-md w-full"
+                      />
+                      {reassignRecipientDropdownOpen && (
+                        <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto rounded-md border border-white/15 bg-slate-800 shadow-lg">
+                          {filteredReassignRecipients.length === 0 ? (
+                            <p className="px-3 py-2 text-xs text-muted-foreground">No matching teammates.</p>
+                          ) : (
+                            filteredReassignRecipients.map((e) => (
+                              <button
+                                key={e.id}
+                                type="button"
+                                onMouseDown={(ev) => ev.preventDefault()}
+                                onClick={() => {
+                                  setReassignRecipientId(e.id);
+                                  setReassignRecipientSearch(`${e.name} — ${ROLE_LABELS[normalizeRole(e.position)] ?? e.position}`);
+                                  setReassignRecipientDropdownOpen(false);
+                                }}
+                                className={`w-full text-left px-3 py-2 text-sm hover:bg-white/10 ${reassignRecipientId === e.id ? "bg-blue-500/20 text-blue-300" : ""}`}
+                              >
+                                {e.name} <span className="text-muted-foreground text-xs">— {ROLE_LABELS[normalizeRole(e.position)] ?? e.position}</span>
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <div className="mb-3">
+                    <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recipient name</label>
+                    <input
+                      type="text"
+                      value={reassignExternalName}
+                      onChange={(e) => setReassignExternalName(e.target.value)}
+                      placeholder="Type their name…"
+                      className="glass-input text-sm py-1.5 px-3 rounded-md w-full mt-1"
+                    />
+                  </div>
+                )}
+
+                <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Signing as</label>
+                <select value={reassignSlot} onChange={(e) => setReassignSlot(e.target.value as SignatureSlot)} className="glass-input text-sm py-1.5 px-3 rounded-md w-full mt-1 mb-4">
+                  <option value="manager">Manager</option>
+                  <option value="senior_manager">Senior Manager</option>
+                  <option value="hr_staff">HR Staff</option>
+                  <option value="employee">Employee</option>
+                </select>
+                {warnActionError && (
+                  <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2 mb-3">{warnActionError}</p>
+                )}
+                <div className="flex gap-2 justify-end">
+                  <button onClick={handleCloseReassignDialog} className="btn text-sm px-4 py-2">Cancel</button>
+                  <button
+                    onClick={handleSendToNextRecipient}
+                    disabled={(reassignMode === "teammate" ? !reassignRecipientId : !reassignExternalName.trim()) || warnActionBusyId === reassignDialog.id}
+                    className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
+                  >
+                    {warnActionBusyId === reassignDialog.id ? (reassignMode === "teammate" ? "Sending…" : "Generating…") : (reassignMode === "teammate" ? "Send" : "Generate Link")}
+                  </button>
+                </div>
+              </>
             )}
-            <div className="flex gap-2 justify-end">
-              <button onClick={() => setReassignDialog(null)} className="btn text-sm px-4 py-2">Cancel</button>
-              <button
-                onClick={handleSendToNextRecipient}
-                disabled={!reassignRecipientId || warnActionBusyId === reassignDialog.id}
-                className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
-              >
-                {warnActionBusyId === reassignDialog.id ? "Sending…" : "Send"}
-              </button>
-            </div>
           </div>
         </div>
       )}
@@ -6295,7 +6761,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
           <div className="bg-slate-800 border border-white/10 rounded-lg w-full max-w-5xl max-h-[90vh] flex flex-col">
             <div className="flex items-center justify-between px-5 py-3 border-b border-white/10">
               <h3 className="text-base font-bold">Employee Warning Form — Preview</h3>
-              <button onClick={() => setWarnPreviewOpen(false)} className="text-muted-foreground hover:text-foreground">✕</button>
+              <button onClick={handleCloseWarnPreview} className="text-muted-foreground hover:text-foreground">✕</button>
             </div>
 
             <div className="flex-1 overflow-y-auto p-5 grid grid-cols-1 lg:grid-cols-3 gap-5">
@@ -6305,7 +6771,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                   <div
                     dangerouslySetInnerHTML={{
                       __html: buildWarningFormBodyMarkup(
-                        buildWarnFormData(warnRecipientSlot, employees.find((e) => e.id === warnRecipientId)?.name || ""),
+                        buildWarnFormData(warnRecipientSlot, warnSendMode === "external" ? warnExternalName : employees.find((e) => e.id === warnRecipientId)?.name || ""),
                         warnLogoDataUrl,
                         {}
                       ),
@@ -6314,48 +6780,83 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                 </div>
               </div>
 
+              {warnSentLink ? (
+                <div className="flex flex-col gap-3">
+                  <div className="rounded-md border border-green-500/30 bg-green-500/10 px-3 py-2.5">
+                    <p className="text-sm font-semibold text-green-300">Sent to {warnSentLink.recipientName}</p>
+                    <p className="text-xs text-muted-foreground mt-1">They've also been notified in AHS Messages. Copy the link below to send it any other way too — email, Slack, text — so they can open it and fill in their signature.</p>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Sign link</label>
+                    <div className="flex gap-2 mt-1">
+                      <input type="text" readOnly value={warnSentLink.link} onFocus={(e) => e.target.select()} className="glass-input text-xs py-1.5 px-3 rounded-md flex-1" />
+                      <button onClick={handleCopyWarnSentLink} className="btn text-xs px-3 py-1.5 shrink-0">{warnSentLinkCopied ? "Copied!" : "Copy"}</button>
+                    </div>
+                  </div>
+                  <button onClick={handleCloseWarnPreview} className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white mt-auto">Done</button>
+                </div>
+              ) : (
               <div className="flex flex-col gap-3">
-                <div>
-                  <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recipient</label>
-                  <div className="relative mt-1">
+                <div className="flex rounded-md overflow-hidden border border-white/15 h-7.5 w-fit">
+                  <button type="button" onClick={() => setWarnSendMode("teammate")} className={`px-3 text-xs font-medium transition-colors ${warnSendMode === "teammate" ? "bg-blue-600 text-white" : "bg-transparent text-muted-foreground hover:text-foreground hover:bg-white/5"}`}>AHS Teammate</button>
+                  <button type="button" onClick={() => setWarnSendMode("external")} className={`px-3 text-xs font-medium transition-colors border-l border-white/15 ${warnSendMode === "external" ? "bg-blue-600 text-white" : "bg-transparent text-muted-foreground hover:text-foreground hover:bg-white/5"}`}>External Link</button>
+                </div>
+
+                {warnSendMode === "teammate" ? (
+                  <div>
+                    <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recipient</label>
+                    <div className="relative mt-1">
+                      <input
+                        type="text"
+                        value={warnRecipientSearch}
+                        onChange={(e) => {
+                          setWarnRecipientSearch(e.target.value);
+                          setWarnRecipientId("");
+                          setWarnRecipientDropdownOpen(true);
+                        }}
+                        onFocus={() => setWarnRecipientDropdownOpen(true)}
+                        onBlur={() => setTimeout(() => setWarnRecipientDropdownOpen(false), 150)}
+                        placeholder="Search a teammate…"
+                        className="glass-input text-sm py-1.5 px-3 rounded-md w-full"
+                      />
+                      {warnRecipientDropdownOpen && (
+                        <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto rounded-md border border-white/15 bg-slate-800 shadow-lg">
+                          {filteredWarnRecipients.length === 0 ? (
+                            <p className="px-3 py-2 text-xs text-muted-foreground">No matching teammates.</p>
+                          ) : (
+                            filteredWarnRecipients.map((e) => (
+                              <button
+                                key={e.id}
+                                type="button"
+                                onMouseDown={(ev) => ev.preventDefault()}
+                                onClick={() => {
+                                  setWarnRecipientId(e.id);
+                                  setWarnRecipientSearch(`${e.name} — ${ROLE_LABELS[normalizeRole(e.position)] ?? e.position}`);
+                                  setWarnRecipientDropdownOpen(false);
+                                }}
+                                className={`w-full text-left px-3 py-2 text-sm hover:bg-white/10 ${warnRecipientId === e.id ? "bg-blue-500/20 text-blue-300" : ""}`}
+                              >
+                                {e.name} <span className="text-muted-foreground text-xs">— {ROLE_LABELS[normalizeRole(e.position)] ?? e.position}</span>
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recipient name</label>
                     <input
                       type="text"
-                      value={warnRecipientSearch}
-                      onChange={(e) => {
-                        setWarnRecipientSearch(e.target.value);
-                        setWarnRecipientId("");
-                        setWarnRecipientDropdownOpen(true);
-                      }}
-                      onFocus={() => setWarnRecipientDropdownOpen(true)}
-                      onBlur={() => setTimeout(() => setWarnRecipientDropdownOpen(false), 150)}
-                      placeholder="Search a teammate…"
-                      className="glass-input text-sm py-1.5 px-3 rounded-md w-full"
+                      value={warnExternalName}
+                      onChange={(e) => setWarnExternalName(e.target.value)}
+                      placeholder="Type their name…"
+                      className="glass-input text-sm py-1.5 px-3 rounded-md w-full mt-1"
                     />
-                    {warnRecipientDropdownOpen && (
-                      <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto rounded-md border border-white/15 bg-slate-800 shadow-lg">
-                        {filteredWarnRecipients.length === 0 ? (
-                          <p className="px-3 py-2 text-xs text-muted-foreground">No matching teammates.</p>
-                        ) : (
-                          filteredWarnRecipients.map((e) => (
-                            <button
-                              key={e.id}
-                              type="button"
-                              onMouseDown={(ev) => ev.preventDefault()}
-                              onClick={() => {
-                                setWarnRecipientId(e.id);
-                                setWarnRecipientSearch(`${e.name} — ${ROLE_LABELS[normalizeRole(e.position)] ?? e.position}`);
-                                setWarnRecipientDropdownOpen(false);
-                              }}
-                              className={`w-full text-left px-3 py-2 text-sm hover:bg-white/10 ${warnRecipientId === e.id ? "bg-blue-500/20 text-blue-300" : ""}`}
-                            >
-                              {e.name} <span className="text-muted-foreground text-xs">— {ROLE_LABELS[normalizeRole(e.position)] ?? e.position}</span>
-                            </button>
-                          ))
-                        )}
-                      </div>
-                    )}
+                    <p className="text-[10px] text-muted-foreground mt-1">No AHS account needed — you'll get a link to send them any way you like (email, Slack, text), and they can open it and sign without logging in.</p>
                   </div>
-                </div>
+                )}
 
                 <div>
                   <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Signing as</label>
@@ -6371,19 +6872,33 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                   {warnSendError && (
                     <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{warnSendError}</p>
                   )}
-                  <button
-                    onClick={handleSendWarningForm}
-                    disabled={!warnRecipientId || warnSending}
-                    className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center gap-1.5 disabled:opacity-50"
-                  >
-                    {warnSending ? "Sending…" : "Send for Signature"}
-                  </button>
+                  {warnSendMode === "teammate" ? (
+                    <button
+                      onClick={handleSendWarningForm}
+                      disabled={!warnRecipientId || warnSending}
+                      className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center gap-1.5 disabled:opacity-50"
+                    >
+                      {warnSending ? "Sending…" : "Send for Signature"}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleGenerateExternalWarningLink}
+                      disabled={!warnExternalName.trim() || warnSending}
+                      className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center gap-1.5 disabled:opacity-50"
+                    >
+                      {warnSending ? "Generating…" : "Generate Link"}
+                    </button>
+                  )}
                   <button onClick={handleDownloadWarningForm} className="btn text-sm px-4 py-2 flex items-center justify-center gap-1.5">
                     <Download className="h-3.5 w-3.5" /> Download PDF instead
                   </button>
-                  <button onClick={() => setWarnPreviewOpen(false)} className="btn text-sm px-4 py-2">Cancel</button>
+                  <button onClick={handleDownloadWarningFormWord} disabled={warnDocxGenerating} className="btn text-sm px-4 py-2 flex items-center justify-center gap-1.5 disabled:opacity-50">
+                    <Download className="h-3.5 w-3.5" /> {warnDocxGenerating ? "Generating…" : "Download as Word Document"}
+                  </button>
+                  <button onClick={handleCloseWarnPreview} className="btn text-sm px-4 py-2">Cancel</button>
                 </div>
               </div>
+              )}
             </div>
           </div>
         </div>

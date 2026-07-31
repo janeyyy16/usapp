@@ -42,7 +42,7 @@ try {
 // ── Config ───────────────────────────────────────────────────────────────
 const SUPABASE_URL        = process.env.VITE_SUPABASE_URL        || "https://vrgeuuiygskqtrotemir.supabase.co";
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY    || "YOUR_SUPABASE_SERVICE_ROLE_KEY_HERE";
-const GMAPS_API_KEY        = process.env.VITE_GOOGLE_MAPS_API_KEY || "AIzaSyBnTWvcdQZsXsohbrHLBiA3zsMGhVZYPbc";
+const GMAPS_API_KEY        = process.env.VITE_GOOGLE_MAPS_API_KEY || "YOUR_GOOGLE_MAPS_API_KEY_HERE";
 const REQUESTS_PER_SECOND  = 10;   // keep well under Google's 50 QPS limit
 // ─────────────────────────────────────────────────────────────────────────
 

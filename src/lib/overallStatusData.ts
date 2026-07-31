@@ -225,8 +225,8 @@ export async function loadOverallStatusData(opts?: { startDate?: string; endDate
       return [] as Awaited<ReturnType<typeof getCompanyUsers>>;
     }),
     // Full change history (every status/reassign/reschedule action, not just
-    // the "last changer" pointer stored on the ticket) — see csrActivity
-    // below for why this matters.
+    // the "last changer" pointer stored on the ticket) — see csrCounts below
+    // for why this matters.
     getTicketAuditLog().catch((err) => {
       console.error("Failed to load ticket audit log for CSR activity:", err);
       return [] as Awaited<ReturnType<typeof getTicketAuditLog>>;

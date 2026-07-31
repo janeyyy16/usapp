@@ -21,8 +21,6 @@ export interface Ticket {
   location: string;
   model: string;
   internalNote: string;
-  /** Structured reason recorded when a BizOps Manager sets status to CL-Cancelled — its own column, not embedded in internalNote. */
-  cancellationReason?: string;
   problemDescription?: string;
   diagnosed: string;
   technician: string;
@@ -57,10 +55,6 @@ export interface Ticket {
   calls: number;
   partOrder: string;
   created: string;
-  /** Full raw created_at timestamp (unlike `created`, which is truncated to
-   * YYYY-MM-DD for list/filter display) — used where the time of day matters,
-   * e.g. the ticket detail page's Posting Date. */
-  createdAt?: string;
   statusChangedAt?: string;
   statusChangedBy?: string;
   // Additional fields for ticket details
@@ -135,6 +129,11 @@ export interface Ticket {
   nsaDatetimeDepotReceived?: string;
   nsaScheduleAckByUserId?: string;
   nsaScheduleAckByUserName?: string;
+  // Structured cancellation reason (migration 0058) — captured when a
+  // BizOps Manager+ sets Repair Status to CL-Cancelled. Replaces the old
+  // approach of embedding "Cancellation Reason: X" as a line inside
+  // internalNote.
+  cancellationReason?: string;
   // Service tracking data - visits and parts integrated into ticket
   visits?: Array<{
     id: string;
@@ -236,55 +235,6 @@ export const REPAIR_STATUS_OPTIONS = [
   "TR-Need PO",
   "TR-Need Triage",
 ] as const;
-
-// Bucket a raw repair status into one of the high-level groups used across
-// the app's ticket-status filtering/reporting (Ticket List's "Open/Pending"
-// filter, Overall Status dashboard, Operations Daily Report, etc). This is
-// the single source of truth — it used to be copy-pasted separately in
-// TicketList.tsx and overallStatusData.ts, which had already drifted once
-// (a bare "Acknowledged" status with no csr-/op-/pt-/tr-/cl- prefix was
-// bucketed differently by each copy).
-export type StatusGroup = "open" | "completed" | "cancelled";
-
-export function statusGroupOf(status: string): StatusGroup | "other" {
-  const v = String(status || "").trim().toLowerCase();
-  if (!v) return "other";
-  // "Need Cancel" is still an OPEN/Pending work item — CSR is asking the
-  // warranty company to cancel; the ticket isn't actually cancelled yet.
-  // Treat it as Open BEFORE the cancelled bucket so it doesn't get caught
-  // by the broader "cancel" match.
-  if (v.includes("need cancel")) return "open";
-  // Cancelled (the actual terminal state).
-  if (v === "cl-cancelled" || v === "cancelled" || /\bcancell?ed\b/.test(v)) return "cancelled";
-  // Completed / Claimed bucket — CL-Completed, CL-Claimed, CL-Data-Closed all
-  // count as a finished job.
-  if (
-    v === "cl-completed" ||
-    v === "completed" ||
-    v === "cl-claimed" ||
-    v === "claimed" ||
-    v.includes("data closed") ||
-    v.includes("data-closed")
-  ) return "completed";
-  // Everything else that flows through CSR / OP / PT / TR / CL-* (Ready, Need PO,
-  // Need Cancel, Parts Back Ordered, etc.) is still in-progress = Pending/Open.
-  if (
-    v.startsWith("csr-") ||
-    v.startsWith("op-") ||
-    v.startsWith("pt-") ||
-    v.startsWith("tr-") ||
-    v.startsWith("cl-")
-  ) return "open";
-  return "other";
-}
-
-export function isPendingStatus(status: string): boolean {
-  return statusGroupOf(status) === "open";
-}
-
-export function isClosedStatus(status: string): boolean {
-  return statusGroupOf(status) === "completed" || statusGroupOf(status) === "cancelled";
-}
 
 /**
  * Raw ticket data without ticket sources
@@ -1147,4 +1097,53 @@ export function getTicketVisits(ticketNo: string): Ticket['visits'] {
 export function getTicketParts(ticketNo: string): Ticket['parts'] {
   const ticket = getTicketByNumber(ticketNo);
   return ticket?.parts || [];
+}
+
+// Bucket a raw repair status into one of the high-level groups used across
+// the app's ticket-status filtering/reporting (Ticket List's "Open/Pending"
+// filter, Overall Status dashboard, Operations Daily Report, etc). This is
+// the single source of truth — it used to be copy-pasted separately in
+// TicketList.tsx and overallStatusData.ts, which had already drifted once
+// (a bare "Acknowledged" status with no csr-/op-/pt-/tr-/cl- prefix was
+// bucketed differently by each copy).
+export type StatusGroup = "open" | "completed" | "cancelled";
+
+export function statusGroupOf(status: string): StatusGroup | "other" {
+  const v = String(status || "").trim().toLowerCase();
+  if (!v) return "other";
+  // "Need Cancel" is still an OPEN/Pending work item — CSR is asking the
+  // warranty company to cancel; the ticket isn't actually cancelled yet.
+  // Treat it as Open BEFORE the cancelled bucket so it doesn't get caught
+  // by the broader "cancel" match.
+  if (v.includes("need cancel")) return "open";
+  // Cancelled (the actual terminal state).
+  if (v === "cl-cancelled" || v === "cancelled" || /\bcancell?ed\b/.test(v)) return "cancelled";
+  // Completed / Claimed bucket — CL-Completed, CL-Claimed, CL-Data-Closed all
+  // count as a finished job.
+  if (
+    v === "cl-completed" ||
+    v === "completed" ||
+    v === "cl-claimed" ||
+    v === "claimed" ||
+    v.includes("data closed") ||
+    v.includes("data-closed")
+  ) return "completed";
+  // Everything else that flows through CSR / OP / PT / TR / CL-* (Ready, Need PO,
+  // Need Cancel, Parts Back Ordered, etc.) is still in-progress = Pending/Open.
+  if (
+    v.startsWith("csr-") ||
+    v.startsWith("op-") ||
+    v.startsWith("pt-") ||
+    v.startsWith("tr-") ||
+    v.startsWith("cl-")
+  ) return "open";
+  return "other";
+}
+
+export function isPendingStatus(status: string): boolean {
+  return statusGroupOf(status) === "open";
+}
+
+export function isClosedStatus(status: string): boolean {
+  return statusGroupOf(status) === "completed" || statusGroupOf(status) === "cancelled";
 }

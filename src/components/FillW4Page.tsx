@@ -25,6 +25,8 @@ import { fillW4Pdf, loadBlankW4Bytes } from "@/lib/w4PdfFill";
 import type { W4FilingStatus, W4FormData } from "@/lib/w4FormTemplate";
 import { getOrCreateDmThread, sendMessage } from "@/lib/supabase/messaging";
 import { logActivity } from "@/lib/supabase/hrActivityLog";
+import { getHrNotificationSettings } from "@/lib/supabase/companySettings";
+import { notifyHrRoleUsers } from "@/lib/supabase/hrRoleNotify";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
 interface Props {
@@ -338,6 +340,16 @@ export function FillW4Page({ docId }: Props) {
         });
       }
 
+      // Opt-in broadcast — see Notifications Settings (migration 0090).
+      getHrNotificationSettings()
+        .then(({ taxForms }) => {
+          if (!taxForms) return;
+          const excludeIds = doc.createdBy ? [doc.createdBy] : [];
+          const employeeName = `${finalData.firstNameMiddleInitial} ${finalData.lastName}`.trim();
+          void notifyHrRoleUsers(myProfileId, displayName || "Employee", excludeIds, `📄 W-4 form for ${employeeName} has been completed and submitted.`);
+        })
+        .catch((err) => console.error("[w4] hr notify check failed:", err));
+
       setDoc({ ...doc, status: "signed", pdfUrl, formData: finalData as unknown as Record<string, any>, signatures: { employee: entry }, signedAt });
       void logActivity({ action: "w4_form_signed", targetType: "employee", targetLabel: `${finalData.firstNameMiddleInitial} ${finalData.lastName}`.trim() });
       setSubmitted(true);
@@ -349,7 +361,9 @@ export function FillW4Page({ docId }: Props) {
   };
 
   const isRecipient = !!doc && !!myProfileId && doc.recipientId === myProfileId;
-  const isSuperadmin = role === "SUPERADMIN";
+  // Platform-level SUPERSUPERADMIN only — the per-company SUPERADMIN role
+  // should NOT see every employee's private documents, just its own like ADMIN.
+  const isSuperadmin = role === "SUPERSUPERADMIN";
 
   const overlayStyle = (r: { x: number; y: number; w: number; h: number }): React.CSSProperties => ({
     position: "absolute",

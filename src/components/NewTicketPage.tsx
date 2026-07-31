@@ -4,6 +4,9 @@ import { ChevronLeft } from "lucide-react";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 import { type Ticket } from "@/lib/ticketData";
 import { createTicket as createSupabaseTicket } from "@/lib/supabase/tickets";
+import { getCompanyDefaultTechnician } from "@/lib/supabase/companySettings";
+import { getLocations } from "@/lib/supabase/locationManagement";
+import { normalizeLocationForRegionMatch } from "@/lib/locations";
 import { lookupZip } from "@/lib/zipCoverage";
 import {
   cityStateMatchesZip,
@@ -93,7 +96,43 @@ export function NewTicketPage({ mod, sub }: Props) {
   const [zipLookupError, setZipLookupError] = useState<string | null>(null);
   const navigate = useNavigate();
   const createdTicketStatus = "Acknowledged";
-  
+  // Company-wide default technician (see migration 0067) — new tickets are
+  // created with this technician instead of starting unassigned. Empty
+  // string if the company hasn't set one, which keeps today's behavior.
+  const [defaultTechnician, setDefaultTechnician] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    getCompanyDefaultTechnician().then((t) => { if (!cancelled) setDefaultTechnician(t); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Per-branch default technician: Location Management's "Rep Tech" field
+  // (already set for every real branch, e.g. Nashville -> Leo Sun) takes
+  // priority over the company-wide default above when the ticket's
+  // resolved branch has one set. A branch can also be flagged
+  // forceUnassigned (see migration 0068) to stay blank regardless of the
+  // company default. Keyed normalized+lowercased the same way
+  // getOfficeCoordinates() matches branch names, since branch names are
+  // inconsistently spaced/cased across the codebase ("Jackson,MS" vs
+  // "Jackson, MS").
+  const [locationOverrides, setLocationOverrides] = useState<Map<string, { repTech: string; forceUnassigned: boolean }>>(new Map());
+  useEffect(() => {
+    let cancelled = false;
+    getLocations().then((rows) => {
+      if (cancelled) return;
+      const map = new Map<string, { repTech: string; forceUnassigned: boolean }>();
+      for (const row of rows) {
+        if (!row.repTech && !row.forceUnassigned) continue;
+        map.set(normalizeLocationForRegionMatch(row.location).toLowerCase(), {
+          repTech: row.repTech || "",
+          forceUnassigned: row.forceUnassigned === true,
+        });
+      }
+      setLocationOverrides(map);
+    }).catch((err) => console.error("Failed to load location rep techs:", err));
+    return () => { cancelled = true; };
+  }, []);
+
   // Get query parameters using router's useSearch
   let copyToken: string | null = null;
   try {
@@ -275,7 +314,11 @@ export function NewTicketPage({ mod, sub }: Props) {
             return `${m}/${d}/${y.slice(2)}`;
           })()
         : "",
-      technician: "",
+      technician: (() => {
+        const override = locationOverrides.get(normalizeLocationForRegionMatch(location).toLowerCase());
+        if (override?.forceUnassigned) return "";
+        return override?.repTech || defaultTechnician;
+      })(),
       customerPref: form.cxPreferredDate ? "Yes" : "No",
       redo: form.isRedo ? "Yes" : "No",
       aging: 0,

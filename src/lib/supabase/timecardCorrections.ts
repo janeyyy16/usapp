@@ -1,9 +1,9 @@
 /**
  * Supabase timecard corrections service — Attendance Monitoring "Corrections" tab.
- * See migration 0034: timecard_corrections + an append-only
+ * See migration 0028: timecard_corrections + an append-only
  * timecard_correction_history audit trail populated by a DB trigger.
  *
- * Approval is staged (0056_timecard_correction_two_stage_approval.sql),
+ * Approval is staged (0098_timecard_correction_two_stage_approval.sql),
  * mirroring pto_requests' manager+HR pattern but with a different shape:
  * the employee's direct manager reviews first, then EITHER HR or Accounting
  * (the FINANCE role app-wide) gives the final approval — an OR gate, not an
@@ -135,8 +135,10 @@ export async function getCompanyTimecardCorrectionHistory(): Promise<TimecardCor
  * submission time). HR and Accounting (the FINANCE role app-wide — see
  * dashboardAccess.ts's "accounting-dashboard": ["ADMIN","FINANCE"]) can only
  * act once the manager has approved, and either one alone is sufficient —
- * this is an OR gate, unlike PTO's manager+HR AND gate. SUPERADMIN bypasses
- * every stage, same as PTO.
+ * this is an OR gate, unlike PTO's manager+HR AND gate. Both SUPERADMIN (a
+ * company's own top-tier admin) and SUPERSUPERADMIN (the platform-level
+ * role) bypass every stage, same as PTO — a single approval from either is
+ * final.
  */
 export function canReviewCorrectionStage(
   request: Pick<TimecardCorrectionRow, "managerId" | "managerStatus">,
@@ -145,7 +147,7 @@ export function canReviewCorrectionStage(
   viewerRole: string | null | undefined
 ): boolean {
   const role = (viewerRole || "").toUpperCase();
-  if (role === "SUPERADMIN") return true;
+  if (role === "SUPERADMIN" || role === "SUPERSUPERADMIN") return true;
   if (stage === "manager") {
     if (request.managerId) return request.managerId === viewerProfileId;
     return role === "MANAGER";

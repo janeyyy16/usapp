@@ -14,17 +14,20 @@ import {
   serverTimestamp,
 } from "firebase/firestore";
 import { db, isFirebaseReady } from "./config";
-import { createUserWithEmailAndPassword, updatePassword } from "firebase/auth";
-import { auth } from "./config";
+import { createUserWithEmailAndPassword, getAuth, updatePassword } from "firebase/auth";
+import { initializeApp, getApps, deleteApp } from "firebase/app";
+import { auth, app } from "./config";
 import { ROLE_LABELS } from "@/lib/roleLabels";
 
 /**
  * User roles in the system
  */
 export type UserRole =
-  | "SUPERADMIN"    // Access to all companies, can create/manage admins
+  | "SUPERSUPERADMIN" // Platform-level: access to all companies, creates/manages companies+admins
+  | "SUPERADMIN"    // Per-company: same as ADMIN, plus can edit its own company's record
   | "ADMIN"         // Company admin, full access to company data
   | "MANAGER"       // Can manage tickets, employees, reports
+  | "SENIOR_MANAGER" // Senior tier of MANAGER (generic, not branch/BizOps-specific)
   | "CSR"           // Customer Service Rep, ticket management
   | "TECHNICIAN"    // Field technician
   | "TECHNICIAN_MANAGER" // Field technician manager (supervises techs)
@@ -35,7 +38,7 @@ export type UserRole =
   | "FINANCE"       // Financial reports and billing
   | "CSR_AGENT" | "CSR_TEAM_LEADER" | "CSR_MANAGER"
   | "BRANCH_MANAGER" | "SENIOR_BRANCH_MANAGER" | "CLAIMS_MANAGER"
-  | "PARTS_MANAGER" | "BIZOPS_MANAGER" | "BIZOPS_SENIOR_MANAGER" | "CLAIMS";
+  | "PARTS_MANAGER" | "PARTS_TEAM_LEADER" | "BIZOPS_MANAGER" | "BIZOPS_SENIOR_MANAGER" | "CLAIMS";
 
 /**
  * User account structure in Firestore
@@ -67,6 +70,25 @@ export interface UserAccount {
   lastLogin?: Timestamp | Date;
   supabaseUserId?: string; // For future Supabase integration
   permissions?: string[]; // Additional granular permissions
+}
+
+/**
+ * Normalize a raw Firestore user document into the UserAccount shape.
+ * Two on-disk shapes exist:
+ *  - legacy flat users/{uid}: already uid/displayName.
+ *  - role-grouped users/{role}/{status}/{name} + its users_index/{uid}
+ *    mirror (see createUserAccount below): documentId/name instead.
+ * Casting raw data straight to UserAccount without this leaves uid and
+ * displayName undefined for every user created via the newer path — which
+ * breaks React list keys (`key={admin.uid}` collides as `undefined` across
+ * every such user, so only one survives rendering) and shows a blank name.
+ */
+function normalizeUserAccount(docId: string, data: any): UserAccount {
+  return {
+    ...data,
+    uid: data.uid || data.documentId || docId,
+    displayName: data.displayName || data.name || data.email || "",
+  } as UserAccount;
 }
 
 /**
@@ -119,10 +141,16 @@ export interface Company {
 }
 
 /**
- * Create a new company
+ * Create a new company. Pass `companyId` to request a specific ID (e.g. the
+ * SuperAdmin "Add Company" form); omit it to get an auto-generated
+ * `COMP<timestamp>` ID (existing callers that never specified one keep
+ * working exactly as before). A requested ID is checked against Firestore
+ * directly — not just a caller's possibly-stale in-memory company list —
+ * since setDoc() would otherwise silently overwrite an existing company
+ * sharing that ID instead of erroring.
  */
 export async function createCompany(
-  companyData: Omit<Company, "companyId" | "createdAt" | "createdBy">,
+  companyData: Omit<Company, "companyId" | "createdAt" | "createdBy"> & { companyId?: string },
   creatorUid: string
 ): Promise<string> {
   if (!isFirebaseReady() || !db) {
@@ -130,12 +158,19 @@ export async function createCompany(
   }
 
   try {
-    // Generate company ID
-    const companyId = `COMP${Date.now()}`;
+    const { companyId: requestedId, ...rest } = companyData;
+    const companyId = requestedId || `COMP${Date.now()}`;
     const companyRef = doc(db, "companies", companyId);
 
+    if (requestedId) {
+      const existing = await getDoc(companyRef);
+      if (existing.exists()) {
+        throw new Error(`Company ID '${companyId}' already exists.`);
+      }
+    }
+
     await setDoc(companyRef, {
-      ...companyData,
+      ...rest,
       companyId,
       createdAt: serverTimestamp(),
       createdBy: creatorUid,
@@ -252,13 +287,32 @@ export async function createUserAccount(
     // 1. Generate username from display name
     const username = generateUsername(userData.displayName);
 
-    // 2. Create Firebase Auth user
-    const userCredential = await createUserWithEmailAndPassword(
-      auth,
-      userData.email,
-      userData.password
-    );
-    const uid = userCredential.user.uid;
+    // 2. Create Firebase Auth user on a SECONDARY app, matching the pattern
+    //    already established in supabase/users.ts's createCompanyUser().
+    //    createUserWithEmailAndPassword ALWAYS switches its Auth instance's
+    //    current user to the newly created one — calling it on the primary
+    //    `auth` (as this used to) would sign the calling SuperAdmin out of
+    //    their own session and sign them in as the admin they just created.
+    if (!app) throw new Error("Firebase not initialized");
+    const secondaryName = "user-provisioner";
+    const existingSecondary = getApps().find((a) => a.name === secondaryName);
+    const secondaryApp = existingSecondary ?? initializeApp(app.options, secondaryName);
+    const secondaryAuth = getAuth(secondaryApp);
+
+    let uid: string;
+    try {
+      const userCredential = await createUserWithEmailAndPassword(
+        secondaryAuth,
+        userData.email,
+        userData.password
+      );
+      uid = userCredential.user.uid;
+      await secondaryAuth.signOut();
+    } finally {
+      if (!existingSecondary) {
+        try { await deleteApp(secondaryApp); } catch { /* ignore */ }
+      }
+    }
 
     // 3. Build the full profile record (every form field is persisted here).
     //    Field order matters for the Firestore console: documentId goes LAST.
@@ -337,12 +391,12 @@ export async function getUserAccount(uid: string): Promise<UserAccount | null> {
     const indexRef = doc(db, "users_index", uid);
     const indexSnap = await getDoc(indexRef);
     if (indexSnap.exists()) {
-      return indexSnap.data() as UserAccount;
+      return normalizeUserAccount(indexSnap.id, indexSnap.data());
     }
     // Back-compat: fall back to the legacy flat users/{uid} path.
     const legacyRef = doc(db, "users", uid);
     const legacySnap = await getDoc(legacyRef);
-    return legacySnap.exists() ? (legacySnap.data() as UserAccount) : null;
+    return legacySnap.exists() ? normalizeUserAccount(legacySnap.id, legacySnap.data()) : null;
   } catch (error) {
     console.error("Error fetching user:", error);
     return null;
@@ -405,7 +459,7 @@ export async function getUserByUsername(
       return null;
     }
 
-    const user = snapshot.docs[0].data() as UserAccount;
+    const user = normalizeUserAccount(snapshot.docs[0].id, snapshot.docs[0].data());
 
     if (!user.isActive) {
       console.warn(`User ${username} is inactive`);
@@ -444,17 +498,15 @@ export async function getCompanyUsers(companyId: string): Promise<UserAccount[]>
     // index entry when a user exists in both — i.e. already migrated).
     const byId = new Map<string, UserAccount>();
     legacySnap.docs.forEach((d) => {
-      const u = d.data() as UserAccount;
-      byId.set((u as any).documentId || u.uid || d.id, u);
+      const u = normalizeUserAccount(d.id, d.data());
+      byId.set(u.uid, u);
     });
     idxSnap.docs.forEach((d) => {
-      const u = d.data() as UserAccount;
-      byId.set((u as any).documentId || u.uid || d.id, u);
+      const u = normalizeUserAccount(d.id, d.data());
+      byId.set(u.uid, u);
     });
 
-    return Array.from(byId.values()).sort((a, b) =>
-      (a.displayName || (a as any).name || "").localeCompare(b.displayName || (b as any).name || "")
-    );
+    return Array.from(byId.values()).sort((a, b) => a.displayName.localeCompare(b.displayName));
   } catch (error) {
     console.error("Error fetching company users:", error);
     return [];
@@ -478,14 +530,15 @@ export async function getAllUsers(): Promise<UserAccount[]> {
 
     const byId = new Map<string, UserAccount>();
     legacySnap.docs.forEach((d) => {
-      const u = d.data() as UserAccount;
+      const raw = d.data();
       // Skip the role-label subcollection parent docs (they have no uid/email).
-      if (!(u as any).email && !u.uid && !(u as any).documentId) return;
-      byId.set((u as any).documentId || u.uid || d.id, u);
+      if (!raw.email && !raw.uid && !raw.documentId) return;
+      const u = normalizeUserAccount(d.id, raw);
+      byId.set(u.uid, u);
     });
     idxSnap.docs.forEach((d) => {
-      const u = d.data() as UserAccount;
-      byId.set((u as any).documentId || u.uid || d.id, u);
+      const u = normalizeUserAccount(d.id, d.data());
+      byId.set(u.uid, u);
     });
 
     return Array.from(byId.values()).sort((a, b) => {
@@ -502,7 +555,18 @@ export async function getAllUsers(): Promise<UserAccount[]> {
 /**
  * Update user account
  */
-export async function updateUserAccount(
+/**
+ * Shared write path for updateUserAccount/deactivateUserAccount/
+ * activateUserAccount. Any admin created via createUserAccount lives ONLY
+ * at users_index/{uid} + the role-grouped users/{roleLabel}/{status}/{name}
+ * doc it mirrors — never at a flat users/{uid} doc — so writing straight to
+ * users/{uid} (the previous implementation) threw on a nonexistent document
+ * for every such user. This resolves the real doc(s) the same way
+ * getUserAccount reads them, updates the index in place, and moves the
+ * role-grouped doc when role or active-status changes (both are literal
+ * path segments there, so a plain updateDoc can't just rename them in place).
+ */
+async function writeUserAccountUpdate(
   uid: string,
   updates: Partial<Omit<UserAccount, "uid" | "email" | "createdAt" | "createdBy">>
 ): Promise<void> {
@@ -510,13 +574,51 @@ export async function updateUserAccount(
     throw new Error("Firestore not configured");
   }
 
-  try {
-    const userRef = doc(db, "users", uid);
-    await updateDoc(userRef, {
-      ...updates,
-      updatedAt: serverTimestamp(),
-    });
+  const indexRef = doc(db, "users_index", uid);
+  const indexSnap = await getDoc(indexRef);
 
+  if (!indexSnap.exists()) {
+    // Back-compat: a genuinely legacy user still living at the old flat path.
+    const legacyRef = doc(db, "users", uid);
+    await updateDoc(legacyRef, { ...updates, updatedAt: serverTimestamp() });
+    return;
+  }
+
+  const current = indexSnap.data() as Record<string, any>;
+  const merged: Record<string, any> = { ...current, ...updates, updatedAt: serverTimestamp() };
+  const oldPath: string | undefined = current.path;
+
+  const newRoleLabel = ROLE_LABELS[merged.role] ?? merged.role;
+  const newStatus = merged.isActive ? "Active" : "Inactive";
+  const docName = (merged.displayName || merged.username || merged.email || uid)
+    .trim()
+    .replace(/[\/\\#?]/g, " ")
+    .replace(/\s+/g, " ");
+  const newPath = `users/${newRoleLabel}/${newStatus}/${docName}`;
+
+  await setDoc(indexRef, { ...merged, path: newPath }, { merge: true });
+
+  if (oldPath && oldPath !== newPath) {
+    // Role or active-status changed (or the display name did) — those are
+    // literal path segments in the grouped doc, so move it: write the new
+    // one, then remove the stale one so it doesn't linger in the console.
+    await setDoc(doc(db, newPath), { ...merged, documentId: uid });
+    try {
+      await deleteDoc(doc(db, oldPath));
+    } catch (err) {
+      console.warn(`Could not remove stale grouped doc at ${oldPath}:`, err);
+    }
+  } else if (oldPath) {
+    await setDoc(doc(db, oldPath), { ...merged, documentId: uid }, { merge: true });
+  }
+}
+
+export async function updateUserAccount(
+  uid: string,
+  updates: Partial<Omit<UserAccount, "uid" | "email" | "createdAt" | "createdBy">>
+): Promise<void> {
+  try {
+    await writeUserAccountUpdate(uid, updates);
     console.log(`✅ User updated: ${uid}`);
   } catch (error) {
     console.error("Error updating user:", error);
@@ -528,17 +630,8 @@ export async function updateUserAccount(
  * Deactivate user account (soft delete)
  */
 export async function deactivateUserAccount(uid: string): Promise<void> {
-  if (!isFirebaseReady() || !db) {
-    throw new Error("Firestore not configured");
-  }
-
   try {
-    const userRef = doc(db, "users", uid);
-    await updateDoc(userRef, {
-      isActive: false,
-      updatedAt: serverTimestamp(),
-    });
-
+    await writeUserAccountUpdate(uid, { isActive: false });
     console.log(`✅ User deactivated: ${uid}`);
   } catch (error) {
     console.error("Error deactivating user:", error);
@@ -550,17 +643,8 @@ export async function deactivateUserAccount(uid: string): Promise<void> {
  * Activate user account
  */
 export async function activateUserAccount(uid: string): Promise<void> {
-  if (!isFirebaseReady() || !db) {
-    throw new Error("Firestore not configured");
-  }
-
   try {
-    const userRef = doc(db, "users", uid);
-    await updateDoc(userRef, {
-      isActive: true,
-      updatedAt: serverTimestamp(),
-    });
-
+    await writeUserAccountUpdate(uid, { isActive: true });
     console.log(`✅ User activated: ${uid}`);
   } catch (error) {
     console.error("Error activating user:", error);
@@ -608,7 +692,7 @@ export async function getUsersByRole(
     );
     const snapshot = await getDocs(q);
 
-    return snapshot.docs.map((doc) => doc.data() as UserAccount);
+    return snapshot.docs.map((doc) => normalizeUserAccount(doc.id, doc.data()));
   } catch (error) {
     console.error("Error fetching users by role:", error);
     return [];
@@ -628,8 +712,10 @@ export async function hasPermission(
     return false;
   }
 
-  // SUPERADMIN has all permissions
-  if (user.role === "SUPERADMIN") {
+  // Only the platform-level SUPERSUPERADMIN bypasses every permission check —
+  // the per-company SUPERADMIN role has no company parameter here to scope
+  // it to, so it falls through to the normal role match below instead.
+  if (user.role === "SUPERSUPERADMIN") {
     return true;
   }
 

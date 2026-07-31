@@ -5,7 +5,7 @@ import { Footer } from "@/components/Footer";
 import { ALL_TECHNICIANS } from "@/lib/locations";
 import { savePartOrder, createPartOrderFromTicket, placeMarconeOrder, isMarconeDist, type MarconeOrderPayload, type ShipToAddress } from "@/lib/supabase/partOrders";
 import { getPartAddresses, getLocations } from "@/lib/supabase/locationManagement";
-import { Copy, Map as MapIcon, CalendarDays, Send, ExternalLink, Pencil, Lock } from "lucide-react";
+import { Copy, Map as MapIcon, CalendarDays, Send, ExternalLink, Pencil, Lock, Smartphone } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { isFirebaseReady } from "@/lib/firebase/config";
 import { useIsPhone } from "@/lib/device";
@@ -15,12 +15,10 @@ import { TruckStockBatchModal, type TruckStockBatchSelection } from "@/component
 import { TicketSidebar } from "@/components/TicketSidebar";
 import { TIME_FRAMES } from "@/lib/timeframes";
 import { CLAIM_STATUSES, CLAIM_TOS, PAYMENT_METHODS } from "@/lib/claimDropdowns";
-import { LOCATIONS_DATA } from "@/lib/zipCoverage";
 import { resolveTierCode } from "@/lib/tierCodes";
 import { CANCEL_REASONS } from "@/lib/operationsBranchMetrics";
-import { getLocationManagementCoordinates } from "@/components/LocationManagementPage";
 import { getCompanyMapProvider, type MapProvider } from "@/lib/supabase/companySettings";
-import { loadGoogleMapsScript, makeGeocoder, routeGeoapify, metersToMiles } from "@/lib/mapEngine";
+import { computeOfficeDistanceMiles } from "@/lib/mapEngine";
 import {
   buildSquaretradeUrlFromToken,
   extractSquaretradeUrl,
@@ -54,7 +52,10 @@ import {
   deleteTicketPart as sbDeleteTicketPart,
 } from "@/lib/supabase/tickets";
 import { getTicketComments, addTicketComment } from "@/lib/supabase/comments";
+import { getTicketAlerts, addTicketAlert, removeTicketAlert, type TicketAlert } from "@/lib/supabase/ticketAlerts";
 import { getModelResources, saveModelResources } from "@/lib/supabase/modelResources";
+import { parseServicePerformed, composeServicePerformed, emptyServicePerformed } from "@/lib/servicePerformedNotes";
+import { usePersistedTab } from "@/lib/usePersistedTab";
 import { canManageMisdiagnosed } from "@/lib/roleLabels";
 
 // Product category options for the ticket Product Information dropdown.
@@ -120,7 +121,7 @@ function warrantyAcronym(warrantyType: string | undefined | null): string {
   return (warrantyType || "").toUpperCase();
 }
 
-// Format a ServicePower date string to YYYY-MM-DD HH:MM:SS for display in call info.
+// Format a ServicePower date string to YYYY-MM-DD for display in call info.
 function formatSpDate(dateStr: string | null | undefined): string {
   if (!dateStr) return "";
   try {
@@ -129,10 +130,7 @@ function formatSpDate(dateStr: string | null | undefined): string {
     if (isNaN(d.getTime())) return String(dateStr);
     const mm = String(d.getMonth() + 1).padStart(2, "0");
     const dd = String(d.getDate()).padStart(2, "0");
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mi = String(d.getMinutes()).padStart(2, "0");
-    const ss = String(d.getSeconds()).padStart(2, "0");
-    return `${d.getFullYear()}-${mm}-${dd} ${hh}:${mi}:${ss}`;
+    return `${d.getFullYear()}-${mm}-${dd}`;
   } catch {
     return String(dateStr);
   }
@@ -355,7 +353,9 @@ const TICKET_COPY_KEY_PREFIX = "ahs:ticket-copy:";
 const TICKET_AUDIT_KEY_PREFIX = "ahs:ticket-audit:";
 const TICKET_VISIT_LOG_KEY_PREFIX = "ahs:ticket-visit-log:";
 const TICKET_PART_LOG_KEY_PREFIX = "ahs:ticket-part-log:";
-const TICKET_ALERT_KEY_PREFIX = "ahs:ticket-alert:";
+const TICKET_ACTIVE_TAB_KEY_PREFIX = "ahs:ticket-active-tab:";
+type TicketDetailsTab = "general" | "tracking" | "compensation" | "billing";
+const TICKET_DETAILS_TABS: TicketDetailsTab[] = ["general", "tracking", "compensation", "billing"];
 
 function formatAuditValue(value: unknown) {
   if (value === null || value === undefined || value === "") return "—";
@@ -391,10 +391,6 @@ function getVisitLogKey(ticketNo: string) {
 
 function getPartLogKey(ticketNo: string) {
   return `${TICKET_PART_LOG_KEY_PREFIX}${ticketNo}`;
-}
-
-function getAlertKey(ticketNo: string) {
-  return `${TICKET_ALERT_KEY_PREFIX}${ticketNo}`;
 }
 
 function createEmptyPartDraft(): PartTransactionDraft {
@@ -464,25 +460,6 @@ function loadPartRows(ticketNo: string) {
 function savePartRows(ticketNo: string, rows: PartTransactionRow[]) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(getPartLogKey(ticketNo), JSON.stringify(rows));
-}
-
-function loadAlertMessages(ticketNo: string) {
-  if (typeof window === "undefined") return [] as Array<{id: string, text: string, by: string, timestamp: string}>;
-
-  const raw = window.localStorage.getItem(getAlertKey(ticketNo));
-  if (!raw) return [] as Array<{id: string, text: string, by: string, timestamp: string}>;
-
-  try {
-    const parsed = JSON.parse(raw) as Array<{id: string, text: string, by: string, timestamp: string}>;
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [] as Array<{id: string, text: string, by: string, timestamp: string}>;
-  }
-}
-
-function saveAlertMessages(ticketNo: string, messages: Array<{id: string, text: string, by: string, timestamp: string}>) {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(getAlertKey(ticketNo), JSON.stringify(messages));
 }
 
 function normalizePartRow(row: Partial<PartTransactionRow> & { id: string }): PartTransactionRow {
@@ -698,7 +675,9 @@ const PART_STATUS_TEXT_COLOR: Record<string, string> = {
   "Back Order": "text-slate-400",
   "Defective": "text-slate-400",
   "Hold for Estimation": "text-slate-400",
+  "In Review": "text-slate-400",
   "Not Used & Stocked": "text-slate-400",
+  "PNN": "text-slate-400",
   "Tech Pickup": "text-slate-400",
   "Transfer to Another Ticket": "text-slate-400",
 
@@ -823,56 +802,6 @@ function computeTAT(created: string | undefined): string {
   const ms = Date.now() - createdDate.getTime();
   const days = Math.max(0, Math.floor(ms / (1000 * 60 * 60 * 24)));
   return `${days}d`;
-}
-
-// Haversine straight-line distance in miles between two lat/lng points.
-function milesBetween(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
-  const toRad = (deg: number) => (deg * Math.PI) / 180;
-  const R = 3958.8; // Earth radius in miles
-  const dLat = toRad(b.lat - a.lat);
-  const dLng = toRad(b.lng - a.lng);
-  const lat1 = toRad(a.lat);
-  const lat2 = toRad(b.lat);
-  const h =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(h));
-}
-
-// Resolve the office coordinates for a location: prefer Location Management
-// coordinates, fall back to the static LOCATIONS_DATA lat/lng.
-function getOfficeCoordinates(location: string): { lat: number; lng: number } | null {
-  const fromMgmt = getLocationManagementCoordinates(location);
-  if (fromMgmt) return fromMgmt;
-  const normalized = String(location || "").trim().toLowerCase();
-  const match = LOCATIONS_DATA.find((l) => l.location.trim().toLowerCase() === normalized);
-  if (match && match.lat && match.lng) {
-    const lat = parseFloat(match.lat);
-    const lng = parseFloat(match.lng);
-    if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
-  }
-  return null;
-}
-
-// Electrolux tickets logged under the "Huntsville" location actually
-// dispatch from one of two different real offices depending on which state
-// the customer is in — the branch name alone doesn't disambiguate this.
-// Overrides the normal location-based mileage starting point for just this
-// account + location + state combination; every other account's Huntsville
-// tickets keep using the location's own stored coordinates. Returns a plain
-// address string (not lat/lng) so the Distance Matrix API geocodes it the
-// same way it already does for destinations, instead of us hand-typing
-// coordinates for a calculation that affects mileage reimbursement.
-const ELECTROLUX_HUNTSVILLE_MILEAGE_ORIGIN: Record<string, string> = {
-  AL: "631 Beacon Pkwy W #106, Birmingham, AL 35209, USA",
-  TN: "163 N Mt Juliet Rd, Mt. Juliet, TN 37122, USA",
-};
-function getElectroluxHuntsvilleMileageOrigin(ticket: { account?: string; location?: string; state?: string }): string | null {
-  const account = String(ticket.account || "").trim().toLowerCase();
-  const location = String(ticket.location || "").trim().toLowerCase();
-  const state = String(ticket.state || "").trim().toUpperCase();
-  if (!account.includes("electrolux") || location !== "huntsville") return null;
-  return ELECTROLUX_HUNTSVILLE_MILEAGE_ORIGIN[state] ?? null;
 }
 
 const DEFAULT_TICKET: TicketData = {
@@ -1197,7 +1126,7 @@ function TicketDetailsPage() {
   const navigate = useNavigate();
   const { email: currentUserEmail, ready: authReady, displayName: currentUserName, role: currentUserRole, companyId: currentCompanyId, uid } = useAuth();
   // Tech-only required-field gating: technicians (and anyone using the mobile
-  // tech app) must fill Cause of Failure + Repair Notes before saving a
+  // tech app) must fill Cause of Failure + Service Performed before saving a
   // visit. On desktop / web for other roles these stay optional.
   const isPhone = useIsPhone();
   const isTechRole = useMemo(() => {
@@ -1205,7 +1134,14 @@ function TicketDetailsPage() {
     return r === "TECHNICIAN";
   }, [currentUserRole]);
   const requireTechVisitFields = isPhone || isTechRole;
-  const [activeTab, setActiveTab] = useState<"general" | "tracking" | "compensation" | "billing">("general");
+  // Remembered per-ticket so a full page reload lands back on whichever
+  // tab (e.g. Service Tracking) the user had open, instead of resetting to
+  // General every time.
+  const [activeTab, setActiveTab] = usePersistedTab<TicketDetailsTab>(
+    `${TICKET_ACTIVE_TAB_KEY_PREFIX}${ticketNo}`,
+    TICKET_DETAILS_TABS,
+    "general",
+  );
   const [newServicerNote, setNewServicerNote] = useState("");
   const [servicerComments, setServicerComments] = useState<Array<{ id: string; body: string; authorName: string; authorRole: string; createdAt: string }>>([]);
   const [newVisitStatus, setNewVisitStatus] = useState("Visited");
@@ -1230,10 +1166,13 @@ function TicketDetailsPage() {
   const [newVisitSchedNotes, setNewVisitSchedNotes] = useState("");
   const [selectedTicket, setSelectedTicket] = useState(ticketNo);
   
-  // Alert message system
-  const [alertMessages, setAlertMessages] = useState<Array<{id: string, text: string, by: string, timestamp: string}>>([]);
+  // Alert message system — real Supabase-backed (ticket_alerts), not
+  // localStorage, so an alert flagged for mobile can actually reach a
+  // technician's phone.
+  const [alertMessages, setAlertMessages] = useState<TicketAlert[]>([]);
   const [newAlertMessage, setNewAlertMessage] = useState("");
-  const [alertsLoaded, setAlertsLoaded] = useState(false);
+  const [newAlertShowInternal, setNewAlertShowInternal] = useState(true);
+  const [newAlertMobilePopup, setNewAlertMobilePopup] = useState(false);
   const [editingVisitId, setEditingVisitId] = useState<string | null>(null);
   const [visitFormMode, setVisitFormMode] = useState<"edit" | "view">("edit");
   const [isVisitModalOpen, setIsVisitModalOpen] = useState(false);
@@ -1248,6 +1187,17 @@ function TicketDetailsPage() {
   const [newRunningNoteVisibility, setNewRunningNoteVisibility] = useState<"internal" | "external">("internal");
   const [postingRunningNote, setPostingRunningNote] = useState(false);
   const [runningNotePostError, setRunningNotePostError] = useState<string | null>(null);
+  // NSA Estimates panel — NSA has no equivalent AHS UI to extend (unlike
+  // Running Notes/SP), so this is a standalone panel just for NSA tickets.
+  const [nsaEstimates, setNsaEstimates] = useState<Array<{
+    estimateID: number;
+    submissionStatusCode: string;
+    processedStatusCode: string;
+    totalAmount: number;
+    lines: Array<{ coverageTypeCode: string; amount: number }>;
+  }>>([]);
+  const [nsaEstimatesLoading, setNsaEstimatesLoading] = useState(false);
+  const [nsaEstimatesError, setNsaEstimatesError] = useState<string | null>(null);
   const [viewingVisitEntry, setViewingVisitEntry] = useState<VisitLogEntry | null>(null);
   const [isPartModalOpen, setIsPartModalOpen] = useState(false);
   const [viewingPartEntry, setViewingPartEntry] = useState<PartTransactionRow | null>(null);
@@ -1511,8 +1461,7 @@ function TicketDetailsPage() {
     // Reset loaded flags when ticket changes
     setVisitsLoaded(false);
     setPartRowsLoaded(false);
-    setAlertsLoaded(false);
-    
+
     // Load visits from Supabase (falls back to empty if none)
     sbGetTicketVisits(ticketNo)
       .then((visits) => {
@@ -1581,10 +1530,6 @@ function TicketDetailsPage() {
       setPartAddressBook(book);
     });
     
-    // Load alert messages from localStorage
-    setAlertMessages(loadAlertMessages(ticketNo));
-    setAlertsLoaded(true);
-    
     setEditingPartId(null);
     setPartDraft(createEmptyPartDraft());
     setIsEditingCustomerInfo(false);
@@ -1610,12 +1555,6 @@ function TicketDetailsPage() {
     // This effect intentionally does nothing (kept to preserve hook order).
     if (!partRowsLoaded) return;
   }, [partRows, partRowsLoaded, ticketNo]);
-
-  useEffect(() => {
-    // Save alert messages to localStorage whenever they change
-    if (!alertsLoaded) return;
-    saveAlertMessages(ticketNo, alertMessages);
-  }, [alertMessages, ticketNo, alertsLoaded]);
 
   useEffect(() => {
     // Listen for ticket data changes from Work Planner or other sources
@@ -2013,6 +1952,19 @@ function TicketDetailsPage() {
     () => `${partRows.length} distinct record${partRows.length === 1 ? "" : "s"} found`,
     [partRows.length],
   );
+  // Live, read-only readout of parts currently marked "Used" - not a
+  // section of Service Performed (a tech doesn't type it in), attached
+  // only to the latest visit log entry (visitLogEntries[0]) wherever that
+  // visit is displayed. Parts don't reliably link to a specific visit
+  // (parts.visit_id is null on every real row in production), so this is
+  // ticket-wide rather than pretending to scope per visit.
+  const usedPartsText = useMemo(() => {
+    const used = partRows.filter((p) => p.status === "Used");
+    if (used.length === 0) return "";
+    return used
+      .map((p) => `- ${p.partNo || "?"} — ${p.partDesc || "part"}${p.quantity ? ` (qty ${p.quantity})` : ""}`)
+      .join("\n");
+  }, [partRows]);
 
   const handleTicketChange = (newTicketNo: string) => {
     if (newTicketNo.trim()) {
@@ -2042,7 +1994,7 @@ function TicketDetailsPage() {
   useEffect(() => {
     const r = String(currentUserRole || "").toUpperCase();
     const canSeeChecklist = [
-      "SUPERADMIN","ADMIN","MANAGER","CLAIMS","CLAIMS_MANAGER",
+      "SUPERADMIN","ADMIN","MANAGER","SENIOR_MANAGER","CLAIMS","CLAIMS_MANAGER",
       "BIZOPS_MANAGER","BIZOPS_SENIOR_MANAGER","FINANCE","SENIOR_BRANCH_MANAGER",
     ].includes(r);
     if (!canSeeChecklist || !authReady) return;
@@ -2124,7 +2076,7 @@ function TicketDetailsPage() {
           callType: centralTicket.type || "",
           serviceType: (centralTicket as any).serviceType || "",
           callStatus: centralTicket.status,
-          postingDate: formatSpDate((centralTicket as any).createdAt) || centralTicket.created,
+          postingDate: centralTicket.created,
           repeatCall: centralTicket.redo ? "YES" : "NO",
           contractNo: (centralTicket as any).contractNo || "",
           copay: (centralTicket as any).copay || "",
@@ -2175,6 +2127,17 @@ function TicketDetailsPage() {
     window.addEventListener("storage", handleStorageChange);
     return () => window.removeEventListener("storage", handleStorageChange);
   }, [ticketNo, authReady]);
+
+  // Real alert messages — fetched once ticketDbId resolves above (the FK
+  // needs the real Supabase ticket id, not just the human ticket_no).
+  useEffect(() => {
+    if (!ticketDbId) return;
+    let cancelled = false;
+    getTicketAlerts(ticketDbId)
+      .then((rows) => { if (!cancelled) setAlertMessages(rows); })
+      .catch((err) => console.error("getTicketAlerts error:", err));
+    return () => { cancelled = true; };
+  }, [ticketDbId]);
 
   const ticket = ticketData;
 
@@ -2322,125 +2285,15 @@ function TicketDetailsPage() {
   }, [partAddressBook, ticket?.location, currentUserEmail]);
 
 
-  // Compute DRIVING miles from the office to this ticket's address using the
-  // Google Distance Matrix API (matches what Google Maps shows). Falls back
-  // through progressively looser destination strings so a slightly-off address
-  // still resolves instead of showing "— mi".
+  // Compute DRIVING miles from the office to this ticket's address (shared
+  // with Need Claim List's bulk version — see computeOfficeDistanceMiles in
+  // mapEngine.ts for the full Google/Leaflet + Electrolux-override logic).
   useEffect(() => {
     if (!ticket || !mapProvider) { setOfficeDistanceMiles(null); return; }
-    const overrideOrigin = getElectroluxHuntsvilleMileageOrigin(ticket);
-    const office = overrideOrigin ? null : getOfficeCoordinates(ticket.location || ticket.city || "");
-    if (!overrideOrigin && !office) { setOfficeDistanceMiles(null); return; }
-
-    // Candidate destination strings, most specific first.
-    const destinationCandidates = [
-      [ticket.address, ticket.city, ticket.state, ticket.zip, "USA"].filter(Boolean).join(", "),
-      [ticket.city, ticket.state, ticket.zip, "USA"].filter(Boolean).join(", "),
-      [ticket.zip, "USA"].filter(Boolean).join(", "),
-      [ticket.city, ticket.state, "USA"].filter(Boolean).join(", "),
-    ]
-      .map((s) => s.trim())
-      .filter((s) => s && s !== "USA");
-
-    if (destinationCandidates.length === 0) { setOfficeDistanceMiles(null); return; }
-
     let cancelled = false;
-
-    // Leaflet mode: geocode via Geoapify, then get real driving distance via
-    // Geoapify's Routing API (same key) — falls back to straight-line only
-    // if the routing call itself fails.
-    if (mapProvider === "leaflet") {
-      const geocode = makeGeocoder("leaflet");
-      (async () => {
-        let destCoords: { lat: number; lng: number } | null = null;
-        for (const candidate of destinationCandidates) {
-          if (cancelled) return;
-          destCoords = await geocode(candidate);
-          if (destCoords) break;
-        }
-        if (cancelled || !destCoords) { if (!cancelled) setOfficeDistanceMiles(null); return; }
-
-        const originCoords = overrideOrigin ? await geocode(overrideOrigin) : office!;
-        if (cancelled) return;
-        if (!originCoords) { setOfficeDistanceMiles(null); return; }
-
-        const route = await routeGeoapify([originCoords, destCoords], "drive");
-        if (cancelled) return;
-        setOfficeDistanceMiles(route ? metersToMiles(route.totalDistanceMeters) : milesBetween(originCoords, destCoords));
-      })();
-      return () => { cancelled = true; };
-    }
-
-    const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string;
-
-    const computeDistance = () => {
-      const maps = (window as Window & { google?: any }).google?.maps;
-      if (!maps) return;
-      const service = new maps.DistanceMatrixService();
-      // The Distance Matrix API accepts a plain address string for origins
-      // too (it geocodes it the same way it does destinations), so the
-      // Electrolux/Huntsville override just passes its address straight
-      // through — no need to resolve it to lat/lng ourselves.
-      const origin = overrideOrigin ?? new maps.LatLng(office!.lat, office!.lng);
-
-      const tryCandidate = (idx: number) => {
-        if (cancelled) return;
-        if (idx >= destinationCandidates.length) {
-          // Last resort: straight-line distance via geocoding the best string.
-          const geocoder = new maps.Geocoder();
-          geocoder.geocode({ address: destinationCandidates[0] }, (results: any, status: string) => {
-            if (cancelled) return;
-            if (status !== "OK" || !results?.[0]) { setOfficeDistanceMiles(null); return; }
-            const pos = results[0].geometry.location;
-            const destCoords = { lat: pos.lat(), lng: pos.lng() };
-            if (!overrideOrigin) {
-              setOfficeDistanceMiles(milesBetween(office!, destCoords));
-              return;
-            }
-            // Origin is an address string here — geocode it too so the
-            // Haversine fallback has coordinates to work with.
-            geocoder.geocode({ address: overrideOrigin }, (originResults: any, originStatus: string) => {
-              if (cancelled) return;
-              if (originStatus === "OK" && originResults?.[0]) {
-                const originPos = originResults[0].geometry.location;
-                setOfficeDistanceMiles(milesBetween({ lat: originPos.lat(), lng: originPos.lng() }, destCoords));
-              } else {
-                setOfficeDistanceMiles(null);
-              }
-            });
-          });
-          return;
-        }
-
-        service.getDistanceMatrix(
-          {
-            origins: [origin],
-            destinations: [destinationCandidates[idx]],
-            travelMode: maps.TravelMode.DRIVING,
-            unitSystem: maps.UnitSystem.IMPERIAL,
-          },
-          (response: any, status: string) => {
-            if (cancelled) return;
-            const element = response?.rows?.[0]?.elements?.[0];
-            if (status === "OK" && element?.status === "OK" && element.distance?.value != null) {
-              // distance.value is in meters; convert to miles.
-              setOfficeDistanceMiles(element.distance.value / 1609.344);
-            } else {
-              tryCandidate(idx + 1);
-            }
-          },
-        );
-      };
-
-      tryCandidate(0);
-    };
-
-    if (apiKey) {
-      loadGoogleMapsScript()
-        .then(() => { if (!cancelled) computeDistance(); })
-        .catch(() => { if (!cancelled) setOfficeDistanceMiles(null); });
-    }
-
+    computeOfficeDistanceMiles(ticket, mapProvider).then((miles) => {
+      if (!cancelled) setOfficeDistanceMiles(miles);
+    });
     return () => { cancelled = true; };
   }, [ticket?.account, ticket?.location, ticket?.address, ticket?.city, ticket?.state, ticket?.zip, mapProvider]);
 
@@ -2868,10 +2721,10 @@ function TicketDetailsPage() {
         return;
       }
     }
-    // Cause of Failure (diagnosis) + Repair Notes (resolution) are required
-    // before a technician can submit / complete a visit. Office roles on the
-    // web aren't blocked — only technicians and anyone using the mobile tech
-    // app must fill them in.
+    // Cause of Failure (diagnosis) + Service Performed (resolution) are
+    // required before a technician can submit / complete a visit. Office
+    // roles on the web aren't blocked — only technicians and anyone using
+    // the mobile tech app must fill them in.
     if (requireTechVisitFields) {
       if (!newVisitDiagnosis.trim()) {
         alert("Cause of Failure (Tech) is required before a visit can be completed.");
@@ -2882,8 +2735,8 @@ function TicketDetailsPage() {
         }
         return;
       }
-      if (!newVisitResolution.trim()) {
-        alert("Repair Notes (Tech) is required before a visit can be completed.");
+      if (!parseServicePerformed(newVisitResolution).notes.trim()) {
+        alert("Service Performed (Tech) is required before a visit can be completed.");
         const el = document.getElementById("visit-resolution-modal") as HTMLTextAreaElement | null;
         if (el) {
           el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -2894,6 +2747,9 @@ function TicketDetailsPage() {
     }
 
     const existingVisit = editingVisitId ? visitLogEntries.find((entry) => entry.id === editingVisitId) ?? null : null;
+    // Normalize away the Parts Used hint / any in-progress label damage
+    // regardless of whether the field was blurred before Save was clicked.
+    const composedResolution = composeServicePerformed(parseServicePerformed(newVisitResolution));
 
     const visitEntry: VisitLogEntry = {
       ...(existingVisit ?? createVisitLogEntry({
@@ -2913,7 +2769,7 @@ function TicketDetailsPage() {
         symptomCx: newVisitSymptomCx,
         diagnosis: newVisitDiagnosis,
         symptomTech: newVisitSymptomTech,
-        resolution: newVisitResolution,
+        resolution: composedResolution,
         nonCompletionReason: newVisitNonCompletionReason,
         triageNote: newVisitTriageNote,
         status: newVisitStatus,
@@ -2935,7 +2791,7 @@ function TicketDetailsPage() {
       symptomCx: newVisitSymptomCx,
       diagnosis: newVisitDiagnosis,
       symptomTech: newVisitSymptomTech,
-      resolution: newVisitResolution,
+      resolution: composedResolution,
       nonCompletionReason: newVisitNonCompletionReason,
       triageNote: newVisitTriageNote,
       status: newVisitStatus,
@@ -3061,7 +2917,7 @@ function TicketDetailsPage() {
     setNewVisitSymptomCx("");
     setNewVisitDiagnosis("");
     setNewVisitSymptomTech("");
-    setNewVisitResolution("");
+    setNewVisitResolution(composeServicePerformed(emptyServicePerformed()));
     setNewVisitNonCompletionReason("");
     setNewVisitTriageNote("");
     setNewVisitSchedNotes("");
@@ -3080,11 +2936,29 @@ function TicketDetailsPage() {
   const [runningNotesRawXml, setRunningNotesRawXml] = useState<string>("");
 
   // ---- ServicePower Running Notes ----------------------------------------
+  const isNsaTicket = String(ticket?.ticketSource || "").toUpperCase().includes("NSA");
+
   const loadRunningNotes = useCallback(async () => {
     if (!ticketNo) return;
     setRunningNotesLoading(true);
     setRunningNotesError(null);
     try {
+      if (isNsaTicket) {
+        // NSA has no equivalent of SP's getCallInfo raw-XML fallback, and
+        // nothing here scans for a Squaretrade-style URL on NSA tickets —
+        // clear it so a stale SP payload from a prior ticket view can't
+        // linger in the extractor's input.
+        setRunningNotesRawXml("");
+        const { fetchNsaRunningNotes } = await import("@/lib/nsaApi");
+        const result = await fetchNsaRunningNotes(ticketNo);
+        if (!result.success) {
+          setRunningNotesError(result.error || "Failed to load NSA communications.");
+          setRunningNotes([]);
+        } else {
+          setRunningNotes(result.notes);
+        }
+        return;
+      }
       const { fetchServicePowerNotes } = await import("@/lib/servicePowerNotes");
       const result = await fetchServicePowerNotes(ticketNo);
       // Stash both XML payloads concatenated so the URL extractor can
@@ -3108,7 +2982,7 @@ function TicketDetailsPage() {
     } finally {
       setRunningNotesLoading(false);
     }
-  }, [ticketNo]);
+  }, [ticketNo, isNsaTicket]);
 
   const openRunningNotesModal = () => {
     setIsRunningNotesOpen(true);
@@ -3125,6 +2999,34 @@ function TicketDetailsPage() {
     if (!ticketNo) return;
     void loadRunningNotes();
   }, [ticketNo, loadRunningNotes]);
+
+  const loadNsaEstimates = useCallback(async () => {
+    if (!ticketNo || !isNsaTicket) return;
+    setNsaEstimatesLoading(true);
+    setNsaEstimatesError(null);
+    try {
+      const { getNsaEstimates } = await import("@/lib/nsaApi");
+      const estimates = await getNsaEstimates(ticketNo);
+      setNsaEstimates(estimates.map((e) => ({
+        estimateID: e.estimateID,
+        submissionStatusCode: e.submissionStatusCode ?? "",
+        processedStatusCode: e.processedStatusCode ?? "",
+        totalAmount: e.totalAmount ?? 0,
+        lines: (e.lines ?? []).map((l) => ({ coverageTypeCode: l.coverageTypeCode, amount: l.amount })),
+      })));
+    } catch (err) {
+      setNsaEstimatesError(err instanceof Error ? err.message : String(err));
+      setNsaEstimates([]);
+    } finally {
+      setNsaEstimatesLoading(false);
+    }
+  }, [ticketNo, isNsaTicket]);
+
+  // Auto-fetch NSA Estimates the same way Customer Notes auto-fetches above.
+  useEffect(() => {
+    if (!ticketNo || !isNsaTicket) return;
+    void loadNsaEstimates();
+  }, [ticketNo, isNsaTicket, loadNsaEstimates]);
 
   // Auto-sync the per-ticket Squaretrade Appointment Completion URL from
   // ServicePower whenever notes refresh. Squaretrade typically embeds
@@ -3162,14 +3064,15 @@ function TicketDetailsPage() {
       date: formatSpNoteDate(n.date),
       notes: n.body,
       by: n.addedBy || "ServicePower",
+      isInternal: n.isInternal,
     }));
     const fromTicket = (ticket?.customerNotes ?? []) as Array<{ date: string; notes: string; by: string }>;
     // SP is the source of truth. If it returned at least one note, show
     // only those (de-duped by date+body). Only fall back to the
     // ticket-stored notes when SP came back empty.
-    const source = fromSp.length > 0 ? fromSp : fromTicket;
+    const source = fromSp.length > 0 ? fromSp : fromTicket.map((n) => ({ ...n, isInternal: false }));
     const seen = new Set<string>();
-    const merged: Array<{ date: string; notes: string; by: string }> = [];
+    const merged: Array<{ date: string; notes: string; by: string; isInternal: boolean }> = [];
     for (const note of source) {
       const key = `${(note.date || "").trim()}::${(note.notes || "").trim()}`;
       if (seen.has(key)) continue;
@@ -3189,6 +3092,9 @@ function TicketDetailsPage() {
   };
 
   const submitRunningNote = async () => {
+    // No addNsaCommunications wiring here — the UI hides this form for NSA
+    // tickets, but guard the handler too in case that ever changes.
+    if (isNsaTicket) return;
     const noteBody = newRunningNote.trim();
     if (!noteBody) return;
     setPostingRunningNote(true);
@@ -3267,7 +3173,11 @@ function TicketDetailsPage() {
     setNewVisitSymptomCx(entry.symptomCx || "");
     setNewVisitDiagnosis(entry.diagnosis || "");
     setNewVisitSymptomTech(entry.symptomTech || "");
-    setNewVisitResolution(entry.resolution || "");
+    setNewVisitResolution(
+      entry.resolution
+        ? composeServicePerformed(parseServicePerformed(entry.resolution))
+        : composeServicePerformed(emptyServicePerformed()),
+    );
     setNewVisitNonCompletionReason(entry.nonCompletionReason || "");
     setNewVisitTriageNote(entry.triageNote || "");
     setNewVisitSchedNotes(entry.schedNotes || "");
@@ -4066,32 +3976,39 @@ function TicketDetailsPage() {
     }
   }, [ticketNo, isAssurantClaimedTicket, partRows, currentEditor]);
 
-  // Alert message system
-  const addAlertMessage = () => {
-    if (newAlertMessage.trim()) {
-      const alertEntry = {
-        id: typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-          ? crypto.randomUUID()
-          : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`,
-        text: newAlertMessage.trim(),
-        by: currentEditor,
-        timestamp: new Date().toLocaleString(),
-      };
+  // Alert message system — real Supabase-backed (ticket_alerts).
+  const addAlertMessage = async () => {
+    const text = newAlertMessage.trim();
+    if (!text || !ticketDbId) return;
+    try {
+      const alertEntry = await addTicketAlert(ticketDbId, {
+        text,
+        showInternal: newAlertShowInternal,
+        mobilePopup: newAlertMobilePopup,
+        createdBy: myProfileId,
+      });
       setAlertMessages((messages) => [alertEntry, ...messages]);
       appendAuditEntry({
         by: currentEditor,
         action: "Added alert message",
         field: "Alert Messages",
         before: "—",
-        after: newAlertMessage.trim(),
+        after: text,
       });
       setNewAlertMessage("");
+      setNewAlertShowInternal(true);
+      setNewAlertMobilePopup(false);
+    } catch (err) {
+      console.error("addAlertMessage failed:", err);
+      alert(`Failed to save alert: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
-  const removeAlertMessage = (alertId: string) => {
+  const removeAlertMessage = async (alertId: string) => {
     const alertToRemove = alertMessages.find((msg) => msg.id === alertId);
-    if (alertToRemove && confirm("Remove this alert message?")) {
+    if (!alertToRemove || !confirm("Remove this alert message?")) return;
+    try {
+      await removeTicketAlert(alertId);
       setAlertMessages((messages) => messages.filter((msg) => msg.id !== alertId));
       appendAuditEntry({
         by: currentEditor,
@@ -4100,6 +4017,9 @@ function TicketDetailsPage() {
         before: alertToRemove.text,
         after: "Removed",
       });
+    } catch (err) {
+      console.error("removeAlertMessage failed:", err);
+      alert(`Failed to remove alert: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -4137,8 +4057,11 @@ function TicketDetailsPage() {
       "CLAIMS_MANAGER",
       "PARTS",
       "PARTS_MANAGER",
+      "PARTS_TEAM_LEADER",
       "MANAGER",
+      "SENIOR_MANAGER",
       "ADMIN",
+      "SUPERADMIN",
       "BRANCH_MANAGER",
       "SENIOR_BRANCH_MANAGER",
       "BIZOPS_MANAGER",
@@ -4266,6 +4189,7 @@ function TicketDetailsPage() {
       "CLAIMS",
       "CLAIMS_MANAGER",
       "MANAGER",
+      "SENIOR_MANAGER",
       "ADMIN",
       "SUPERADMIN",
       "BRANCH_MANAGER",
@@ -5220,11 +5144,13 @@ function TicketDetailsPage() {
             <option>Defective</option>
             <option>Hold for Estimation</option>
             <option>Hold for next vist</option>
+            <option>In Review</option>
             <option>Lost</option>
             <option>Need PO</option>
             <option>Not Used &amp; Stocked</option>
             <option>PAID</option>
             <option>Part Ready</option>
+            <option>PNN</option>
             <option>PO Made</option>
             <option>RA - Defect</option>
             <option>RA- DMG</option>
@@ -5353,34 +5279,49 @@ function TicketDetailsPage() {
                 <Send className="h-4 w-4" />
               </button>
               
-              {/* Alert Messages Display - Inline beside controls */}
-              {alertMessages.length > 0 && (
-                <div className="flex items-center gap-2 flex-1">
-                  {alertMessages.slice(0, 1).map((alert) => (
-                    <div 
-                      key={alert.id} 
-                      className="bg-amber-500/30 border-2 border-amber-400/60 rounded px-4 py-2.5 flex items-center gap-3 flex-1 min-w-0 shadow-lg"
-                      title={`By ${alert.by} • ${alert.timestamp}`}
-                    >
-                      <span className="text-amber-200 font-bold text-sm whitespace-nowrap">⚠️ ALERT:</span>
-                      <span className="text-white font-semibold text-sm truncate flex-1">{alert.text}</span>
-                      <span className="text-amber-200/80 text-xs whitespace-nowrap hidden lg:inline font-medium">
-                        {alert.by.split('@')[0]} • {alert.timestamp.split(',')[0]}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => removeAlertMessage(alert.id)}
-                        className="text-amber-200 hover:text-white transition text-sm font-bold whitespace-nowrap ml-2 hover:scale-110"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  ))}
-                  {alertMessages.length > 1 && (
-                    <span className="text-amber-300 text-sm font-semibold whitespace-nowrap">+{alertMessages.length - 1} more</span>
-                  )}
-                </div>
-              )}
+              {/* Alert Messages Display - Inline beside controls. Only
+                  alerts flagged "Show internally" clutter this view — a
+                  mobile-popup-only alert stays out of the way here. */}
+              {(() => {
+                const internalAlerts = alertMessages.filter((a) => a.showInternal);
+                if (internalAlerts.length === 0) return null;
+                return (
+                  <div className="flex items-center gap-2 flex-1">
+                    {internalAlerts.slice(0, 1).map((alert) => {
+                      const by = (alert.createdBy && profileNameById[alert.createdBy]) || alert.createdBy || "Unknown";
+                      const when = alert.createdAt ? new Date(alert.createdAt).toLocaleString() : "";
+                      return (
+                        <div
+                          key={alert.id}
+                          className="bg-amber-500/30 border-2 border-amber-400/60 rounded px-4 py-2.5 flex items-center gap-3 flex-1 min-w-0 shadow-lg"
+                          title={`By ${by} • ${when}`}
+                        >
+                          <span className="text-amber-200 font-bold text-sm whitespace-nowrap">⚠️ ALERT:</span>
+                          <span className="text-white font-semibold text-sm truncate flex-1">{alert.text}</span>
+                          <span className="text-amber-200/80 text-xs whitespace-nowrap hidden lg:inline font-medium">
+                            {by.split('@')[0]} • {when.split(',')[0]}
+                          </span>
+                          {alert.mobilePopup && (
+                            <span className="hidden lg:inline shrink-0" title="Also pops up for technicians on mobile">
+                              <Smartphone className="h-3.5 w-3.5 text-amber-200/80" strokeWidth={2} />
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => removeAlertMessage(alert.id)}
+                            className="text-amber-200 hover:text-white transition text-sm font-bold whitespace-nowrap ml-2 hover:scale-110"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      );
+                    })}
+                    {internalAlerts.length > 1 && (
+                      <span className="text-amber-300 text-sm font-semibold whitespace-nowrap">+{internalAlerts.length - 1} more</span>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
             <div>
               <div className="flex flex-col gap-2">
@@ -6382,14 +6323,14 @@ function TicketDetailsPage() {
                   <h4 className="font-semibold text-slate-300">Customer Notes</h4>
                   <div className="flex items-center gap-2">
                     {runningNotesLoading && (
-                      <span className="text-xs text-slate-400">Syncing from ServicePower…</span>
+                      <span className="text-xs text-slate-400">Syncing from {isNsaTicket ? "NSA" : "ServicePower"}…</span>
                     )}
                     <button
                       type="button"
                       onClick={() => void loadRunningNotes()}
                       disabled={runningNotesLoading}
                       className="rounded border border-white/15 px-2 py-1 text-[11px] font-semibold text-slate-200 transition hover:border-white/30 hover:bg-white/5 disabled:opacity-60"
-                      title="Re-fetch the Running Notes thread from ServicePower"
+                      title={isNsaTicket ? "Re-fetch the Communications log from NSA" : "Re-fetch the Running Notes thread from ServicePower"}
                     >
                       Refresh
                     </button>
@@ -6397,18 +6338,36 @@ function TicketDetailsPage() {
                 </div>
                 {runningNotesError && (
                   <div className="rounded border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-                    Couldn't sync from ServicePower: {runningNotesError}
+                    Couldn't sync from {isNsaTicket ? "NSA" : "ServicePower"}: {runningNotesError}
                   </div>
                 )}
-                <div className="space-y-3">
+                <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
                   {displayedCustomerNotes.length === 0 && !runningNotesLoading && (
                     <p className="text-slate-500 text-sm">No customer notes yet for this work order.</p>
                   )}
                   {displayedCustomerNotes.map((note, idx) => (
-                    <div key={idx} className="bg-slate-900/50 border border-white/10 rounded p-4 text-sm">
-                      <div className="flex justify-between items-start mb-2">
-                        <div className="text-slate-400">{note.date}</div>
-                        <div className="text-blue-400">By: {note.by}</div>
+                    <div
+                      key={idx}
+                      className={`rounded-md border p-3 text-sm ${
+                        note.isInternal
+                          ? "border-amber-400/30 bg-amber-900/10"
+                          : "border-emerald-400/30 bg-emerald-900/10"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2 text-xs text-slate-400 mb-2">
+                        <div className="font-semibold text-slate-300">
+                          {note.by}
+                          <span className="ml-2 text-slate-500">{note.date}</span>
+                        </div>
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                            note.isInternal
+                              ? "bg-amber-400/20 text-amber-200"
+                              : "bg-emerald-400/20 text-emerald-200"
+                          }`}
+                        >
+                          {note.isInternal ? "Internal" : "External"}
+                        </span>
                       </div>
                       <p className="text-slate-300 whitespace-pre-wrap">{note.notes}</p>
                     </div>
@@ -6416,11 +6375,87 @@ function TicketDetailsPage() {
                 </div>
               </div>
 
+              {/* NSA Estimates — no existing AHS UI to extend (unlike Customer
+                  Notes/SP Running Notes above), so this is a standalone panel
+                  for NSA tickets only. */}
+              {isNsaTicket && (
+                <div className="space-y-4 mb-8">
+                  <div className="flex items-center justify-between gap-2">
+                    <h4 className="font-semibold text-slate-300">Estimates</h4>
+                    <div className="flex items-center gap-2">
+                      {nsaEstimatesLoading && (
+                        <span className="text-xs text-slate-400">Syncing from NSA…</span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => void loadNsaEstimates()}
+                        disabled={nsaEstimatesLoading}
+                        className="rounded border border-white/15 px-2 py-1 text-[11px] font-semibold text-slate-200 transition hover:border-white/30 hover:bg-white/5 disabled:opacity-60"
+                        title="Re-fetch estimates from NSA"
+                      >
+                        Refresh
+                      </button>
+                    </div>
+                  </div>
+                  {nsaEstimatesError && (
+                    <div className="rounded border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                      Couldn't sync from NSA: {nsaEstimatesError}
+                    </div>
+                  )}
+                  <div className="space-y-3">
+                    {nsaEstimates.length === 0 && !nsaEstimatesLoading && (
+                      <p className="text-slate-500 text-sm">No estimates on file for this dispatch.</p>
+                    )}
+                    {nsaEstimates.map((est) => {
+                      const status = est.processedStatusCode || est.submissionStatusCode || "Unknown";
+                      const statusLine =
+                        status.toLowerCase() === "approved"
+                          ? "Current Estimate Approved: See Approval Email for Details."
+                          : status.toLowerCase() === "rejected" || status.toLowerCase() === "denied"
+                          ? "Current Estimate Rejected: See Rejection Email for Details."
+                          : `Current Estimate ${status}.`;
+                      return (
+                        <div key={est.estimateID} className="bg-slate-900/50 border border-white/10 rounded p-4 text-sm">
+                          <div className="flex justify-between items-start mb-2">
+                            <div
+                              className={
+                                status.toLowerCase() === "approved"
+                                  ? "text-emerald-400 font-semibold"
+                                  : status.toLowerCase() === "rejected" || status.toLowerCase() === "denied"
+                                  ? "text-red-400 font-semibold"
+                                  : "text-slate-300 font-semibold"
+                              }
+                            >
+                              {statusLine}
+                            </div>
+                            <div className="text-blue-400 font-semibold">
+                              Total: ${est.totalAmount.toFixed(2)}
+                            </div>
+                          </div>
+                          {est.lines.length > 0 && (
+                            <table className="w-full mt-2 text-xs">
+                              <tbody>
+                                {est.lines.map((line, idx) => (
+                                  <tr key={idx} className="border-t border-white/5">
+                                    <td className="py-1 text-slate-400">{line.coverageTypeCode}</td>
+                                    <td className="py-1 text-right text-slate-300">${line.amount.toFixed(2)}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {/* Claims Readiness Checklist — visible to Admin, BizOps, Claims roles only */}
               {(() => {
                 const r = String(currentUserRole || "").toUpperCase();
                 const canSeeChecklist = [
-                  "SUPERADMIN","ADMIN","MANAGER","CLAIMS","CLAIMS_MANAGER",
+                  "SUPERADMIN","ADMIN","MANAGER","SENIOR_MANAGER","CLAIMS","CLAIMS_MANAGER",
                   "BIZOPS_MANAGER","BIZOPS_SENIOR_MANAGER","FINANCE","SENIOR_BRANCH_MANAGER",
                 ].includes(r);
                 if (!canSeeChecklist || !ticket) return null;
@@ -6738,14 +6773,21 @@ function TicketDetailsPage() {
                 <button type="button" onClick={openVisitCreateModal} className="rounded-md border border-blue-400/40 bg-blue-500/20 px-4 py-2 text-sm font-semibold text-blue-200 transition hover:bg-blue-500/30">
                   Add Visit
                 </button>
-                <button
-                  type="button"
-                  onClick={openRunningNotesModal}
-                  className="rounded-md border border-emerald-400/40 bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-500/30"
-                  title="View / post ServicePower Running Notes for this work order"
-                >
-                  Running Notes
-                </button>
+                {/* NSA has no button here — its Communication log is
+                    read-only (no posting), so it would be fully redundant
+                    with the inline Customer Notes section below, which
+                    already shows the exact same data. SP's Running Notes
+                    modal stays since it's also where you post a new note. */}
+                {!isNsaTicket && (
+                  <button
+                    type="button"
+                    onClick={openRunningNotesModal}
+                    className="rounded-md border border-emerald-400/40 bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-500/30"
+                    title="View / post ServicePower Running Notes for this work order"
+                  >
+                    Running Notes
+                  </button>
+                )}
               </div>
               <div className="mt-4 rounded-lg border border-amber-400/20 bg-amber-500/5 p-4">
                 <div className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-300">
@@ -6862,7 +6904,7 @@ function TicketDetailsPage() {
                           ) : null}
 
                           {/* Tech Notes - Only show if has content */}
-                          {(entry.diagnosis || entry.resolution || entry.repairType) ? (
+                          {(entry.diagnosis || entry.resolution || entry.repairType || (usedPartsText && entry.id === visitLogEntries[0]?.id)) ? (
                             <div className="mt-3 rounded-md border border-green-500/20 bg-green-500/5 p-3 space-y-2">
                               <div className="text-xs font-semibold uppercase tracking-wider text-green-300">Technician Information</div>
                               {entry.repairType ? (
@@ -6872,7 +6914,10 @@ function TicketDetailsPage() {
                                 <p className="text-sm text-slate-200"><span className="font-semibold text-slate-400">Cause of Failure:</span> {entry.diagnosis}</p>
                               ) : null}
                               {entry.resolution ? (
-                                <p className="text-sm text-slate-200"><span className="font-semibold text-slate-400">Repair Notes:</span> {entry.resolution}</p>
+                                <p className="text-sm text-slate-200"><span className="font-semibold text-slate-400">Service Performed:</span> {entry.resolution}</p>
+                              ) : null}
+                              {usedPartsText && entry.id === visitLogEntries[0]?.id ? (
+                                <p className="text-sm text-slate-200 whitespace-pre-wrap"><span className="font-semibold text-slate-400">Parts Used:</span> {"\n"}{usedPartsText}</p>
                               ) : null}
                             </div>
                           ) : null}
@@ -7071,8 +7116,11 @@ function TicketDetailsPage() {
                           <textarea id="visit-diagnosis-modal" value={newVisitDiagnosis} onChange={(event) => setNewVisitDiagnosis(event.target.value)} className={`min-h-18 w-full rounded-md border bg-slate-950/90 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 ${requireTechVisitFields && !newVisitDiagnosis.trim() ? "border-rose-500/50" : "border-white/15"}`} />
                         </div>
                         <div className="space-y-1.5 xl:col-span-3">
-                          <label htmlFor="visit-resolution-modal" className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Repair Notes (Tech){requireTechVisitFields ? <span className="text-rose-400"> *</span> : null}</label>
-                          <textarea id="visit-resolution-modal" value={newVisitResolution} onChange={(event) => setNewVisitResolution(event.target.value)} className={`min-h-18 w-full rounded-md border bg-slate-950/90 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 ${requireTechVisitFields && !newVisitResolution.trim() ? "border-rose-500/50" : "border-white/15"}`} />
+                          <label htmlFor="visit-resolution-modal" className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Service Performed (Tech){requireTechVisitFields ? <span className="text-rose-400"> *</span> : null}</label>
+                          <textarea id="visit-resolution-modal" rows={10} value={newVisitResolution} onChange={(event) => setNewVisitResolution(event.target.value)} onBlur={() => setNewVisitResolution((v) => composeServicePerformed(parseServicePerformed(v)))} className={`min-h-18 w-full rounded-md border bg-slate-950/90 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 ${requireTechVisitFields && !parseServicePerformed(newVisitResolution).notes.trim() ? "border-rose-500/50" : "border-white/15"}`} />
+                          {usedPartsText && (!editingVisitId || editingVisitId === visitLogEntries[0]?.id) ? (
+                            <p className="mt-2 whitespace-pre-wrap text-xs text-slate-400"><span className="font-semibold">Parts Used (auto, from the Parts tab):</span> {"\n"}{usedPartsText}</p>
+                          ) : null}
                         </div>
                         <div className="space-y-1.5 xl:col-span-3">
                           <label htmlFor="visit-non-completion-reason-modal" className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Non-Completion Reason</label>
@@ -7132,8 +7180,7 @@ function TicketDetailsPage() {
                     </div>
 
                     <div className="mt-3 rounded-md border border-amber-400/20 bg-amber-900/10 px-3 py-2 text-[11px] text-amber-200/90">
-                      ServicePower's Servicer Web Service only returns notes pushed through their public API. Status auto-events
-                      and notes typed by staff in SP HUB live in SP's internal application and aren't accessible from our integration.
+                      ServicePower's Servicer Web Service only returns notes pushed through their public API. Status auto-events and notes typed by staff in SP HUB live in SP's internal application and aren't accessible from our integration.
                     </div>
 
                     <div className="mt-4 space-y-3 max-h-[40vh] overflow-y-auto rounded-lg border border-white/10 bg-slate-950/40 p-3">
@@ -7311,7 +7358,7 @@ function TicketDetailsPage() {
                   ) : null}
 
                   {/* Technician Information */}
-                  {(viewingVisitEntry.repairType || viewingVisitEntry.diagnosis || viewingVisitEntry.resolution) ? (
+                  {(viewingVisitEntry.repairType || viewingVisitEntry.diagnosis || viewingVisitEntry.resolution || (usedPartsText && viewingVisitEntry.id === visitLogEntries[0]?.id)) ? (
                     <div className="mt-4">
                       <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-green-300">Technician Information</div>
                       <div className="space-y-3 text-sm text-slate-200">
@@ -7322,7 +7369,10 @@ function TicketDetailsPage() {
                           <div className="rounded-lg border border-green-500/20 bg-green-500/5 px-3 py-2"><span className="font-semibold text-slate-400">Cause of Failure:</span> {viewingVisitEntry.diagnosis}</div>
                         ) : null}
                         {viewingVisitEntry.resolution ? (
-                          <div className="rounded-lg border border-green-500/20 bg-green-500/5 px-3 py-2"><span className="font-semibold text-slate-400">Repair Notes:</span> {viewingVisitEntry.resolution}</div>
+                          <div className="rounded-lg border border-green-500/20 bg-green-500/5 px-3 py-2"><span className="font-semibold text-slate-400">Service Performed:</span> {viewingVisitEntry.resolution}</div>
+                        ) : null}
+                        {usedPartsText && viewingVisitEntry.id === visitLogEntries[0]?.id ? (
+                          <div className="rounded-lg border border-green-500/20 bg-green-500/5 px-3 py-2 whitespace-pre-wrap"><span className="font-semibold text-slate-400">Parts Used:</span> {"\n"}{usedPartsText}</div>
                         ) : null}
                       </div>
                     </div>
@@ -7646,11 +7696,13 @@ function TicketDetailsPage() {
                                 <option>Defective</option>
                                 <option>Hold for Estimation</option>
                                 <option>Hold for next vist</option>
+                                <option>In Review</option>
                                 <option>Lost</option>
                                 <option>Need PO</option>
                                 <option>Not Used &amp; Stocked</option>
                                 <option>PAID</option>
                                 <option>Part Ready</option>
+                                <option>PNN</option>
                                 <option>PO Made</option>
                                 <option>RA - Defect</option>
                                 <option>RA- DMG</option>
@@ -8499,12 +8551,32 @@ function TicketDetailsPage() {
                   value={newAlertMessage}
                   onChange={(e) => setNewAlertMessage(e.target.value)}
                 />
-                <button 
+                <button
                   onClick={addAlertMessage}
                   className="bg-amber-600 hover:bg-amber-700 text-white font-semibold py-2 px-4 rounded text-sm transition"
                 >
                   Add
                 </button>
+              </div>
+              <div className="flex items-center gap-5 mt-3">
+                <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={newAlertShowInternal}
+                    onChange={(e) => setNewAlertShowInternal(e.target.checked)}
+                    className="accent-amber-500"
+                  />
+                  Show internally (top of this ticket page)
+                </label>
+                <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={newAlertMobilePopup}
+                    onChange={(e) => setNewAlertMobilePopup(e.target.checked)}
+                    className="accent-amber-500"
+                  />
+                  Send as popup to technician on mobile
+                </label>
               </div>
             </div>
           </div>

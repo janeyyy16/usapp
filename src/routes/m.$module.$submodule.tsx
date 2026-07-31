@@ -24,6 +24,7 @@ import { TatReport } from "@/components/TatReport";
 import { CsrDailyWork } from "@/components/CsrDailyWork";
 import { DailyActivityReport } from "@/components/DailyActivityReport";
 import { TeamMessenger } from "@/components/TeamMessenger";
+import { LiveChatSupportPage } from "@/components/LiveChatSupportPage";
 import { LoginStatistics } from "@/components/LoginStatistics";
 import { LtpProjectionReport } from "@/components/LtpProjectionReport";
 import { ModelDocuments } from "@/components/ModelDocuments";
@@ -50,6 +51,8 @@ import { PartManagementPage } from "@/components/PartManagementPage";
 import { PoStatusPage } from "@/components/PoStatusPage";
 import { ReturnPickupPage } from "@/components/ReturnPickupPage";
 import { RepairStatusesPage } from "@/components/RepairStatusesPage";
+import { DataMigrationPage } from "@/components/DataMigrationPage";
+import { LoginSecurityPage } from "@/components/LoginSecurityPage";
 // Richer parts components pulled from the upstream usapp repo. Where they
 // overlap with the existing *Page wrappers above we prefer the upstream
 // component because it has the full UI; the wrappers remain available as
@@ -68,7 +71,19 @@ import { AccountManagementPage } from "@/components/AccountManagementPage";
 import { LocationManagementPage } from "@/components/LocationManagementPage";
 import { AddBranchPage } from "@/components/AddBranchPage";
 import { canAccessUserManagement, getUserManagementRecord, canAccessAdminModule } from "@/lib/user-management";
-import { isSubmoduleAllowed } from "@/lib/roleLabels";
+import { isSubmoduleAllowed, isCompanySuperAdminRole } from "@/lib/roleLabels";
+import { CompanySettingsPage } from "@/components/CompanySettingsPage";
+import { getDashboardRoleGate, hasDashboardAccess } from "@/lib/dashboardAccess";
+
+// Roles allowed into the admin module overall, and into User Management
+// specifically. Checked via hasDashboardAccess so a secondary role
+// (profiles.extra_roles) grants access too, not just the primary role —
+// e.g. a Parts Manager who's also been given Admin as a secondary role.
+const ADMIN_MODULE_ROLES = ["ADMIN", "SUPERADMIN"];
+const USER_MANAGEMENT_ROLES = ["HR", "MANAGER", "ADMIN", "SUPERADMIN"];
+import { getMyRoles } from "@/lib/supabase/users";
+import { ROLE_LABELS } from "@/lib/roleLabels";
+import { useEffect, useState } from "react";
 import { ReportHRDaily } from "@/components/ReportHRDaily";
 import { ReportHR } from "@/components/ReportHR";
 import { ReportCSRDaily } from "@/components/ReportCSRDaily";
@@ -96,6 +111,7 @@ import { CSRDashboard } from "@/components/CSRDashboard";
 import { CSRTeamLeaderDashboard } from "@/components/CSRTeamLeaderDashboard";
 import { CSRCallTracker } from "@/components/CSRCallTracker";
 import { CSRStatusSummary } from "@/components/CSRStatusSummary";
+import { ExpenseTrackingPage } from "@/components/ExpenseTrackingPage";
 import { ClaimsDashboard } from "@/components/ClaimsDashboard";
 
 export const Route = createFileRoute("/m/$module/$submodule")({
@@ -131,9 +147,32 @@ export const Route = createFileRoute("/m/$module/$submodule")({
 });
 
 function SubModule() {
-  const { ready, email, companyId, role } = useAuth();
+  const { ready, email, companyId, role, uid } = useAuth();
   const { mod, sub } = Route.useLoaderData();
   const location = useLocation();
+
+  // Role gates that also need to honor a secondary role (profiles.
+  // extra_roles) — a Parts Manager who's ALSO been given Admin as a
+  // secondary role should still get into the admin module, not just users
+  // whose PRIMARY role is Admin/SuperAdmin. Only fetch extra_roles when the
+  // primary role alone doesn't already pass any of these three gates —
+  // avoids an extra query on every ungated page load.
+  const dashboardAllowedRoles = mod.slug === "dashboard" ? getDashboardRoleGate(sub.slug) : null;
+  const roleGrantsQuick = !dashboardAllowedRoles || hasDashboardAccess(dashboardAllowedRoles, role, []);
+  const adminGrantsQuick = mod.slug !== "admin" || hasDashboardAccess(ADMIN_MODULE_ROLES, role, []);
+  const userMgmtGrantsQuick = sub.custom !== "user-management" || hasDashboardAccess(USER_MANAGEMENT_ROLES, role, []);
+  // company-settings is a RESTRICTION relative to the general admin-module
+  // gate (plain ADMIN must NOT get in, only the per-company SUPERADMIN role)
+  // so it always needs extraRoles resolved, not just when the quick check fails.
+  const needsExtraRoles = (Boolean(dashboardAllowedRoles) && !roleGrantsQuick) || !adminGrantsQuick || !userMgmtGrantsQuick || sub.custom === "company-settings";
+  const [extraRoles, setExtraRoles] = useState<string[] | null>(null);
+  useEffect(() => {
+    if (!needsExtraRoles || !ready || !uid) return;
+    let cancelled = false;
+    getMyRoles(uid).then(({ extraRoles }) => { if (!cancelled) setExtraRoles(extraRoles); });
+    return () => { cancelled = true; };
+  }, [needsExtraRoles, ready, uid]);
+
   if (!ready) return null;
   if (!email) return <Navigate to="/landing" replace />;
 
@@ -165,8 +204,15 @@ function SubModule() {
     );
   }
 
-  // Check admin access using Firebase role
-  const hasAdminAccess = role && (role.toUpperCase() === "ADMIN" || role.toUpperCase() === "SUPERADMIN");
+  // Wait for the extra_roles fetch before deciding any of the three gates
+  // (dashboard/admin/user-management) when the primary role alone doesn't
+  // already pass — avoids a flash of the denied panel for someone who only
+  // qualifies via a secondary role.
+  if (needsExtraRoles && extraRoles === null) return null;
+
+  // Check admin access using Firebase role — primary role OR a secondary
+  // role (extra_roles) of Admin/SuperAdmin both grant access.
+  const hasAdminAccess = hasDashboardAccess(ADMIN_MODULE_ROLES, role, extraRoles);
 
   // Carve-outs: a few admin-module pages are open to everyone since they're
   // company-wide utilities (e.g. the internal team messenger).
@@ -197,8 +243,9 @@ function SubModule() {
     );
   }
   
-  // Check user management access using Firebase role
-  const hasUserManagementAccess = role && ["HR", "MANAGER", "ADMIN", "SUPERADMIN"].includes(role.toUpperCase());
+  // Check user management access using Firebase role — same primary-or-
+  // secondary-role logic as the admin gate above.
+  const hasUserManagementAccess = hasDashboardAccess(USER_MANAGEMENT_ROLES, role, extraRoles);
   
   if (sub.custom === "user-management" && !hasUserManagementAccess) {
     return (
@@ -225,10 +272,70 @@ function SubModule() {
     );
   }
 
+  // Company Settings is narrower than the general admin-module gate above —
+  // only the per-company SUPERADMIN role (or the platform SUPERSUPERADMIN,
+  // as a superset) gets in, NOT a plain ADMIN.
+  const hasCompanySettingsAccess = isCompanySuperAdminRole(role, extraRoles);
+
+  if (sub.custom === "company-settings" && !hasCompanySettingsAccess) {
+    return (
+      <>
+        <AppHeader />
+        <main className="flex-1 bg-slate-950 py-6">
+          <div className="max-w-4xl mx-auto px-6">
+            <div className="rounded-xl border border-white/15 bg-white/8 p-6 text-white backdrop-blur-md">
+              <h1 className="text-2xl font-bold">Access restricted</h1>
+              <p className="mt-2 text-sm text-slate-300">
+                Company Settings is only available to this company's SuperAdmin.
+              </p>
+              <p className="mt-2 text-sm text-slate-400">
+                Current sign-in: {email}
+              </p>
+              <p className="mt-1 text-sm text-slate-400">
+                Your role: {role || "No role assigned"}
+              </p>
+            </div>
+          </div>
+        </main>
+        <Footer />
+      </>
+    );
+  }
+
   const hasNestedUserRoute = sub.custom === "user-management" && location.pathname.split("/").filter(Boolean).length > 3;
 
   if (hasNestedUserRoute) {
     return <Outlet />;
+  }
+
+  // Dashboard-page role gate resolution (extra_roles fetch already awaited
+  // above, alongside the admin/user-management gates).
+  const dashboardAccessOk = !dashboardAllowedRoles || roleGrantsQuick || hasDashboardAccess(dashboardAllowedRoles, role, extraRoles);
+
+  if (dashboardAllowedRoles && !dashboardAccessOk) {
+    const allowedLabels = dashboardAllowedRoles.map((r) => ROLE_LABELS[r] || r).join(", ");
+    return (
+      <>
+        <AppHeader />
+        <main className="flex-1 bg-slate-950 py-6">
+          <div className="max-w-4xl mx-auto px-6">
+            <div className="rounded-xl border border-white/15 bg-white/8 p-6 text-white backdrop-blur-md">
+              <h1 className="text-2xl font-bold">Access restricted</h1>
+              <p className="mt-2 text-sm text-slate-300">
+                {sub.title} is only available to {allowedLabels}, and SuperAdmin users.
+              </p>
+              <p className="mt-2 text-sm text-slate-400">
+                Current sign-in: {email}
+              </p>
+              <p className="mt-1 text-sm text-slate-400">
+                Your role: {role || "No role assigned"}
+              </p>
+            </div>
+          </div>
+        </main>
+        <Footer />
+      </>
+    );
   }
 
   return (
@@ -240,6 +347,8 @@ function SubModule() {
         ? <RepairForecastPage mod={mod} sub={sub} companyId={companyId} />
         : sub.slug === "daily-activity"
         ? <DailyActivityPage mod={mod} sub={sub} companyId={companyId} />
+        : sub.slug === "expense-tracking"
+        ? <ExpenseTrackingPage mod={mod} sub={sub} />
         : sub.custom === "part-return-status"
         ? <PartReturnStatusPage />
         : sub.custom === "claims-pipeline"
@@ -274,6 +383,8 @@ function SubModule() {
         ? <DailyActivityReport mod={mod} sub={sub} />
         : (sub as any).custom === "internal-message-support"
         ? <TeamMessenger mod={mod} sub={sub} />
+        : (sub as any).custom === "live-chat-support"
+        ? <LiveChatSupportPage mod={mod} sub={sub} />
         : (sub as any).custom === "login-statistics"
         ? <LoginStatistics mod={mod} sub={sub} />
         : (sub as any).custom === "ltp-projection-report"
@@ -373,7 +484,13 @@ function SubModule() {
         : sub.custom === "return-pickup"
         ? <ReturnPickupPage />
         : sub.custom === "repair-statuses"
-        ? <RepairStatusesPage />
+        ? <RepairStatusesPage mod={mod} />
+        : (sub as any).custom === "data-migration"
+        ? <DataMigrationPage mod={mod} sub={sub} />
+        : (sub as any).custom === "login-security"
+        ? <LoginSecurityPage mod={mod} sub={sub} />
+        : (sub as any).custom === "company-settings"
+        ? <CompanySettingsPage mod={mod} sub={sub} />
         : (sub as any).custom === "parts-dashboard"
         ? <PartsDashboard mod={mod} sub={sub} />
         : (sub as any).custom === "claims-dashboard"

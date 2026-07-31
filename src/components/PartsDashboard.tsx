@@ -16,7 +16,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { ChevronLeft, Menu, Package, AlertTriangle, CheckCircle, Truck, ClipboardList, DollarSign, Loader2, Users, Download } from "lucide-react";
+import { ChevronLeft, Menu, Package, AlertTriangle, CheckCircle, Truck, ClipboardList, DollarSign, Loader2, Users, Download, RotateCcw, TrendingUp, BarChart2 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
 import * as XLSX from "xlsx";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
@@ -55,6 +55,18 @@ const DASHBOARD_SECTIONS = [
   { id: "section-distributor-breakdown", label: "Distributor Breakdown", icon: Truck },
   { id: "section-most-ordered-parts", label: "Most Ordered Parts", icon: Package },
   { id: "section-part-lines", label: "Part Lines", icon: ClipboardList },
+];
+
+const QUICK_NAV = [
+  { slug: "part-order", label: "Part Order", icon: <ClipboardList className="h-4 w-4" /> },
+  { slug: "part-inventory", label: "Part Inventory", icon: <Package className="h-4 w-4" /> },
+  { slug: "part-collection", label: "Part Collection", icon: <CheckCircle className="h-4 w-4" /> },
+  { slug: "part-pickup", label: "Part Pickup", icon: <Truck className="h-4 w-4" /> },
+  { slug: "part-receive", label: "Part Receive", icon: <Package className="h-4 w-4" /> },
+  { slug: "part-return", label: "Part Return", icon: <RotateCcw className="h-4 w-4" /> },
+  { slug: "part-return-status", label: "Return Status", icon: <TrendingUp className="h-4 w-4" /> },
+  { slug: "po-status", label: "PO Status", icon: <BarChart2 className="h-4 w-4" /> },
+  { slug: "truck-stock", label: "Truck Stock", icon: <Truck className="h-4 w-4" /> },
 ];
 
 /**
@@ -486,6 +498,12 @@ export function PartsDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef
         </div>
 
         <div className="flex flex-wrap gap-2 mb-6 mt-4">
+          {QUICK_NAV.map((item) => (
+            <Link key={item.slug} to="/m/$module/$submodule" params={{ module: "parts", submodule: item.slug }}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-sm font-medium transition-colors">
+              {item.icon}{item.label}
+            </Link>
+          ))}
           <button
             type="button"
             onClick={() => setShowGenerateReport((v) => !v)}

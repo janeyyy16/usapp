@@ -18,12 +18,14 @@ dist-ssr
 
 # Wrangler / Cloudflare
 .wrangler/
+.wrangler-build-state/
 .dev.vars
 
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
 .idea
+.claude/
 .DS_Store
 *.suo
 *.ntvs*
@@ -41,15 +43,3 @@ dist-ssr
 .firebaserc
 firebase-debug.log
 firebase-debug.*.log
-
-# Onboarding-manual screenshot capture (may contain real customer data pre-redaction)
-_csr_screenshots/
-_csr_manual_capture.mjs
-_triage_screenshots/
-_triage_manual_capture.mjs
-_parts_screenshots/
-_parts_manual_capture.mjs
-_claims_screenshots/
-_claims_manual_capture.mjs
-_itupdates_screenshots/
-_itupdates_capture.mjs

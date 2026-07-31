@@ -5,6 +5,15 @@ import { renderErrorPage } from "./lib/error-page";
 import { handleSupabaseTokenRequest } from "./lib/server/supabaseTokenBridge";
 import { handleServicePowerRequest } from "./lib/server/servicePowerBridge";
 import { handleMarconeRequest } from "./lib/server/marconeBridge";
+import { handleJotformRequest } from "./lib/server/jotformBridge";
+import { handleNsaRequest } from "./lib/server/nsaBridge";
+import { handleCustomFormsRequest } from "./lib/server/customFormsBridge";
+import { handleImageProxyRequest } from "./lib/server/imageProxyBridge";
+import { handleGoogleDriveRequest } from "./lib/server/googleDriveBridge";
+import { handleSignableDocumentsRequest } from "./lib/server/signableDocumentsBridge";
+import { handleLiveChatRequest } from "./lib/server/liveChatBridge";
+import { handleAdminUpdateEmailRequest } from "./lib/server/adminUpdateEmailBridge";
+import { handleLiveChatStaffRequest } from "./lib/server/liveChatStaffBridge";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -116,6 +125,41 @@ export default {
       const merged = await resolveServerEnv(env);
       return await handleMarconeRequest(request, merged);
     }
+    if (url.pathname === "/api/jotform") {
+      const merged = await resolveServerEnv(env);
+      return await handleJotformRequest(request, merged);
+    }
+    if (url.pathname === "/api/nsa") {
+      const merged = await resolveServerEnv(env);
+      return await handleNsaRequest(request, merged);
+    }
+    if (url.pathname === "/api/custom-forms") {
+      const merged = await resolveServerEnv(env);
+      return await handleCustomFormsRequest(request, merged);
+    }
+    if (url.pathname === "/api/image-proxy") {
+      return await handleImageProxyRequest(request);
+    }
+    if (url.pathname === "/api/google-drive") {
+      const merged = await resolveServerEnv(env);
+      return await handleGoogleDriveRequest(request, merged);
+    }
+    if (url.pathname === "/api/signable-documents") {
+      const merged = await resolveServerEnv(env);
+      return await handleSignableDocumentsRequest(request, merged);
+    }
+    if (url.pathname === "/api/live-chat") {
+      const merged = await resolveServerEnv(env);
+      return await handleLiveChatRequest(request, merged);
+    }
+    if (url.pathname === "/api/live-chat-staff") {
+      const merged = await resolveServerEnv(env);
+      return await handleLiveChatStaffRequest(request, merged);
+    }
+    if (url.pathname === "/api/admin-update-email") {
+      const merged = await resolveServerEnv(env);
+      return await handleAdminUpdateEmailRequest(request, merged);
+    }
 
     try {
       const handler = await getServerEntry();
@@ -125,5 +169,47 @@ export default {
       console.error(error);
       return brandedErrorResponse();
     }
+  },
+
+  // Cron Trigger (see wrangler.jsonc "triggers.crons") — dispatches on which
+  // schedule fired: hourly runs the NSA parts pull (and, once a week, the
+  // password reset check below), every 5 minutes runs the attendance
+  // grace-period check.
+  async scheduled(event: { cron?: string }, env: unknown, ctx: { waitUntil: (p: Promise<unknown>) => void }) {
+    const merged = await resolveServerEnv(env);
+
+    if (event?.cron === "*/5 * * * *") {
+      ctx.waitUntil(
+        import("./lib/server/attendanceAlerts").then(
+          ({ runAttendanceAlertCheck }) => runAttendanceAlertCheck(merged),
+        ).then(
+          (result) => console.log("attendanceAlerts:", JSON.stringify(result)),
+          (error) => console.error("attendanceAlerts failed:", error),
+        ),
+      );
+      return;
+    }
+
+    ctx.waitUntil(
+      import("./lib/server/nsaPartsSync").then(
+        ({ runNsaPartsSync }) => runNsaPartsSync(merged),
+      ).then(
+        (result) => console.log("nsaPartsSync:", JSON.stringify(result)),
+        (error) => console.error("nsaPartsSync failed:", error),
+      ),
+    );
+
+    // No separate cron entry for this — the hourly tick above lands on an
+    // exact America/Chicago hour boundary too (see passwordResetSchedule.ts's
+    // header comment), so this just checks "is it Monday 00:00 Chicago time
+    // right now" every time the hourly cron fires anyway.
+    ctx.waitUntil(
+      import("./lib/server/passwordResetSchedule").then(({ isWeeklyPasswordResetTick, runWeeklyPasswordReset }) =>
+        isWeeklyPasswordResetTick() ? runWeeklyPasswordReset(merged) : null,
+      ).then(
+        (result) => { if (result) console.log("weeklyPasswordReset:", JSON.stringify(result)); },
+        (error) => console.error("weeklyPasswordReset failed:", error),
+      ),
+    );
   },
 };

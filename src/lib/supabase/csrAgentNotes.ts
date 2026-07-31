@@ -11,7 +11,7 @@
  * submission) plus the review status update.
  *
  * The underlying table is `employee_conduct_notes` (renamed from
- * `csr_agent_notes` in migration 0032 once the feature went cross-
+ * `csr_agent_notes` in migration 0044 once the feature went cross-
  * department — see that migration for the rename). The exported
  * `CsrAgentNote*` names and `agentProfileId` field here are kept as-is
  * on purpose to avoid a large, low-value rename across every component
@@ -19,12 +19,13 @@
  *
  * Once a note clears final review (-> 'approved'), the employee it's
  * about gets a "Warning Issued"/"Mistake Issued" notification via the
- * Firestore notification feed (see notifyEmployeeOfIssuedNote below).
+ * bell icon (this project's real `notifications` table — see
+ * src/lib/supabase/notifications.ts — not upstream's Firestore feed,
+ * since that's not what NotificationsMenu.tsx reads from here).
  */
 
 import { supabase } from "./client";
-import { sendNotification } from "@/lib/firebase/notifications";
-import { isFirebaseReady } from "@/lib/firebase/config";
+import { createNotification } from "./notifications";
 
 const TABLE = "employee_conduct_notes";
 
@@ -176,33 +177,14 @@ export async function reviewAgentNote(id: string, status: "manager_approved" | "
 
 /** Once a warning/mistake clears final review, let the employee know via their notification bell. */
 async function notifyEmployeeOfIssuedNote(note: CsrAgentNote): Promise<void> {
-  if (!isFirebaseReady()) {
-    console.warn("notifyEmployeeOfIssuedNote: Firebase isn't configured/ready — skipping notification for note", note.id);
-    return;
-  }
-
-  const { data: profile, error } = await supabase
-    .from("profiles")
-    .select("firebase_uid")
-    .eq("id", note.agentProfileId)
-    .maybeSingle();
-  if (error) {
-    console.error("notifyEmployeeOfIssuedNote: failed to look up employee profile:", error.message);
-    return;
-  }
-  if (!profile?.firebase_uid) {
-    console.warn("notifyEmployeeOfIssuedNote: employee profile has no firebase_uid — skipping notification for note", note.id, note.agentProfileId);
-    return;
-  }
-
   const label = note.type === "warning" ? "Warning" : "Mistake";
-  await sendNotification([profile.firebase_uid], {
-    kind: "warning_mistake_issued",
-    title: `${label} Issued`,
-    body: note.note,
-    ticketNo: note.ticketNo ?? undefined,
+  await createNotification({
+    recipientId: note.agentProfileId,
+    senderId: note.reviewedBy,
+    senderName: "HR",
+    body: `${label} Issued — ${note.note}`,
+    linkTo: `/csr-agent/${note.agentProfileId}`,
   });
-  console.log(`notifyEmployeeOfIssuedNote: sent "${label} Issued" notification to`, profile.firebase_uid);
 }
 
 export async function deleteAgentNote(id: string): Promise<void> {

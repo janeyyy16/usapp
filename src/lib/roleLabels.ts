@@ -7,9 +7,11 @@
  * label — uses the values from this map instead of the raw code.
  */
 export const ROLE_LABELS: Record<string, string> = {
+  SUPERSUPERADMIN: "Super Super Admin",
   SUPERADMIN: "Super Admin",
   ADMIN: "Admin",
   MANAGER: "Manager",
+  SENIOR_MANAGER: "Senior Manager",
   CSR: "CSR",
   TECHNICIAN: "Technician",
   TECHNICIAN_MANAGER: "Tech Manager",
@@ -27,10 +29,13 @@ export const ROLE_LABELS: Record<string, string> = {
   CLAIMS_MANAGER: "Claims Manager",
   CLAIMS_TEAM_LEADER: "Claims Team Leader",
   PARTS_MANAGER: "Parts Manager",
+  PARTS_TEAM_LEADER: "Parts Team Leader",
   BIZOPS_MANAGER: "BizOps Manager",
   BIZOPS_SENIOR_MANAGER: "BizOps Senior Manager",
   TRIAGE_USER: "Technical Support",
   TRIAGE_MANAGER: "Technical Support Manager",
+  TECHNICAL_DIRECTOR: "Technical Director",
+  TECHNICAL_ASSISTANT_DIRECTOR: "Technical Assistant Director",
 };
 
 /**
@@ -41,12 +46,6 @@ export const ROLE_LABELS: Record<string, string> = {
  */
 export function normalizeRole(role: string | null | undefined): string {
   return String(role ?? "").trim().toUpperCase().replace(/\s+/g, "_");
-}
-
-/** Roles that can act on Jotform-sourced HR onboarding/candidate submissions. */
-const JOTFORM_HR_ROLES = new Set(["HR", "ADMIN", "SUPERADMIN", "MANAGER"]);
-export function isJotformHrRole(role: string | null | undefined): boolean {
-  return JOTFORM_HR_ROLES.has(normalizeRole(role));
 }
 
 /**
@@ -67,6 +66,7 @@ const CSR_ALLOWED_DASHBOARD_SUBMODULES = new Set([
   "employee-self-service",
   "csr-dashboard", // redirects them to their own csr-team-leader-dashboard
   "csr-team-leader-dashboard", // the personal dashboard that redirect lands on
+  "live-chat-support",
 ]);
 
 export function isCsrRestrictedRole(role: string | null | undefined): boolean {
@@ -88,15 +88,18 @@ export function isSubmoduleAllowed(role: string | null | undefined, moduleSlug: 
 }
 
 /**
- * Roles allowed to see the "Show Misdiagnosed" filter (TicketList.tsx) —
- * manager-tier reviewers only. "Managers" maps to the plain MANAGER role
- * plus branch managers; Triage/Claims/BizOps are their own dedicated
- * manager roles, called out separately from the generic "Managers" bucket.
+ * Roles allowed to flag a ticket as misdiagnosed (ticket.$ticketNo.tsx) and
+ * to see the "Show Misdiagnosed" filter (TicketList.tsx) — manager-tier
+ * reviewers only. "Managers" maps to the plain MANAGER role plus branch
+ * managers; Triage/Claims/BizOps are their own dedicated manager roles,
+ * called out separately from the generic "Managers" bucket per how this
+ * was originally requested.
  */
 const MISDIAGNOSED_ROLES = new Set([
   "ADMIN",
   "SUPERADMIN",
   "MANAGER",
+  "SENIOR_MANAGER",
   "BRANCH_MANAGER",
   "SENIOR_BRANCH_MANAGER",
   "BIZOPS_MANAGER",
@@ -110,6 +113,21 @@ export function canManageMisdiagnosed(role: string | null | undefined): boolean 
 }
 
 /**
+ * Is this the per-company SUPERADMIN role (primary or extra)? Mirrors the
+ * SQL is_company_superadmin() helper (0099_role_hierarchy_split.sql) —
+ * SUPERSUPERADMIN (the platform-level role) also passes, since it can
+ * reach the same content as a superset, though it rarely needs to.
+ */
+export function isCompanySuperAdminRole(
+  role: string | null | undefined,
+  extraRoles?: string[] | null
+): boolean {
+  const primary = normalizeRole(role);
+  if (primary === "SUPERADMIN" || primary === "SUPERSUPERADMIN") return true;
+  return (extraRoles ?? []).some((r) => normalizeRole(r) === "SUPERADMIN");
+}
+
+/**
  * Roles that may submit a warning/mistake conduct note about an employee
  * (employee_conduct_notes — see csrAgentNotes.ts). Any manager-flavored
  * role, not just CSR management, since the same two-stage review workflow
@@ -117,9 +135,9 @@ export function canManageMisdiagnosed(role: string | null | undefined): boolean 
  * detail page) and the Attendance Monitoring page's Warnings tab.
  */
 const CONDUCT_NOTE_SUBMITTER_ROLES = new Set([
-  "CSR_TEAM_LEADER", "CSR_MANAGER", "MANAGER", "ADMIN", "SUPERADMIN", "HR",
+  "CSR_TEAM_LEADER", "CSR_MANAGER", "MANAGER", "SENIOR_MANAGER", "ADMIN", "SUPERADMIN", "HR",
   "BRANCH_MANAGER", "SENIOR_BRANCH_MANAGER", "TECHNICIAN_MANAGER",
-  "CLAIMS_MANAGER", "PARTS_MANAGER", "BIZOPS_MANAGER", "BIZOPS_SENIOR_MANAGER",
+  "CLAIMS_MANAGER", "PARTS_MANAGER", "PARTS_TEAM_LEADER", "BIZOPS_MANAGER", "BIZOPS_SENIOR_MANAGER",
 ]);
 
 export function canSubmitConductNote(role: string | null | undefined): boolean {
@@ -150,3 +168,48 @@ const DATA_CLOSE_FILTER_ROLES = new Set([
 export function canFilterDataClosedTickets(role: string | null | undefined): boolean {
   return DATA_CLOSE_FILTER_ROLES.has(normalizeRole(role));
 }
+
+/**
+ * Single source of truth for "HR-tier" access to Jotform form-submission
+ * pings — shared between who can see the Jotform Submissions tab
+ * (ReportHRDaily.tsx) and who actually gets notified when a submission
+ * comes in (findHrFirebaseUids in jotformBridge.ts). These two MUST stay
+ * in sync: previously the tab was visible to HR/Admin/Superadmin/Manager
+ * but the webhook only ever notified accounts tagged exactly "HR", so
+ * every other role saw a permanently empty tab regardless of how many
+ * submissions came in.
+ */
+const JOTFORM_HR_ROLES = new Set(["HR", "ADMIN", "SUPERADMIN", "MANAGER", "SENIOR_MANAGER"]);
+
+export function isJotformHrRole(role: string | null | undefined): boolean {
+  return JOTFORM_HR_ROLES.has(normalizeRole(role));
+}
+
+/**
+ * "Manager tier" for Attendance Monitoring: every department-manager-flavored
+ * role. These roles see only their own direct reports on that page (resolved
+ * via manager_name / CSR team leadership — see notifyRouting.ts), unlike
+ * ADMIN/SUPERADMIN/HR/FINANCE who continue to see the whole company.
+ */
+const ATTENDANCE_MANAGER_TIER_ROLES = new Set([
+  "MANAGER",
+  "SENIOR_MANAGER",
+  "TECHNICIAN_MANAGER",
+  "CSR_MANAGER",
+  "CSR_TEAM_LEADER",
+  "BRANCH_MANAGER",
+  "SENIOR_BRANCH_MANAGER",
+  "PARTS_MANAGER",
+  "PARTS_TEAM_LEADER",
+  "CLAIMS_MANAGER",
+  "TRIAGE_MANAGER",
+  "BIZOPS_MANAGER",
+  "BIZOPS_SENIOR_MANAGER",
+]);
+
+export function isAttendanceManagerTierRole(role: string | null | undefined): boolean {
+  return ATTENDANCE_MANAGER_TIER_ROLES.has(normalizeRole(role));
+}
+
+/** Array form for spreading into a DASHBOARD_ROLE_GATES entry. */
+export const ATTENDANCE_MANAGER_TIER_ROLES_ARRAY = Array.from(ATTENDANCE_MANAGER_TIER_ROLES);

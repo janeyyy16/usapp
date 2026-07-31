@@ -1,3 +1,5 @@
+import { normalizeRole, ATTENDANCE_MANAGER_TIER_ROLES_ARRAY } from "./roleLabels";
+
 /**
  * Role gates for the Dashboard module's submodules (mod.slug === "dashboard").
  * Keyed by submodule slug. A submodule with no entry here is open to every
@@ -7,10 +9,13 @@
  * admin-module gate in m.$module.$submodule.tsx.
  */
 export const DASHBOARD_ROLE_GATES: Record<string, string[]> = {
-  "daily-activity": ["ADMIN", "BIZOPS_MANAGER", "BIZOPS_SENIOR_MANAGER", "CSR_MANAGER", "HR", "MANAGER"],
-  "overall-status": ["ADMIN", "BIZOPS_MANAGER", "BIZOPS_SENIOR_MANAGER", "MANAGER"],
+  "daily-activity": ["ADMIN", "BIZOPS_MANAGER", "BIZOPS_SENIOR_MANAGER", "CSR_MANAGER", "HR", "MANAGER", "SENIOR_MANAGER"],
+  "overall-status": ["ADMIN", "BIZOPS_MANAGER", "BIZOPS_SENIOR_MANAGER", "MANAGER", "SENIOR_MANAGER"],
   "accounting-dashboard": ["ADMIN", "FINANCE"],
-  "attendance-monitoring": ["ADMIN", "HR", "FINANCE", "BIZOPS_MANAGER", "BIZOPS_SENIOR_MANAGER"],
+  // Manager-tier roles (see ATTENDANCE_MANAGER_TIER_ROLES_ARRAY) are scoped to
+  // their own direct reports here (AttendanceMonitoringPage.tsx's
+  // visibleAttendanceProfileIds) — ADMIN/HR/FINANCE/SUPERADMIN see everyone.
+  "attendance-monitoring": ["ADMIN", "HR", "FINANCE", ...ATTENDANCE_MANAGER_TIER_ROLES_ARRAY],
   "payroll-calculation": ["ADMIN", "FINANCE"],
   "expense-tracking": ["ADMIN", "FINANCE"],
   // CSR_AGENT/CSR_TEAM_LEADER are allowed in here too even though the org-wide
@@ -19,6 +24,7 @@ export const DASHBOARD_ROLE_GATES: Record<string, string[]> = {
   // Dashboard, so they need to pass this gate for that redirect to fire.
   "csr-dashboard": ["ADMIN", "CSR_MANAGER", "BIZOPS_MANAGER", "BIZOPS_SENIOR_MANAGER", "CSR_AGENT", "CSR_TEAM_LEADER"],
   "hr-dashboard": ["ADMIN", "HR"],
+  "live-chat-support": ["ADMIN", "BIZOPS_MANAGER", "BIZOPS_SENIOR_MANAGER", "CSR_AGENT", "CSR_TEAM_LEADER", "CSR_MANAGER"],
 };
 
 export function getDashboardRoleGate(subSlug: string): string[] | null {
@@ -34,8 +40,11 @@ export function hasDashboardAccess(
   role: string | null | undefined,
   extraRoles: string[] | null | undefined
 ): boolean {
-  const primary = (role || "").toUpperCase();
+  const primary = normalizeRole(role);
   if (primary === "SUPERADMIN") return true;
-  if (allowedRoles.includes(primary)) return true;
-  return (extraRoles || []).some((r) => allowedRoles.includes((r || "").toUpperCase()));
+  // normalizeRole() so legacy space-separated role values (e.g. "CSR Manager")
+  // still match the underscore-form codes in allowedRoles (e.g. "CSR_MANAGER").
+  const normalizedAllowed = allowedRoles.map((r) => normalizeRole(r));
+  if (normalizedAllowed.includes(primary)) return true;
+  return (extraRoles || []).some((r) => normalizedAllowed.includes(normalizeRole(r)));
 }

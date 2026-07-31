@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
+import { ChevronLeft } from "lucide-react";
 import type * as Leaflet from "leaflet";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 import { LOCATIONS, normalizeLocationName } from "@/lib/locations";
 import { useAuth } from "@/lib/auth";
+import { usePersistedTab } from "@/lib/usePersistedTab";
 import { getCompanyMapProvider, type MapProvider } from "@/lib/supabase/companySettings";
 import { loadGoogleMapsScript, getLeaflet, makeGeocoder, attachLeafletResizeFix, createBadgeDivIcon, OSM_TILE_URL, OSM_ATTRIBUTION } from "@/lib/mapEngine";
 import {
@@ -851,8 +853,12 @@ function resolveCoverageLocation(query: string, locationRows: LocationRow[], cov
   return coverageMatch?.location ?? "";
 }
 
-export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModuleDef }) {
-  const [activeTab, setActiveTab] = useState<"locations" | "parts" | "coverage">("locations");
+export function LocationManagementPage({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) {
+  const [activeTab, setActiveTab] = usePersistedTab<"locations" | "parts" | "coverage">(
+    "ahs:location-management-active-tab",
+    ["locations", "parts", "coverage"],
+    "locations",
+  );
   
   // Helper function to deduplicate locations by name.
   // Prefers a real persisted DB row (uuid id) over a hardcoded default, and
@@ -1750,23 +1756,17 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
   return (
     <main className="flex-1 bg-slate-950 py-6">
       <div className="mx-auto max-w-[1800px] px-6 text-white">
-        {/* Back Button */}
-        <Link 
-          to="/m/$module" 
-          params={{ module: "admin" }}
-          className="inline-flex items-center gap-2 text-slate-300 hover:text-white mb-4 transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-          </svg>
-          Back to Admin
-        </Link>
-        
         <div className="rounded-xl border border-white/15 bg-white/8 p-5 backdrop-blur-md">
           <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <h1 className="text-3xl font-bold tracking-tight">{sub.title}</h1>
-              <p className="mt-1 text-sm text-slate-300">{sub.description}</p>
+            <div className="flex items-center gap-3">
+              <Link to="/m/$module" params={{ module: mod.slug }} className="btn">
+                <ChevronLeft className="h-4 w-4" />
+                {mod.label}
+              </Link>
+              <div>
+                <h1 className="text-3xl font-bold tracking-tight">{sub.title}</h1>
+                <p className="mt-1 text-sm text-slate-300">{sub.description}</p>
+              </div>
             </div>
           </div>
         </div>
@@ -1993,7 +1993,7 @@ export function LocationManagementPage({ sub }: { mod: ModuleDef; sub: SubModule
                           const isAssignedHere = tech.assignedBranch && newLocationRow.location && tech.assignedBranch === newLocationRow.location;
                           return (
                             <label key={tech.id || tech.name} className="flex items-start gap-2 rounded-md border border-white/10 bg-white/[0.02] px-2 py-1 text-xs text-slate-200">
-                              <input type="checkbox" className="mt-0.5" checked={checked} onChange={() => setNewLocationRow((current) => ({ ...current, coveredTechnicians: toggleListValue(current.coveredTechnicians, tech.name) }))} />
+                              <input type="checkbox" className="mt-0.5" checked={checked} onChange={() => setNewLocationRow((current) => ({ ...current, coveredTechnicians: toggleStringValue(current.coveredTechnicians, tech.name) }))} />
                               <span className="flex-1">
                                 <span>{tech.name}</span>
                                 {tech.assignedBranch ? (

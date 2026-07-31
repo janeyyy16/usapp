@@ -399,6 +399,164 @@ export async function getUnreadCounts(profileId: string): Promise<{
   return { perChannel, perDm, total };
 }
 
+export interface DmInboxEntry {
+  threadId: string;
+  otherProfileId: string;
+  lastMessageBody: string;
+  lastMessageAt: string;
+  lastMessageSenderId: string | null;
+  unreadCount: number;
+}
+
+/**
+ * Messenger-style inbox: every DM thread the user is part of, with its
+ * other participant, last message preview, and unread count - the shape a
+ * real chat list needs (contact name + last message + timestamp + unread
+ * badge), not just a bare list of thread ids.
+ *
+ * Three queries total regardless of how many threads exist (my threads,
+ * my read pointers, every message across those threads) - reduced to
+ * "latest + unread count per thread" client-side, same bulk-then-reduce
+ * shape as getUnreadCounts, rather than one query per thread.
+ */
+export async function listMyDmInbox(profileId: string): Promise<DmInboxEntry[]> {
+  if (!profileId) return [];
+
+  const { data: threads, error: threadsErr } = await supabase
+    .from("dm_threads")
+    .select("id, participant_a, participant_b, created_at")
+    .or(`participant_a.eq.${profileId},participant_b.eq.${profileId}`);
+  if (threadsErr) throw new Error(threadsErr.message);
+  const threadRows = threads || [];
+  if (threadRows.length === 0) return [];
+  const threadIds = threadRows.map((t: any) => t.id as string);
+
+  const [readsRes, messagesRes] = await Promise.all([
+    supabase
+      .from("message_reads")
+      .select("dm_thread_id, last_read_at")
+      .eq("profile_id", profileId)
+      .in("dm_thread_id", threadIds),
+    supabase
+      .from("messages")
+      .select("dm_thread_id, sender_id, body, created_at")
+      .in("dm_thread_id", threadIds)
+      .is("deleted_at", null)
+      .order("created_at", { ascending: false }),
+  ]);
+  if (readsRes.error) throw new Error(readsRes.error.message);
+  if (messagesRes.error) throw new Error(messagesRes.error.message);
+
+  const readAt = new Map<string, string>();
+  for (const r of readsRes.data || []) {
+    if (r.dm_thread_id) readAt.set(r.dm_thread_id as string, r.last_read_at as string);
+  }
+
+  // Messages arrive newest-first, so the first row seen per thread is its
+  // latest message.
+  const lastByThread = new Map<string, any>();
+  const unreadByThread = new Map<string, number>();
+  for (const m of messagesRes.data || []) {
+    const tid = m.dm_thread_id as string | null;
+    if (!tid) continue;
+    if (!lastByThread.has(tid)) lastByThread.set(tid, m);
+    const since = readAt.get(tid);
+    const isUnread = m.sender_id !== profileId && (!since || (m.created_at as string) > since);
+    if (isUnread) unreadByThread.set(tid, (unreadByThread.get(tid) ?? 0) + 1);
+  }
+
+  return threadRows.map((t: any) => {
+    const otherProfileId = t.participant_a === profileId ? t.participant_b : t.participant_a;
+    const last = lastByThread.get(t.id);
+    return {
+      threadId: t.id as string,
+      otherProfileId: otherProfileId as string,
+      lastMessageBody: last?.body ?? "",
+      lastMessageAt: (last?.created_at ?? t.created_at) as string,
+      lastMessageSenderId: (last?.sender_id ?? null) as string | null,
+      unreadCount: unreadByThread.get(t.id) ?? 0,
+    };
+  });
+}
+
+export interface SystemNotification {
+  id: string;
+  dmThreadId: string;
+  senderId: string | null;
+  senderName: string | null;
+  body: string;
+  createdAt: string;
+  isRead: boolean;
+}
+
+/**
+ * The bell-icon notification feed: "system" kind DMs sent TO the caller
+ * (attendance note alerts, etc.), newest first. Read state is derived from
+ * the same per-thread `message_reads` pointer the Messages UI already
+ * uses — marking a notification read marks its whole DM thread read, which
+ * is the same "read" the Messages menu shows.
+ *
+ * Self-sent messages are excluded EXCEPT in a "self thread" (both
+ * participants are the caller — e.g. an admin filing an Attendance note
+ * about their own account). The recipient of a Notify-Individual/Notify-
+ * Team-Lead alert is whoever the DM thread's OTHER participant is; when
+ * that happens to be you too, you're still the intended recipient and
+ * should see it. In a normal two-person thread, excluding your own sends
+ * avoids every note you file about someone else also "notifying" you.
+ */
+export async function getMySystemNotifications(profileId: string, limit = 30): Promise<SystemNotification[]> {
+  if (!profileId) return [];
+  const { data: threads, error: threadsErr } = await supabase
+    .from("dm_threads")
+    .select("id, participant_a, participant_b")
+    .or(`participant_a.eq.${profileId},participant_b.eq.${profileId}`);
+  if (threadsErr) throw new Error(threadsErr.message);
+  const dmIds = (threads ?? []).map((t: any) => t.id as string);
+  if (dmIds.length === 0) return [];
+  const selfThreadIds = new Set(
+    (threads ?? []).filter((t: any) => t.participant_a === t.participant_b).map((t: any) => t.id as string)
+  );
+
+  const [msgsRes, readsRes] = await Promise.all([
+    supabase
+      .from("messages")
+      .select("id, dm_thread_id, sender_id, sender_name, body, created_at")
+      .in("dm_thread_id", dmIds)
+      .eq("kind", "system")
+      .is("deleted_at", null)
+      .order("created_at", { ascending: false })
+      .limit(limit * 2), // headroom for the self-sent rows filtered out below
+    supabase
+      .from("message_reads")
+      .select("dm_thread_id, last_read_at")
+      .eq("profile_id", profileId)
+      .not("dm_thread_id", "is", null),
+  ]);
+  if (msgsRes.error) throw new Error(msgsRes.error.message);
+  if (readsRes.error) throw new Error(readsRes.error.message);
+
+  const readAt = new Map<string, string>();
+  for (const r of readsRes.data ?? []) {
+    if (r.dm_thread_id) readAt.set(r.dm_thread_id as string, r.last_read_at as string);
+  }
+
+  return (msgsRes.data ?? [])
+    .filter((m: any) => m.sender_id !== profileId || selfThreadIds.has(m.dm_thread_id))
+    .slice(0, limit)
+    .map((m: any) => {
+      const since = readAt.get(m.dm_thread_id);
+      return {
+        id: m.id,
+        dmThreadId: m.dm_thread_id,
+        senderId: m.sender_id,
+        senderName: m.sender_name,
+        body: m.body,
+        createdAt: m.created_at,
+        isRead: Boolean(since && since >= m.created_at),
+      };
+    });
+}
+
 /**
  * Subscribe to ANY new message in this company (RLS filters automatically).
  * Caller decides how to react — e.g. bump the unread badge.

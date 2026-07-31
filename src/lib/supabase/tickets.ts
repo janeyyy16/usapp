@@ -156,7 +156,6 @@ function rowToTicket(row: any): Ticket {
     calls: row.calls ?? 0,
     partOrder: row.part_order ?? "",
     created: row.created_at ? String(row.created_at).slice(0, 10) : "",
-    createdAt: row.created_at ?? "",
     statusChangedAt: row.status_changed_at ?? undefined,
     statusChangedBy: row.status_changed_by ?? undefined,
     account: row.account ?? "",
@@ -217,7 +216,9 @@ function rowToTicket(row: any): Ticket {
     // @ts-expect-error extra field consumed by the Work Planner
     slot: row.time_slot ?? undefined,
     // The internal Supabase ids (handy for updates); not part of the UI type.
+    // @ts-expect-error attach internal ids for service use
     _id: row.id,
+    // @ts-expect-error
     _customerId: row.customer_id,
   };
 }
@@ -248,7 +249,7 @@ export async function backfillTicketLocations(): Promise<{ scanned: number; upda
     throw new Error(error.message);
   }
 
-  const rows = (data ?? []) as unknown as Array<{
+  const rows = (data ?? []) as Array<{
     id: string;
     location: string | null;
     customer: { zip: string | null; city: string | null; state: string | null } | null;
@@ -378,6 +379,7 @@ export async function createTicket(input: Partial<Ticket>): Promise<Ticket> {
       product_type: input.productType ?? null,
       purchase_date: input.purchaseDate || null,
       status: input.status ?? "CSR-Needs Scheduling",
+      technician: input.technician || null,
       part_order: input.partOrder ?? null,
       diagnosed: bool(input.diagnosed),
       customer_pref: bool(input.customerPref),
@@ -891,6 +893,63 @@ export async function getLatestVisitTechnicianByTicketIds(
     const tech = String((row as any).technician ?? "").trim();
     if (!tid || !tech) continue;
     if (!out.has(tid)) out.set(tid, tech);
+  }
+  return out;
+}
+
+/**
+ * Bulk-fetch full visit rows (not a derived summary) for a set of tickets,
+ * keyed by ticket_id. Used by exports/reports that need the complete
+ * Visit Log detail for many tickets at once — a single `.in()` query
+ * instead of calling `getTicketVisits` once per ticket, which would be an
+ * N+1 query for every ticket in the export.
+ */
+export async function getVisitsByTicketIds(ticketIds: string[]): Promise<Map<string, UIVisit[]>> {
+  const out = new Map<string, UIVisit[]>();
+  const uniq = Array.from(new Set(ticketIds.filter(Boolean)));
+  if (uniq.length === 0) return out;
+  const { data, error } = await supabase
+    .from("visits")
+    .select("*")
+    .in("ticket_id", uniq)
+    .order("created_at", { ascending: false });
+  if (error) {
+    console.error("getVisitsByTicketIds error:", error.message);
+    return out;
+  }
+  for (const row of data ?? []) {
+    const tid = (row as any).ticket_id as string | null;
+    if (!tid) continue;
+    const list = out.get(tid) ?? [];
+    list.push(rowToVisit(row));
+    out.set(tid, list);
+  }
+  return out;
+}
+
+/**
+ * Bulk-fetch full part rows for a set of tickets, keyed by ticket_id.
+ * Same rationale as `getVisitsByTicketIds` — one query for the whole
+ * export batch instead of one per ticket.
+ */
+export async function getPartsByTicketIds(ticketIds: string[]): Promise<Map<string, UIPartRow[]>> {
+  const out = new Map<string, UIPartRow[]>();
+  const uniq = Array.from(new Set(ticketIds.filter(Boolean)));
+  if (uniq.length === 0) return out;
+  const { data, error } = await supabase
+    .from("parts")
+    .select("*")
+    .in("ticket_id", uniq);
+  if (error) {
+    console.error("getPartsByTicketIds error:", error.message);
+    return out;
+  }
+  for (const row of data ?? []) {
+    const tid = (row as any).ticket_id as string | null;
+    if (!tid) continue;
+    const list = out.get(tid) ?? [];
+    list.push(rowToPart(row));
+    out.set(tid, list);
   }
   return out;
 }

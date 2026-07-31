@@ -317,6 +317,61 @@ export async function getNsaCommunications(dispatchNumber: string): Promise<NsaC
   return Array.isArray(data) ? data : [];
 }
 
+export interface NsaRunningNote {
+  date: string;
+  body: string;
+  addedBy: string;
+  isInternal: boolean;
+}
+
+/**
+ * NSA's "Communication" tab (on their own website) merges two separate API
+ * endpoints — confirmed by comparing a real dispatch's tab against both raw
+ * responses: getCommunications (calls/texts, direction + type tagged) and
+ * getNotes (free-text service-order notes, no direction/type). Mirroring
+ * both here, normalized into the same shape ServicePower's Running Notes
+ * use (see fetchServicePowerNotes in servicePowerNotes.ts), so the ticket
+ * detail page's Customer Notes / Running Notes section can display either
+ * source interchangeably. isInternal is always false — NSA has no
+ * internal/external distinction the way SP does.
+ */
+export async function fetchNsaRunningNotes(dispatchNumber: string): Promise<{
+  success: boolean;
+  notes: NsaRunningNote[];
+  error?: string;
+}> {
+  const { reportApiHealth } = await import("./apiHealth");
+  try {
+    const [comms, serviceNotes] = await Promise.all([
+      getNsaCommunications(dispatchNumber),
+      getNsaNotes(dispatchNumber),
+    ]);
+    const fromComms: NsaRunningNote[] = comms.map((c) => {
+      const label = [c.directionDesc, c.typeDesc].filter(Boolean).join(" ");
+      const body = label ? `[${label}] ${c.notes ?? ""}`.trim() : (c.notes ?? "").trim();
+      return {
+        date: c.timeStamp ?? "",
+        body,
+        addedBy: c.createUserName || c.contactee || "NSA",
+        isInternal: false,
+      };
+    });
+    const fromNotes: NsaRunningNote[] = serviceNotes.map((n) => ({
+      date: n.timeStamp ?? "",
+      body: (n.notes ?? "").trim(),
+      addedBy: n.createUserName || "NSA",
+      isInternal: false,
+    }));
+    const notes = [...fromComms, ...fromNotes].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+    reportApiHealth("nsa.fetchCommunications", "ok");
+    return { success: true, notes };
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    reportApiHealth("nsa.fetchCommunications", { error });
+    return { success: false, notes: [], error };
+  }
+}
+
 /** Returns array of new communication log IDs. */
 export async function addNsaCommunications(
   dispatchNumber: string,

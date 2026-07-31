@@ -1,17 +1,29 @@
 /**
  * NotificationsMenu — bell icon in AppHeader with a dropdown of recent
- * per-employee notifications.
+ * notifications, merged from three sources:
  *
- * Backed by the real Firestore notification feed (notifications/{uid}/items,
- * see src/lib/firebase/notifications.ts) via subscribeNotifications — this
- * is the same feed already fed by restock alerts, cross-inventory requests,
- * and (as of this change) Warning/Mistake Issued notices. Falls back to a
- * small set of demo entries only when there's no signed-in Firebase uid
- * (e.g. Firebase isn't configured in this environment), so the panel isn't
- * permanently broken there — demo and real data are never mixed together.
+ *  1. "system" kind DMs sent to the caller (e.g. Attendance Monitoring's
+ *     "Notify Individual" / "Notify Team Lead" alerts — see
+ *     AttendanceMonitoringPage.tsx). Read state is the same per-thread
+ *     message_reads pointer the Messages menu uses, so reading one here
+ *     also clears its unread count there.
+ *  2. The dedicated `notifications` table (see migration 0035) — used by
+ *     alerts that should NEVER show up in the internal messenger (e.g.
+ *     "new employee request submitted" pinging HR/Finance/Admin). These
+ *     can carry a `linkTo` so clicking one navigates straight to the
+ *     relevant page.
+ *  3. HR only: a realtime Firestore subscription (notifications/{uid}/items
+ *     via subscribeNotifications) — this is the existing
+ *     sendNotificationToRole()/users_index Firestore architecture (also used
+ *     by e.g. PartInventory's cross-inventory alerts), and is how the
+ *     Jotform webhook (api/jotform.ts) delivers "New Form Submitted" pings
+ *     since a Cloudflare Worker can't run the Supabase-scoped, session-based
+ *     write path the other two sources use. Chimes on genuinely new arrivals
+ *     (not on the first snapshot after subscribing).
  */
-import { useState, useEffect } from "react";
-import { Bell, CheckCheck, Package, Clock, ShieldAlert, Wrench, AlertTriangle } from "lucide-react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { Bell, CheckCheck } from "lucide-react";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -21,44 +33,38 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useAuth } from "@/lib/auth";
-import { subscribeNotifications, markNotificationRead, markAllNotificationsRead, type AppNotification } from "@/lib/firebase/notifications";
+import { getMyProfileId, getMyRoles } from "@/lib/supabase/users";
+import {
+  getMySystemNotifications,
+  markThreadRead,
+  subscribeToAllNewMessages,
+  type SystemNotification,
+} from "@/lib/supabase/messaging";
+import {
+  getMyNotifications,
+  markNotificationRead,
+  markAllNotificationsRead,
+  subscribeToMyNotifications,
+  type NotificationRow,
+} from "@/lib/supabase/notifications";
+import {
+  subscribeNotifications,
+  markNotificationRead as markFirestoreNotificationRead,
+  markAllNotificationsRead as markAllFirestoreNotificationsRead,
+  type AppNotification,
+} from "@/lib/firebase/notifications";
+import { playNotifySound } from "@/lib/notifySound";
 
-interface DisplayNotif {
+interface MergedNotif {
   id: string;
-  kind: string;
-  title: string;
+  source: "dm" | "table" | "firestore";
+  dmThreadId?: string;
+  senderName: string | null;
   body: string;
-  ticketNo?: string;
-  isRead: boolean;
   createdAt: string;
+  isRead: boolean;
+  linkTo: string | null;
 }
-
-const KIND_ICON: Record<string, React.ElementType> = {
-  system: Bell,
-  part_status_change: Package,
-  cross_inventory_request: Wrench,
-  tech_eod_reminder: Clock,
-  restock_auto: Package,
-  claim_part_tamper: ShieldAlert,
-  warning_mistake_issued: AlertTriangle,
-};
-
-const KIND_COLOR: Record<string, string> = {
-  system: "text-blue-300 bg-blue-400/10 border-blue-400/20",
-  part_status_change: "text-amber-300 bg-amber-400/10 border-amber-400/20",
-  cross_inventory_request: "text-violet-300 bg-violet-400/10 border-violet-400/20",
-  tech_eod_reminder: "text-cyan-300 bg-cyan-400/10 border-cyan-400/20",
-  restock_auto: "text-green-300 bg-green-400/10 border-green-400/20",
-  claim_part_tamper: "text-rose-300 bg-rose-400/10 border-rose-400/20",
-  warning_mistake_issued: "text-amber-300 bg-amber-400/10 border-amber-400/20",
-};
-
-const DEMO_NOTIFS: DisplayNotif[] = [
-  { id: "1", kind: "restock_auto", title: "Part back in stock", body: "Ticket #054822474136 — Drain Pump marked as Restock. Status updated to Back in Stock.", ticketNo: "054822474136", isRead: false, createdAt: new Date(Date.now() - 600000).toISOString() },
-  { id: "2", kind: "cross_inventory_request", title: "Cross-branch inventory request", body: "demo@demo.com is attempting to use 'Control Board' from Nashville's inventory. Please locate and ship.", isRead: false, createdAt: new Date(Date.now() - 1800000).toISOString() },
-  { id: "3", kind: "tech_eod_reminder", title: "End-of-day checklist reminder", body: "Please make sure all tickets, part statuses, and visit logs are updated before end of day.", isRead: true, createdAt: new Date(Date.now() - 7200000).toISOString() },
-  { id: "4", kind: "system", title: "System notice", body: "This is a demo environment. No data is saved to any database.", isRead: true, createdAt: new Date(Date.now() - 86400000).toISOString() },
-];
 
 function timeAgo(iso: string) {
   const diff = Date.now() - new Date(iso).getTime();
@@ -71,48 +77,200 @@ function timeAgo(iso: string) {
 }
 
 export function NotificationsMenu() {
-  const { uid } = useAuth();
-  const [realNotifs, setRealNotifs] = useState<AppNotification[] | null>(null);
-  const [demoNotifs, setDemoNotifs] = useState<DisplayNotif[]>(DEMO_NOTIFS);
+  const { uid, ready, role } = useAuth();
+  const navigate = useNavigate();
+  // HR either as the primary role or as a sub-role (extra_roles) — useAuth()
+  // only carries the primary role, so we resolve extra_roles separately.
+  const [isHr, setIsHr] = useState(false);
+  const [profileId, setProfileId] = useState<string | null>(null);
+  const [dmNotifs, setDmNotifs] = useState<SystemNotification[]>([]);
+  const [tableNotifs, setTableNotifs] = useState<NotificationRow[]>([]);
+  const [firestoreNotifs, setFirestoreNotifs] = useState<AppNotification[]>([]);
+  const seenFirestoreIds = useRef<Set<string> | null>(null);
   const [open, setOpen] = useState(false);
 
+  const load = useCallback(async (pid: string) => {
+    try {
+      const [dmRows, tableRows] = await Promise.all([
+        getMySystemNotifications(pid),
+        getMyNotifications(pid),
+      ]);
+      setDmNotifs(dmRows);
+      setTableNotifs(tableRows);
+    } catch (err) {
+      console.error("Failed to load notifications:", err);
+    }
+  }, []);
+
   useEffect(() => {
-    if (!uid) { setRealNotifs(null); return; }
-    return subscribeNotifications(uid, setRealNotifs);
-  }, [uid]);
+    if (!ready || !uid) return;
+    let cancelled = false;
+    getMyProfileId(uid).then((pid) => {
+      if (cancelled || !pid) return;
+      setProfileId(pid);
+      load(pid);
+    });
+    return () => { cancelled = true; };
+  }, [ready, uid, load]);
 
-  // realNotifs stays null until the subscription's first snapshot fires —
-  // only fall back to demo data when there's genuinely no real feed (no
-  // uid), not just while the first snapshot is still in flight... but
-  // showing demo briefly during that flight is preferable to a flash of
-  // an empty menu, so we key off `uid` alone.
-  const isDemo = !uid;
-  const notifs: DisplayNotif[] = isDemo ? demoNotifs : (realNotifs ?? []);
-  const unread = notifs.filter(n => !n.isRead).length;
-
-  const markRead = async (id: string) => {
-    if (isDemo) {
-      setDemoNotifs(prev => prev.map(n => n.id === id ? { ...n, isRead: true } : n));
+  // Resolve HR status from primary role OR extra_roles (sub-roles) — a user
+  // whose HR access comes from extra_roles wouldn't be caught by useAuth().role.
+  useEffect(() => {
+    if (!ready || !uid) {
+      setIsHr(false);
       return;
     }
-    try {
-      await markNotificationRead(uid!, id);
-    } catch (err) {
-      console.error("Failed to mark notification read:", err);
+    if ((role ?? "").toUpperCase() === "HR") {
+      setIsHr(true);
+      return;
+    }
+    let cancelled = false;
+    getMyRoles(uid).then(({ extraRoles }) => {
+      if (!cancelled) setIsHr(extraRoles.some((r) => (r ?? "").toUpperCase() === "HR"));
+    });
+    return () => { cancelled = true; };
+  }, [ready, uid, role]);
+
+  // Live-append any new system DM addressed to me.
+  useEffect(() => {
+    if (!profileId) return;
+    const unsubscribe = subscribeToAllNewMessages((row) => {
+      if (row.kind !== "system" || row.sender_id === profileId || !row.dm_thread_id) return;
+      load(profileId);
+    });
+    return unsubscribe;
+  }, [profileId, load]);
+
+  // Live-append any new table-based notification addressed to me.
+  useEffect(() => {
+    if (!profileId) return;
+    const unsubscribe = subscribeToMyNotifications(profileId, () => load(profileId));
+    return unsubscribe;
+  }, [profileId, load]);
+
+  // HR only: realtime Firestore subscription (see file header). Re-subscribes
+  // only when isHr or uid actually changes; the cleanup below always
+  // unsubscribes the previous listener first, so there's never more than one
+  // live listener for a given mount.
+  useEffect(() => {
+    if (!isHr || !uid) {
+      setFirestoreNotifs([]);
+      return;
+    }
+    seenFirestoreIds.current = null;
+    const unsubscribe = subscribeNotifications(uid, (items) => {
+      setFirestoreNotifs(items);
+      if (seenFirestoreIds.current === null) {
+        // First snapshot after (re)subscribing — establish the baseline
+        // without chiming for notifications that already existed.
+        seenFirestoreIds.current = new Set(items.map((i) => i.id));
+      } else {
+        const hasNewArrival = items.some((i) => !seenFirestoreIds.current!.has(i.id));
+        seenFirestoreIds.current = new Set(items.map((i) => i.id));
+        if (hasNewArrival) playNotifySound();
+      }
+    });
+    return unsubscribe;
+  }, [isHr, uid]);
+
+  const notifs: MergedNotif[] = useMemo(() => {
+    const merged: MergedNotif[] = [
+      ...dmNotifs.map((n): MergedNotif => ({
+        id: `dm-${n.id}`,
+        source: "dm",
+        dmThreadId: n.dmThreadId,
+        senderName: n.senderName,
+        body: n.body,
+        createdAt: n.createdAt,
+        isRead: n.isRead,
+        linkTo: null,
+      })),
+      ...tableNotifs.map((n): MergedNotif => ({
+        id: `tbl-${n.id}`,
+        source: "table",
+        senderName: n.senderName,
+        body: n.body,
+        createdAt: n.createdAt,
+        isRead: n.isRead,
+        linkTo: n.linkTo,
+      })),
+      ...firestoreNotifs.map((n): MergedNotif => ({
+        id: `fs-${n.id}`,
+        source: "firestore",
+        senderName: n.title,
+        body: n.body,
+        createdAt: n.createdAt,
+        isRead: n.isRead,
+        linkTo: n.link ?? null,
+      })),
+    ];
+    return merged.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [dmNotifs, tableNotifs, firestoreNotifs]);
+
+  const unread = notifs.filter((n) => !n.isRead).length;
+
+  const markRead = async (n: MergedNotif) => {
+    if (n.isRead) return;
+    if (n.source === "firestore") {
+      if (!uid) return;
+      const rawId = n.id.replace(/^fs-/, "");
+      setFirestoreNotifs((prev) => prev.map((x) => (x.id === rawId ? { ...x, isRead: true } : x)));
+      try {
+        await markFirestoreNotificationRead(uid, rawId);
+      } catch (err) {
+        console.error("Failed to mark notification read:", err);
+      }
+      return;
+    }
+    if (!profileId) return;
+    if (n.source === "dm") {
+      setDmNotifs((prev) => prev.map((x) => (x.dmThreadId === n.dmThreadId ? { ...x, isRead: true } : x)));
+      try {
+        await markThreadRead({ profileId, dmThreadId: n.dmThreadId! });
+      } catch (err) {
+        console.error("Failed to mark notification read:", err);
+      }
+    } else {
+      const rawId = n.id.replace(/^tbl-/, "");
+      setTableNotifs((prev) => prev.map((x) => (x.id === rawId ? { ...x, isRead: true } : x)));
+      try {
+        await markNotificationRead(rawId);
+      } catch (err) {
+        console.error("Failed to mark notification read:", err);
+      }
     }
   };
 
   const markAll = async (e: Event) => {
     e.preventDefault();
-    if (isDemo) {
-      setDemoNotifs(prev => prev.map(n => ({ ...n, isRead: true })));
+    setFirestoreNotifs((prev) => prev.map((x) => ({ ...x, isRead: true })));
+    const firestoreMark = uid && firestoreNotifs.length > 0 ? markAllFirestoreNotificationsRead(uid) : Promise.resolve();
+    if (!profileId) {
+      try {
+        await firestoreMark;
+      } catch (err) {
+        console.error("Failed to mark all notifications read:", err);
+      }
       return;
     }
+    const threadIds = Array.from(new Set(dmNotifs.map((n) => n.dmThreadId)));
+    setDmNotifs((prev) => prev.map((x) => ({ ...x, isRead: true })));
+    setTableNotifs((prev) => prev.map((x) => ({ ...x, isRead: true })));
     try {
-      await markAllNotificationsRead(uid!);
+      await Promise.all([
+        ...threadIds.map((dmThreadId) => markThreadRead({ profileId, dmThreadId })),
+        markAllNotificationsRead(profileId),
+        firestoreMark,
+      ]);
     } catch (err) {
       console.error("Failed to mark all notifications read:", err);
     }
+  };
+
+  const handleSelect = (n: MergedNotif) => {
+    markRead(n);
+    setOpen(false);
+    if (n.linkTo) navigate({ to: n.linkTo });
   };
 
   return (
@@ -148,30 +306,30 @@ export function NotificationsMenu() {
         <DropdownMenuSeparator className="bg-[var(--color-panel-border)]" />
         {notifs.length === 0 ? (
           <div className="px-3 py-6 text-center text-xs text-muted-foreground">No notifications yet.</div>
-        ) : notifs.map(n => {
-          const Icon = KIND_ICON[n.kind] ?? Bell;
-          const color = KIND_COLOR[n.kind] ?? KIND_COLOR.system;
-          return (
-            <DropdownMenuItem key={n.id} onSelect={() => { markRead(n.id); setOpen(false); }} className="flex cursor-pointer items-start gap-3 rounded-lg px-3 py-3">
-              <span className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full border ${color}`}><Icon className="h-4 w-4" /></span>
-              <span className="min-w-0 flex-1">
-                <span className="flex items-center justify-between gap-2">
-                  <span className={`truncate text-sm font-semibold ${n.isRead ? "text-muted-foreground" : "text-foreground"}`}>{n.title}</span>
-                  <span className="shrink-0 text-[11px] text-muted-foreground">{timeAgo(n.createdAt)}</span>
-                </span>
-                <span className={`mt-0.5 line-clamp-2 block text-xs leading-5 ${n.isRead ? "text-muted-foreground" : "text-foreground/70"}`}>{n.body}</span>
-                {n.ticketNo && <span className="mt-1 inline-block rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-mono text-blue-600 dark:text-blue-300">#{n.ticketNo}</span>}
+        ) : notifs.map(n => (
+          <DropdownMenuItem key={n.id} onSelect={() => handleSelect(n)} className="flex cursor-pointer items-start gap-3 rounded-lg px-3 py-3">
+            <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full border text-blue-300 bg-blue-400/10 border-blue-400/20">
+              <Bell className="h-4 w-4" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="flex items-center justify-between gap-2">
+                <span className={`truncate text-sm font-semibold ${n.isRead ? "text-muted-foreground" : "text-foreground"}`}>{n.senderName || "System"}</span>
+                <span className="shrink-0 text-[11px] text-muted-foreground">{timeAgo(n.createdAt)}</span>
               </span>
-              {!n.isRead && <span className="mt-2 h-2 w-2 shrink-0 rounded-full bg-blue-400" />}
-            </DropdownMenuItem>
-          );
-        })}
-        {isDemo && (
-          <>
-            <DropdownMenuSeparator className="bg-[var(--color-panel-border)]" />
-            <div className="px-3 pb-1 pt-1.5 text-[11px] text-muted-foreground text-center">Demo mode — notifications are local only.</div>
-          </>
-        )}
+              <span className={`mt-0.5 line-clamp-2 block text-xs leading-5 ${n.isRead ? "text-muted-foreground" : "text-foreground/70"}`}>{n.body}</span>
+            </span>
+            {!n.isRead && <span className="mt-2 h-2 w-2 shrink-0 rounded-full bg-blue-400" />}
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator className="bg-[var(--color-panel-border)]" />
+        <Link
+          to="/m/$module/$submodule"
+          params={{ module: "admin", submodule: "internal-message-support" }}
+          onClick={() => setOpen(false)}
+          className="block px-3 py-2 text-center text-[11px] text-blue-400 hover:text-blue-300"
+        >
+          View all messages
+        </Link>
       </DropdownMenuContent>
     </DropdownMenu>
   );

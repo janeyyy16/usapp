@@ -18,9 +18,11 @@ import { supabase } from "./client";
 import { getCompanyUsers as getFirestoreCompanyUsers } from "@/lib/firebase/users";
 
 export type UserRole =
-  | "SUPERADMIN"    // Access to all companies, can create/manage admins
+  | "SUPERSUPERADMIN" // Platform-level: access to all companies, creates/manages companies+admins
+  | "SUPERADMIN"    // Per-company: same as ADMIN, plus can edit its own company's record
   | "ADMIN"         // Company admin, full access to company data
   | "MANAGER"       // Can manage tickets, employees, reports
+  | "SENIOR_MANAGER" // Senior tier of MANAGER (generic, not branch/BizOps-specific)
   | "CSR"           // Customer Service Rep, ticket management
   | "TECHNICIAN"    // Field technician
   | "TECHNICIAN_MANAGER" // Field technician manager (supervises techs)
@@ -31,8 +33,8 @@ export type UserRole =
   | "FINANCE"       // Financial reports and billing
   | "CSR_AGENT" | "CSR_TEAM_LEADER" | "CSR_MANAGER"
   | "BRANCH_MANAGER" | "SENIOR_BRANCH_MANAGER" | "CLAIMS_MANAGER"
-  | "PARTS_MANAGER" | "BIZOPS_MANAGER" | "BIZOPS_SENIOR_MANAGER" | "CLAIMS"
-  | "TRIAGE_USER" | "TRIAGE_MANAGER";
+  | "PARTS_MANAGER" | "PARTS_TEAM_LEADER" | "BIZOPS_MANAGER" | "BIZOPS_SENIOR_MANAGER" | "CLAIMS"
+  | "TRIAGE_USER" | "TRIAGE_MANAGER" | "TECHNICAL_DIRECTOR" | "TECHNICAL_ASSISTANT_DIRECTOR" | "CLAIMS_TEAM_LEADER";
 
 export interface ProfileRow {
   id: string;
@@ -54,10 +56,16 @@ export interface ProfileRow {
   email_report_location: string | null;
   sms_status: string | null;
   off_days: number[] | null;
-  work_plan: Record<string, any> | null;
   required_check_in: string | null;
   required_check_out: string | null;
+  /** Explicit override for the Time In/Out-derived scheduled shift length — see migration 0109. */
+  working_hours: number | null;
+  /** How many minutes this person's meal break should be. Not enforced anywhere yet, just stored/shown. */
+  meal_minutes: number | null;
+  work_plan: Record<string, any> | null;
   is_active: boolean;
+  /** Set by AdminUserManagementPage.tsx's Reset Password actions — see migration 0103. Forces a redirect to /profile until they change it (__root.tsx). */
+  must_change_password: boolean;
   created_at: string;
 }
 
@@ -74,19 +82,27 @@ export function generateUsername(displayName: string): string {
 /**
  * Get the profile for a Firebase uid (for login). Returns the auth-relevant fields.
  * Uses the company legacy_code as the companyId the rest of the app expects.
+ * companyLoginAlias is a second, optional string that also works as the
+ * "Company ID" typed at login (see migration 0066).
  */
 export async function getProfileForLogin(firebaseUid: string): Promise<{
   email: string;
   companyId: string;
+  companyLoginAlias: string | null;
+  /** false only when this profile's company has been frozen (companies.is_active
+   *  = false) — true (never blocks) when there's no company at all, i.e. the
+   *  platform SUPERSUPERADMIN, who isn't subject to company freezes. */
+  companyIsActive: boolean;
   role: string;
   displayName: string;
   isActive: boolean;
   workPlan: Record<string, any> | null;
   branchAccess: string | null;
+  mustChangePassword: boolean;
 } | null> {
   const { data, error } = await supabase
     .from("profiles")
-    .select("email, role, display_name, is_active, work_plan, branch_access, companies:company_id (legacy_code)")
+    .select("email, role, display_name, is_active, work_plan, branch_access, must_change_password, companies:company_id (legacy_code, login_alias, is_active)")
     .eq("firebase_uid", firebaseUid)
     .maybeSingle();
 
@@ -97,15 +113,38 @@ export async function getProfileForLogin(firebaseUid: string): Promise<{
   if (!data) return null;
 
   const legacyCode = (data as any).companies?.legacy_code ?? "";
+  const loginAlias = (data as any).companies?.login_alias ?? null;
+  const companyIsActive = (data as any).companies?.is_active ?? true;
   return {
     email: data.email,
     companyId: legacyCode,
+    companyLoginAlias: loginAlias,
+    companyIsActive,
     role: data.role,
     displayName: data.display_name ?? data.email,
     isActive: data.is_active,
     workPlan: (data as any).work_plan ?? null,
     branchAccess: (data as any).branch_access ?? null,
+    mustChangePassword: (data as any).must_change_password ?? false,
   };
+}
+
+/**
+ * Force (or clear) "must change password on next login" for one or more
+ * profiles — see migration 0103. Used by AdminUserManagementPage.tsx's
+ * Reset Password / Reset All Passwords actions (value=true), and by
+ * profile.tsx after a successful self-service password change (value=false).
+ */
+export async function setMustChangePassword(profileIds: string[], value: boolean): Promise<void> {
+  if (profileIds.length === 0) return;
+  const { error } = await supabase.from("profiles").update({ must_change_password: value }).in("id", profileIds);
+  if (error) throw new Error(error.message);
+}
+
+/** Clears the caller's own must_change_password flag by Firebase uid — used right after a successful self-service password change. */
+export async function clearMyMustChangePassword(firebaseUid: string): Promise<void> {
+  const { error } = await supabase.from("profiles").update({ must_change_password: false }).eq("firebase_uid", firebaseUid);
+  if (error) throw new Error(error.message);
 }
 
 /** Update a profile's last login timestamp (best-effort). */
@@ -142,6 +181,24 @@ export async function getUserByUsername(
   // RPC returns the email string (or null) for an active matching profile.
   if (!data) return null;
   return { email: data as string, isActive: true };
+}
+
+/**
+ * Is this Company ID currently valid for any company? Called only after
+ * getUserByUsername comes back empty, to tell the user "wrong company
+ * code" apart from "wrong username" instead of always blaming the
+ * username.
+ */
+export async function isValidCompanyCode(companyCode: string): Promise<boolean> {
+  const { data, error } = await supabase.rpc("login_company_code_is_valid", {
+    p_company_code: companyCode,
+  });
+  if (error) {
+    console.error("isValidCompanyCode RPC error:", error);
+    // Fail open — don't invent a "wrong company code" message off a broken check.
+    return true;
+  }
+  return Boolean(data);
 }
 
 /**
@@ -182,18 +239,111 @@ export async function getMyRoles(firebaseUid: string): Promise<{ role: string | 
   return { role: (data?.role as string | undefined) ?? null, extraRoles: (data?.extra_roles as string[] | null) ?? [] };
 }
 
+/**
+ * The caller's own editable account fields — used by the self-service
+ * /profile page. Distinct from getProfileForLogin (login-time only, no
+ * phone/department/branch) and getMyProfileSchedule (schedule fields only).
+ */
+export async function getMyFullProfile(firebaseUid: string): Promise<{
+  profileId: string;
+  email: string;
+  displayName: string;
+  phoneNumber: string;
+  department: string;
+  assignedBranch: string;
+  poInitials: string;
+  role: string;
+  requiredCheckIn: string;
+  requiredCheckOut: string;
+  workingHours: number | null;
+  mealMinutes: number | null;
+} | null> {
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("id, email, display_name, phone_number, department, assigned_branch, po_initials, role, required_check_in, required_check_out")
+    .eq("firebase_uid", firebaseUid)
+    .maybeSingle();
+  if (error) {
+    console.error("getMyFullProfile error:", error.message);
+    return null;
+  }
+  if (!data) return null;
+
+  // Fetched separately, best-effort — if migration 0109 hasn't been applied
+  // yet (or any future optional column has an issue), that must never take
+  // down the rest of this profile (name/phone/department/etc), which is
+  // exactly what happened when this was one combined select: a single
+  // column-not-found error nulled out the ENTIRE profile, breaking Save
+  // ("Could not resolve your profile") for fields that have nothing to do
+  // with Working Hours/Meal Time.
+  let workingHours: number | null = null;
+  let mealMinutes: number | null = null;
+  const { data: extra, error: extraError } = await supabase
+    .from("profiles")
+    .select("working_hours, meal_minutes")
+    .eq("id", data.id)
+    .maybeSingle();
+  if (extraError) {
+    console.error("getMyFullProfile (working_hours/meal_minutes) error:", extraError.message);
+  } else {
+    workingHours = extra?.working_hours ?? null;
+    mealMinutes = extra?.meal_minutes ?? null;
+  }
+
+  return {
+    profileId: data.id,
+    email: data.email,
+    displayName: data.display_name ?? "",
+    phoneNumber: data.phone_number ?? "",
+    department: data.department ?? "",
+    assignedBranch: data.assigned_branch ?? "",
+    poInitials: data.po_initials ?? "",
+    role: data.role,
+    requiredCheckIn: data.required_check_in ?? "",
+    requiredCheckOut: data.required_check_out ?? "",
+    workingHours,
+    mealMinutes,
+  };
+}
+
 export async function getCompanyUsers(): Promise<ProfileRow[]> {
   const { data, error } = await supabase
     .from("profiles")
-    .select("id, firebase_uid, company_id, email, username, display_name, role, extra_roles, phone_number, department, manager_name, assigned_branch, branch_access, technician_id, po_initials, off_days, work_plan, required_check_in, required_check_out, is_active, created_at")
-    .neq("role", "SUPERADMIN")
+    .select("id, firebase_uid, company_id, email, username, display_name, role, extra_roles, phone_number, department, manager_name, assigned_branch, branch_access, technician_id, po_initials, off_days, work_plan, required_check_in, required_check_out, is_active, must_change_password, created_at")
+    // Only the platform-level SUPERSUPERADMIN is excluded here — the new
+    // per-company SUPERADMIN role is a real company employee and should
+    // show up in the roster like any ADMIN.
+    .neq("role", "SUPERSUPERADMIN")
     .order("display_name", { ascending: true });
 
   if (error) {
     console.error("getCompanyUsers error:", error.message);
     throw new Error(error.message);
   }
-  return (data ?? []) as ProfileRow[];
+  const rows = (data ?? []) as ProfileRow[];
+
+  // Fetched separately, best-effort — see getMyFullProfile's comment on why
+  // working_hours/meal_minutes (migration 0109) must never be combined into
+  // the main select: this function is used across many pages (User
+  // Management, Payroll, etc), so a missing/future column here must not be
+  // able to break all of them at once.
+  if (rows.length > 0) {
+    const { data: extraRows, error: extraError } = await supabase
+      .from("profiles")
+      .select("id, working_hours, meal_minutes")
+      .in("id", rows.map((r) => r.id));
+    if (extraError) {
+      console.error("getCompanyUsers (working_hours/meal_minutes) error:", extraError.message);
+    } else {
+      const extraById = new Map((extraRows ?? []).map((r: any) => [r.id, r]));
+      for (const row of rows) {
+        const extra = extraById.get(row.id);
+        row.working_hours = extra?.working_hours ?? null;
+        row.meal_minutes = extra?.meal_minutes ?? null;
+      }
+    }
+  }
+  return rows;
 }
 
 export interface EmployeeInfo {
@@ -337,6 +487,8 @@ export async function createCompanyUser(input: {
   poInitials?: string;
   requiredCheckIn?: string;
   requiredCheckOut?: string;
+  workingHours?: number;
+  mealMinutes?: number;
 }): Promise<string> {
   // --- 1. Create the Firebase Auth credential on a SECONDARY app ---
   const primaryApp = getApps()[0];
@@ -393,6 +545,8 @@ export async function createCompanyUser(input: {
     po_initials: input.poInitials ?? "",
     required_check_in: input.requiredCheckIn ?? "",
     required_check_out: input.requiredCheckOut ?? "",
+    working_hours: input.workingHours ?? null,
+    meal_minutes: input.mealMinutes ?? null,
     is_active: true,
   });
 
@@ -405,15 +559,92 @@ export async function createCompanyUser(input: {
 }
 
 /**
+ * Create the Supabase profile for an admin created through SuperAdmin's
+ * Firestore-based Add Admin flow (createUserAccount in firebase/users.ts).
+ * Without this, the admin has no Supabase profile at all — every RLS
+ * policy resolves the caller's company through profiles (auth_company_id()),
+ * so they'd log in fine but see no tickets/users/anything Supabase-backed.
+ *
+ * Unlike createCompanyUser() above, this targets an ARBITRARY company (the
+ * one SuperAdmin picked), not the caller's own — only a SuperAdmin session
+ * can do this (profiles_insert's RLS check allows is_superadmin() with any
+ * company_id; a regular admin/manager session would be rejected).
+ */
+export async function createSupabaseAdminProfile(input: {
+  firebaseUid: string;
+  email: string;
+  displayName: string;
+  role: UserRole;
+  /** Omit only for SUPERSUPERADMIN — the platform-level role isn't tied to
+   *  any one company (see 0099_role_hierarchy_split.sql's set_company_id()).
+   *  Every other role must pass a real company. */
+  companyLegacyCode?: string;
+  phoneNumber?: string;
+}): Promise<void> {
+  let companyId: string | null = null;
+  if (input.companyLegacyCode) {
+    const { data: company, error: companyErr } = await supabase
+      .from("companies")
+      .select("id")
+      .eq("legacy_code", input.companyLegacyCode)
+      .maybeSingle();
+    if (companyErr) throw new Error(companyErr.message);
+    if (!company) {
+      throw new Error(`No Supabase company found for '${input.companyLegacyCode}'`);
+    }
+    companyId = company.id;
+  } else if (input.role !== "SUPERSUPERADMIN") {
+    throw new Error("A company is required for every role except Super Super Admin");
+  }
+
+  const username = generateUsername(input.displayName);
+  const { error } = await supabase.from("profiles").insert({
+    firebase_uid: input.firebaseUid,
+    company_id: companyId,
+    email: input.email,
+    username,
+    display_name: input.displayName,
+    role: input.role,
+    phone_number: input.phoneNumber ?? "",
+    is_active: true,
+  });
+  if (error) throw new Error(error.message);
+}
+
+/**
  * Delete a user's profile from Supabase (company-scoped via RLS).
  * Note: this removes the Supabase profile only. The Firebase Auth credential
  * (if any) should be removed separately in the Firebase console or via admin SDK.
  */
 export async function deleteCompanyUser(profileId: string): Promise<void> {
+  // manager_name is free text (not a real foreign key to another profile),
+  // so nothing clears it automatically - without this, everyone who had
+  // this person as their manager would keep showing that name forever,
+  // pointing at someone who no longer exists. Capture it before the delete
+  // since there's nothing left to look up afterward.
+  const { data: deletedProfile } = await supabase
+    .from("profiles")
+    .select("display_name")
+    .eq("id", profileId)
+    .maybeSingle();
+
   const { error } = await supabase.from("profiles").delete().eq("id", profileId);
   if (error) {
     console.error("deleteCompanyUser error:", error.message);
     throw new Error(error.message);
+  }
+
+  const deletedDisplayName = deletedProfile?.display_name;
+  if (deletedDisplayName) {
+    const { error: clearErr } = await supabase
+      .from("profiles")
+      .update({ manager_name: null })
+      .eq("manager_name", deletedDisplayName);
+    // Best-effort - the delete itself already succeeded and is the
+    // primary action; don't fail the whole operation over this cleanup.
+    if (clearErr) {
+      console.warn("deleteCompanyUser: failed to clear manager_name references:", clearErr.message);
+    }
   }
 }
 
@@ -425,14 +656,31 @@ export async function deleteCompanyUser(profileId: string): Promise<void> {
 export async function getProfileByUsername(username: string): Promise<ProfileRow | null> {
   const { data, error } = await supabase
     .from("profiles")
-    .select("id, firebase_uid, company_id, email, username, display_name, role, extra_roles, phone_number, department, manager_name, assigned_branch, branch_access, technician_id, po_initials, email_report_location, sms_status, off_days, work_plan, is_active, created_at")
+    .select("id, firebase_uid, company_id, email, username, display_name, role, extra_roles, phone_number, department, manager_name, assigned_branch, branch_access, technician_id, po_initials, email_report_location, sms_status, off_days, work_plan, required_check_in, required_check_out, is_active, created_at")
     .ilike("username", username)
     .maybeSingle();
   if (error) {
     console.error("getProfileByUsername error:", error.message);
     return null;
   }
-  return (data as ProfileRow) ?? null;
+  if (!data) return null;
+
+  // Fetched separately, best-effort — see getMyFullProfile's comment on why
+  // working_hours/meal_minutes (migration 0109) must never be combined into
+  // the main select: a missing/future column there shouldn't be able to null
+  // out this entire profile (breaking the whole employee detail page).
+  const { data: extra, error: extraError } = await supabase
+    .from("profiles")
+    .select("working_hours, meal_minutes")
+    .eq("id", data.id)
+    .maybeSingle();
+  if (extraError) console.error("getProfileByUsername (working_hours/meal_minutes) error:", extraError.message);
+
+  return {
+    ...(data as ProfileRow),
+    working_hours: extra?.working_hours ?? null,
+    meal_minutes: extra?.meal_minutes ?? null,
+  };
 }
 
 /**
@@ -441,6 +689,7 @@ export async function getProfileByUsername(username: string): Promise<ProfileRow
 export async function updateCompanyUser(
   profileId: string,
   fields: Partial<{
+    username: string;
     displayName: string;
     /** Only pass this after the caller has already updated the user's real
      *  Firebase Auth email via /api/admin-update-email — see
@@ -458,6 +707,8 @@ export async function updateCompanyUser(
     poInitials: string;
     requiredCheckIn: string;
     requiredCheckOut: string;
+    workingHours: number | null;
+    mealMinutes: number | null;
     emailReportLocation: string;
     smsStatus: string;
     offDays: number[];
@@ -466,6 +717,7 @@ export async function updateCompanyUser(
   }>
 ): Promise<void> {
   const payload: Record<string, unknown> = {};
+  if (fields.username !== undefined) payload.username = fields.username;
   if (fields.displayName !== undefined) payload.display_name = fields.displayName;
   if (fields.email !== undefined) payload.email = fields.email;
   if (fields.role !== undefined) payload.role = fields.role;
@@ -485,6 +737,8 @@ export async function updateCompanyUser(
   if (fields.poInitials !== undefined) payload.po_initials = fields.poInitials;
   if (fields.requiredCheckIn !== undefined) payload.required_check_in = fields.requiredCheckIn;
   if (fields.requiredCheckOut !== undefined) payload.required_check_out = fields.requiredCheckOut;
+  if (fields.workingHours !== undefined) payload.working_hours = fields.workingHours;
+  if (fields.mealMinutes !== undefined) payload.meal_minutes = fields.mealMinutes;
   if (fields.emailReportLocation !== undefined) payload.email_report_location = fields.emailReportLocation;
   if (fields.smsStatus !== undefined) payload.sms_status = fields.smsStatus;
   if (fields.offDays !== undefined) payload.off_days = fields.offDays;
@@ -494,6 +748,12 @@ export async function updateCompanyUser(
   const { error } = await supabase.from("profiles").update(payload).eq("id", profileId);
   if (error) {
     console.error("updateCompanyUser error:", error.message);
+    // Postgres unique_violation on (company_id, username) - surface this
+    // specific, foreseeable case in plain language instead of the raw
+    // constraint-name error.
+    if (error.code === "23505" && fields.username !== undefined) {
+      throw new Error(`"${fields.username}" is already taken by another user in this company.`);
+    }
     throw new Error(error.message);
   }
 }

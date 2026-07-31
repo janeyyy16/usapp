@@ -24,13 +24,18 @@ import { Route as AnnouncementsRouteImport } from './routes/announcements'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as TicketsMapRouteImport } from './routes/tickets.map'
 import { Route as TicketTicketNoRouteImport } from './routes/ticket.$ticketNo'
+import { Route as SignExternalDocIdRouteImport } from './routes/sign-external.$docId'
+import { Route as SignDocumentDocIdRouteImport } from './routes/sign-document.$docId'
 import { Route as MModuleRouteImport } from './routes/m.$module'
 import { Route as FillW9DocIdRouteImport } from './routes/fill-w9.$docId'
 import { Route as FillW8benDocIdRouteImport } from './routes/fill-w8ben.$docId'
 import { Route as FillW4DocIdRouteImport } from './routes/fill-w4.$docId'
+import { Route as FillFormFormIdRouteImport } from './routes/fill-form.$formId'
 import { Route as EmployeeEmployeeIdRouteImport } from './routes/employee.$employeeId'
 import { Route as CsrAgentAgentIdRouteImport } from './routes/csr-agent.$agentId'
+import { Route as ApplySlugRouteImport } from './routes/apply.$slug'
 import { Route as AdminUsersRouteImport } from './routes/admin.users'
+import { Route as SuperadminCompanyCompanyIdRouteImport } from './routes/superadmin.company.$companyId'
 import { Route as MModuleSubmoduleRouteImport } from './routes/m.$module.$submodule'
 import { Route as MModuleSubmoduleUserIdRouteImport } from './routes/m.$module.$submodule.$userId'
 
@@ -109,6 +114,16 @@ const TicketTicketNoRoute = TicketTicketNoRouteImport.update({
   path: '/ticket/$ticketNo',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SignExternalDocIdRoute = SignExternalDocIdRouteImport.update({
+  id: '/sign-external/$docId',
+  path: '/sign-external/$docId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SignDocumentDocIdRoute = SignDocumentDocIdRouteImport.update({
+  id: '/sign-document/$docId',
+  path: '/sign-document/$docId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const MModuleRoute = MModuleRouteImport.update({
   id: '/m/$module',
   path: '/m/$module',
@@ -129,6 +144,11 @@ const FillW4DocIdRoute = FillW4DocIdRouteImport.update({
   path: '/fill-w4/$docId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const FillFormFormIdRoute = FillFormFormIdRouteImport.update({
+  id: '/fill-form/$formId',
+  path: '/fill-form/$formId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const EmployeeEmployeeIdRoute = EmployeeEmployeeIdRouteImport.update({
   id: '/employee/$employeeId',
   path: '/employee/$employeeId',
@@ -139,11 +159,22 @@ const CsrAgentAgentIdRoute = CsrAgentAgentIdRouteImport.update({
   path: '/csr-agent/$agentId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApplySlugRoute = ApplySlugRouteImport.update({
+  id: '/apply/$slug',
+  path: '/apply/$slug',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AdminUsersRoute = AdminUsersRouteImport.update({
   id: '/admin/users',
   path: '/admin/users',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SuperadminCompanyCompanyIdRoute =
+  SuperadminCompanyCompanyIdRouteImport.update({
+    id: '/company/$companyId',
+    path: '/company/$companyId',
+    getParentRoute: () => SuperadminRoute,
+  } as any)
 const MModuleSubmoduleRoute = MModuleSubmoduleRouteImport.update({
   id: '/$submodule',
   path: '/$submodule',
@@ -167,18 +198,23 @@ export interface FileRoutesByFullPath {
   '/profile': typeof ProfileRoute
   '/servicepower-test': typeof ServicepowerTestRoute
   '/settings': typeof SettingsRoute
-  '/superadmin': typeof SuperadminRoute
+  '/superadmin': typeof SuperadminRouteWithChildren
   '/timecard': typeof TimecardRoute
   '/admin/users': typeof AdminUsersRoute
+  '/apply/$slug': typeof ApplySlugRoute
   '/csr-agent/$agentId': typeof CsrAgentAgentIdRoute
   '/employee/$employeeId': typeof EmployeeEmployeeIdRoute
+  '/fill-form/$formId': typeof FillFormFormIdRoute
   '/fill-w4/$docId': typeof FillW4DocIdRoute
   '/fill-w8ben/$docId': typeof FillW8benDocIdRoute
   '/fill-w9/$docId': typeof FillW9DocIdRoute
   '/m/$module': typeof MModuleRouteWithChildren
+  '/sign-document/$docId': typeof SignDocumentDocIdRoute
+  '/sign-external/$docId': typeof SignExternalDocIdRoute
   '/ticket/$ticketNo': typeof TicketTicketNoRoute
   '/tickets/map': typeof TicketsMapRoute
   '/m/$module/$submodule': typeof MModuleSubmoduleRouteWithChildren
+  '/superadmin/company/$companyId': typeof SuperadminCompanyCompanyIdRoute
   '/m/$module/$submodule/$userId': typeof MModuleSubmoduleUserIdRoute
 }
 export interface FileRoutesByTo {
@@ -193,18 +229,23 @@ export interface FileRoutesByTo {
   '/profile': typeof ProfileRoute
   '/servicepower-test': typeof ServicepowerTestRoute
   '/settings': typeof SettingsRoute
-  '/superadmin': typeof SuperadminRoute
+  '/superadmin': typeof SuperadminRouteWithChildren
   '/timecard': typeof TimecardRoute
   '/admin/users': typeof AdminUsersRoute
+  '/apply/$slug': typeof ApplySlugRoute
   '/csr-agent/$agentId': typeof CsrAgentAgentIdRoute
   '/employee/$employeeId': typeof EmployeeEmployeeIdRoute
+  '/fill-form/$formId': typeof FillFormFormIdRoute
   '/fill-w4/$docId': typeof FillW4DocIdRoute
   '/fill-w8ben/$docId': typeof FillW8benDocIdRoute
   '/fill-w9/$docId': typeof FillW9DocIdRoute
   '/m/$module': typeof MModuleRouteWithChildren
+  '/sign-document/$docId': typeof SignDocumentDocIdRoute
+  '/sign-external/$docId': typeof SignExternalDocIdRoute
   '/ticket/$ticketNo': typeof TicketTicketNoRoute
   '/tickets/map': typeof TicketsMapRoute
   '/m/$module/$submodule': typeof MModuleSubmoduleRouteWithChildren
+  '/superadmin/company/$companyId': typeof SuperadminCompanyCompanyIdRoute
   '/m/$module/$submodule/$userId': typeof MModuleSubmoduleUserIdRoute
 }
 export interface FileRoutesById {
@@ -220,18 +261,23 @@ export interface FileRoutesById {
   '/profile': typeof ProfileRoute
   '/servicepower-test': typeof ServicepowerTestRoute
   '/settings': typeof SettingsRoute
-  '/superadmin': typeof SuperadminRoute
+  '/superadmin': typeof SuperadminRouteWithChildren
   '/timecard': typeof TimecardRoute
   '/admin/users': typeof AdminUsersRoute
+  '/apply/$slug': typeof ApplySlugRoute
   '/csr-agent/$agentId': typeof CsrAgentAgentIdRoute
   '/employee/$employeeId': typeof EmployeeEmployeeIdRoute
+  '/fill-form/$formId': typeof FillFormFormIdRoute
   '/fill-w4/$docId': typeof FillW4DocIdRoute
   '/fill-w8ben/$docId': typeof FillW8benDocIdRoute
   '/fill-w9/$docId': typeof FillW9DocIdRoute
   '/m/$module': typeof MModuleRouteWithChildren
+  '/sign-document/$docId': typeof SignDocumentDocIdRoute
+  '/sign-external/$docId': typeof SignExternalDocIdRoute
   '/ticket/$ticketNo': typeof TicketTicketNoRoute
   '/tickets/map': typeof TicketsMapRoute
   '/m/$module/$submodule': typeof MModuleSubmoduleRouteWithChildren
+  '/superadmin/company/$companyId': typeof SuperadminCompanyCompanyIdRoute
   '/m/$module/$submodule/$userId': typeof MModuleSubmoduleUserIdRoute
 }
 export interface FileRouteTypes {
@@ -251,15 +297,20 @@ export interface FileRouteTypes {
     | '/superadmin'
     | '/timecard'
     | '/admin/users'
+    | '/apply/$slug'
     | '/csr-agent/$agentId'
     | '/employee/$employeeId'
+    | '/fill-form/$formId'
     | '/fill-w4/$docId'
     | '/fill-w8ben/$docId'
     | '/fill-w9/$docId'
     | '/m/$module'
+    | '/sign-document/$docId'
+    | '/sign-external/$docId'
     | '/ticket/$ticketNo'
     | '/tickets/map'
     | '/m/$module/$submodule'
+    | '/superadmin/company/$companyId'
     | '/m/$module/$submodule/$userId'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -277,15 +328,20 @@ export interface FileRouteTypes {
     | '/superadmin'
     | '/timecard'
     | '/admin/users'
+    | '/apply/$slug'
     | '/csr-agent/$agentId'
     | '/employee/$employeeId'
+    | '/fill-form/$formId'
     | '/fill-w4/$docId'
     | '/fill-w8ben/$docId'
     | '/fill-w9/$docId'
     | '/m/$module'
+    | '/sign-document/$docId'
+    | '/sign-external/$docId'
     | '/ticket/$ticketNo'
     | '/tickets/map'
     | '/m/$module/$submodule'
+    | '/superadmin/company/$companyId'
     | '/m/$module/$submodule/$userId'
   id:
     | '__root__'
@@ -303,15 +359,20 @@ export interface FileRouteTypes {
     | '/superadmin'
     | '/timecard'
     | '/admin/users'
+    | '/apply/$slug'
     | '/csr-agent/$agentId'
     | '/employee/$employeeId'
+    | '/fill-form/$formId'
     | '/fill-w4/$docId'
     | '/fill-w8ben/$docId'
     | '/fill-w9/$docId'
     | '/m/$module'
+    | '/sign-document/$docId'
+    | '/sign-external/$docId'
     | '/ticket/$ticketNo'
     | '/tickets/map'
     | '/m/$module/$submodule'
+    | '/superadmin/company/$companyId'
     | '/m/$module/$submodule/$userId'
   fileRoutesById: FileRoutesById
 }
@@ -327,15 +388,19 @@ export interface RootRouteChildren {
   ProfileRoute: typeof ProfileRoute
   ServicepowerTestRoute: typeof ServicepowerTestRoute
   SettingsRoute: typeof SettingsRoute
-  SuperadminRoute: typeof SuperadminRoute
+  SuperadminRoute: typeof SuperadminRouteWithChildren
   TimecardRoute: typeof TimecardRoute
   AdminUsersRoute: typeof AdminUsersRoute
+  ApplySlugRoute: typeof ApplySlugRoute
   CsrAgentAgentIdRoute: typeof CsrAgentAgentIdRoute
   EmployeeEmployeeIdRoute: typeof EmployeeEmployeeIdRoute
+  FillFormFormIdRoute: typeof FillFormFormIdRoute
   FillW4DocIdRoute: typeof FillW4DocIdRoute
   FillW8benDocIdRoute: typeof FillW8benDocIdRoute
   FillW9DocIdRoute: typeof FillW9DocIdRoute
   MModuleRoute: typeof MModuleRouteWithChildren
+  SignDocumentDocIdRoute: typeof SignDocumentDocIdRoute
+  SignExternalDocIdRoute: typeof SignExternalDocIdRoute
   TicketTicketNoRoute: typeof TicketTicketNoRoute
   TicketsMapRoute: typeof TicketsMapRoute
 }
@@ -447,6 +512,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof TicketTicketNoRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/sign-external/$docId': {
+      id: '/sign-external/$docId'
+      path: '/sign-external/$docId'
+      fullPath: '/sign-external/$docId'
+      preLoaderRoute: typeof SignExternalDocIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sign-document/$docId': {
+      id: '/sign-document/$docId'
+      path: '/sign-document/$docId'
+      fullPath: '/sign-document/$docId'
+      preLoaderRoute: typeof SignDocumentDocIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/m/$module': {
       id: '/m/$module'
       path: '/m/$module'
@@ -475,6 +554,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof FillW4DocIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/fill-form/$formId': {
+      id: '/fill-form/$formId'
+      path: '/fill-form/$formId'
+      fullPath: '/fill-form/$formId'
+      preLoaderRoute: typeof FillFormFormIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/employee/$employeeId': {
       id: '/employee/$employeeId'
       path: '/employee/$employeeId'
@@ -489,12 +575,26 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof CsrAgentAgentIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/apply/$slug': {
+      id: '/apply/$slug'
+      path: '/apply/$slug'
+      fullPath: '/apply/$slug'
+      preLoaderRoute: typeof ApplySlugRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/admin/users': {
       id: '/admin/users'
       path: '/admin/users'
       fullPath: '/admin/users'
       preLoaderRoute: typeof AdminUsersRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/superadmin/company/$companyId': {
+      id: '/superadmin/company/$companyId'
+      path: '/company/$companyId'
+      fullPath: '/superadmin/company/$companyId'
+      preLoaderRoute: typeof SuperadminCompanyCompanyIdRouteImport
+      parentRoute: typeof SuperadminRoute
     }
     '/m/$module/$submodule': {
       id: '/m/$module/$submodule'
@@ -512,6 +612,18 @@ declare module '@tanstack/react-router' {
     }
   }
 }
+
+interface SuperadminRouteChildren {
+  SuperadminCompanyCompanyIdRoute: typeof SuperadminCompanyCompanyIdRoute
+}
+
+const SuperadminRouteChildren: SuperadminRouteChildren = {
+  SuperadminCompanyCompanyIdRoute: SuperadminCompanyCompanyIdRoute,
+}
+
+const SuperadminRouteWithChildren = SuperadminRoute._addFileChildren(
+  SuperadminRouteChildren,
+)
 
 interface MModuleSubmoduleRouteChildren {
   MModuleSubmoduleUserIdRoute: typeof MModuleSubmoduleUserIdRoute
@@ -547,15 +659,19 @@ const rootRouteChildren: RootRouteChildren = {
   ProfileRoute: ProfileRoute,
   ServicepowerTestRoute: ServicepowerTestRoute,
   SettingsRoute: SettingsRoute,
-  SuperadminRoute: SuperadminRoute,
+  SuperadminRoute: SuperadminRouteWithChildren,
   TimecardRoute: TimecardRoute,
   AdminUsersRoute: AdminUsersRoute,
+  ApplySlugRoute: ApplySlugRoute,
   CsrAgentAgentIdRoute: CsrAgentAgentIdRoute,
   EmployeeEmployeeIdRoute: EmployeeEmployeeIdRoute,
+  FillFormFormIdRoute: FillFormFormIdRoute,
   FillW4DocIdRoute: FillW4DocIdRoute,
   FillW8benDocIdRoute: FillW8benDocIdRoute,
   FillW9DocIdRoute: FillW9DocIdRoute,
   MModuleRoute: MModuleRouteWithChildren,
+  SignDocumentDocIdRoute: SignDocumentDocIdRoute,
+  SignExternalDocIdRoute: SignExternalDocIdRoute,
   TicketTicketNoRoute: TicketTicketNoRoute,
   TicketsMapRoute: TicketsMapRoute,
 }

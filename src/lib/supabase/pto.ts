@@ -3,10 +3,13 @@
  * and Employee Self-Service "Manage Requests" tab.
  * Rows are keyed by profile_id (see migration 0027), company-scoped by RLS.
  *
- * PTO requests need TWO approvals — manager and HR (see migration 0036).
- * manager_status/hr_status are tracked separately; the overall `status`
- * column is derived from them by a DB trigger (a rejection at either stage
- * immediately denies the whole request).
+ * PTO requests are staged: manager first (see migration 0036), then EITHER
+ * HR or Accounting (Finance) gives the final approval — an OR gate, added by
+ * migration 0057 (see canReviewPtoStage/reviewPtoStage below), mirroring
+ * timecard-correction's manager+(HR or Accounting) pattern.
+ * manager_status/hr_status/accounting_status are tracked separately; the
+ * overall `status` column is derived from them by a DB trigger (a rejection
+ * at any stage immediately denies the whole request).
  */
 
 import { supabase } from "./client";
@@ -211,8 +214,10 @@ export async function getCompanyPtoRequests(): Promise<PtoRequestRow[]> {
  * decides it, mirroring canReviewCorrectionStage's timecard-correction
  * pattern). Being an ADMIN does NOT grant access to every stage — an admin
  * who happens to be someone's manager can still only act as manager, not
- * also as HR/Accounting. Only SUPERADMIN (the platform-level role, not
- * company ADMIN) bypasses this entirely.
+ * also as HR/Accounting. Both SUPERADMIN (a company's own top-tier admin)
+ * and SUPERSUPERADMIN (the platform-level role) bypass this entirely — a
+ * single approval from either is final, no separate manager+HR/Accounting
+ * sign-off needed.
  */
 export function canReviewPtoStage(
   request: Pick<PtoRequestRow, "managerId" | "managerStatus">,
@@ -221,7 +226,7 @@ export function canReviewPtoStage(
   viewerRole: string | null | undefined
 ): boolean {
   const role = (viewerRole || "").toUpperCase();
-  if (role === "SUPERADMIN") return true;
+  if (role === "SUPERADMIN" || role === "SUPERSUPERADMIN") return true;
   if (stage === "manager") {
     if (request.managerId) return request.managerId === viewerProfileId;
     return role === "MANAGER";

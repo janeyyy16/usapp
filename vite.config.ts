@@ -21,7 +21,19 @@ import { resolve } from "node:path";
 // started), then tell both environments not to try emptying it again
 // (see emptyOutDir: false below) so nothing ever attempts to touch a path
 // workerd might still be holding open partway through the build.
-rmSync(resolve(process.cwd(), "dist"), { recursive: true, force: true });
+//
+// This alone isn't quite enough, though: a PRIOR build/test run's workerd
+// process can still be alive and holding the same lock at the moment THIS
+// rmSync call itself runs (observed in practice — a leftover workerd from
+// an earlier session). maxRetries/retryDelay is Node's own built-in
+// mechanism for exactly this class of transient Windows EBUSY/EPERM lock —
+// retry a few times with a short pause instead of failing on the first hit.
+rmSync(resolve(process.cwd(), "dist"), {
+  recursive: true,
+  force: true,
+  maxRetries: 10,
+  retryDelay: 300,
+});
 
 // Read .env directly (avoid importing from "vite" here — it creates a module
 // require-cycle with the lovable config wrapper). We inject SERVER-ONLY secrets
@@ -78,6 +90,24 @@ const SERVER_DEFINE = {
   "globalThis.__NSA_BASE_URL__": JSON.stringify(rootEnv.NSA_BASE_URL ?? "https://api.nsaweb.com"),
   "globalThis.__NSA_API_KEY__": JSON.stringify(rootEnv.NSA_API_KEY ?? ""),
   "globalThis.__NSA_SECRET__": JSON.stringify(rootEnv.NSA_SECRET ?? ""),
+  // Firebase service account (SERVER ONLY — used by the Jotform webhook to
+  // write notifications via the Firestore REST API; same reasoning as the
+  // Supabase JWT secret above, never exposed to the client bundle).
+  "globalThis.__FIREBASE_SA_EMAIL__": JSON.stringify(rootEnv.FIREBASE_SERVICE_ACCOUNT_EMAIL ?? ""),
+  "globalThis.__FIREBASE_SA_PRIVATE_KEY__": JSON.stringify(
+    rootEnv.FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY ?? ""
+  ),
+  // Firebase Storage bucket (used by the Jotform webhook to re-host
+  // file-upload answers — see mirrorSubmissionFiles in jotformBridge.ts).
+  "globalThis.__FIREBASE_STORAGE_BUCKET__": JSON.stringify(rootEnv.VITE_FIREBASE_STORAGE_BUCKET ?? ""),
+  // Jotform API key (SERVER ONLY) — Jotform's uploaded-file URLs are private
+  // by default; this is required to actually download them for mirroring.
+  "globalThis.__JOTFORM_API_KEY__": JSON.stringify(rootEnv.JOTFORM_API_KEY ?? ""),
+  // Supabase service-role key (SERVER ONLY — the Jotform webhook uses this to
+  // read `profiles` (role + extra_roles) directly, bypassing RLS, since the
+  // webhook has no logged-in Supabase session to scope a normal query to.
+  "globalThis.__SUPABASE_URL__": JSON.stringify(rootEnv.VITE_SUPABASE_URL ?? ""),
+  "globalThis.__SUPABASE_SERVICE_KEY__": JSON.stringify(rootEnv.SUPABASE_SERVICE_KEY ?? ""),
 };
 
 // Dev-only middleware: serve /api/supabase-token locally (vite dev does not run
@@ -111,43 +141,6 @@ function supabaseTokenDevPlugin() {
           res.statusCode = 401;
           res.setHeader("Content-Type", "application/json");
           res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Token exchange failed" }));
-        }
-      });
-    },
-  };
-}
-
-// Dev-only middleware: serve /api/admin-update-email locally (vite dev does
-// not run the serverless api/ folder). Uses the SAME runtime-agnostic bridge
-// as the production Worker so dev and prod behave identically.
-function adminUpdateEmailDevPlugin() {
-  return {
-    name: "admin-update-email-dev",
-    configureServer(server: any) {
-      server.middlewares.use("/api/admin-update-email", async (req: any, res: any) => {
-        try {
-          const chunks: Buffer[] = [];
-          for await (const c of req) chunks.push(c);
-          const body = Buffer.concat(chunks).toString("utf8");
-
-          const { handleAdminUpdateEmailRequest } = await server.ssrLoadModule(
-            "/src/lib/server/adminUpdateEmailBridge.ts"
-          );
-          const webReq = new Request("http://localhost/api/admin-update-email", {
-            method: req.method,
-            headers: { "content-type": req.headers["content-type"] ?? "application/json" },
-            body: req.method === "POST" ? body : undefined,
-          });
-          const mergedEnv = { ...process.env, ...readDotEnv() } as Record<string, string | undefined>;
-          const webRes: Response = await handleAdminUpdateEmailRequest(webReq, mergedEnv);
-
-          res.statusCode = webRes.status;
-          webRes.headers.forEach((v: string, k: string) => res.setHeader(k, v));
-          res.end(await webRes.text());
-        } catch (err) {
-          res.statusCode = 500;
-          res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Email update failed" }));
         }
       });
     },
@@ -266,6 +259,309 @@ function nsaDevPlugin() {
   };
 }
 
+// Dev-only middleware: serve /api/jotform locally. Same shape as the other
+// dev plugins above, but preserves the request's query string (?secret=...)
+// since Jotform's webhook config has no custom-header option — the shared
+// secret travels as a query param, unlike the other bridges' JSON-only bodies.
+function jotformDevPlugin() {
+  return {
+    name: "jotform-dev",
+    configureServer(server: any) {
+      server.middlewares.use("/api/jotform", async (req: any, res: any) => {
+        try {
+          const chunks: Buffer[] = [];
+          for await (const c of req) chunks.push(c);
+          const body = Buffer.concat(chunks);
+
+          const { handleJotformRequest } = await server.ssrLoadModule(
+            "/src/lib/server/jotformBridge.ts"
+          );
+          const webReq = new Request(`http://localhost${req.url}`, {
+            method: req.method,
+            headers: { "content-type": req.headers["content-type"] ?? "application/octet-stream" },
+            body: req.method === "POST" ? body : undefined,
+          });
+          const mergedEnv = { ...process.env, ...readDotEnv() } as Record<string, string | undefined>;
+          const webRes: Response = await handleJotformRequest(webReq, mergedEnv);
+
+          res.statusCode = webRes.status;
+          webRes.headers.forEach((v: string, k: string) => res.setHeader(k, v));
+          res.end(await webRes.text());
+        } catch (err) {
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ success: false, error: err instanceof Error ? err.message : "Jotform webhook failed" }));
+        }
+      });
+    },
+  };
+}
+
+// Dev-only middleware: serve /api/custom-forms locally — same shape as
+// jotformDevPlugin above (raw body passthrough so multipart/form-data file
+// uploads survive intact), but also needs to work for GET (schema fetch),
+// not just POST (submission).
+function customFormsDevPlugin() {
+  return {
+    name: "custom-forms-dev",
+    configureServer(server: any) {
+      server.middlewares.use("/api/custom-forms", async (req: any, res: any) => {
+        try {
+          const chunks: Buffer[] = [];
+          for await (const c of req) chunks.push(c);
+          const body = Buffer.concat(chunks);
+
+          const { handleCustomFormsRequest } = await server.ssrLoadModule(
+            "/src/lib/server/customFormsBridge.ts"
+          );
+          const webReq = new Request(`http://localhost${req.url}`, {
+            method: req.method,
+            headers: { "content-type": req.headers["content-type"] ?? "application/octet-stream" },
+            body: req.method === "POST" ? body : undefined,
+          });
+          const mergedEnv = { ...process.env, ...readDotEnv() } as Record<string, string | undefined>;
+          const webRes: Response = await handleCustomFormsRequest(webReq, mergedEnv);
+
+          res.statusCode = webRes.status;
+          webRes.headers.forEach((v: string, k: string) => res.setHeader(k, v));
+          res.end(await webRes.text());
+        } catch (err) {
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Custom form request failed" }));
+        }
+      });
+    },
+  };
+}
+
+// Dev-only middleware: serve /api/signable-documents locally — same shape
+// as customFormsDevPlugin above (GET for the doc, POST multipart for the
+// signature + PDF upload).
+function signableDocumentsDevPlugin() {
+  return {
+    name: "signable-documents-dev",
+    configureServer(server: any) {
+      server.middlewares.use("/api/signable-documents", async (req: any, res: any) => {
+        try {
+          const chunks: Buffer[] = [];
+          for await (const c of req) chunks.push(c);
+          const body = Buffer.concat(chunks);
+
+          const { handleSignableDocumentsRequest } = await server.ssrLoadModule(
+            "/src/lib/server/signableDocumentsBridge.ts"
+          );
+          const webReq = new Request(`http://localhost${req.url}`, {
+            method: req.method,
+            headers: { "content-type": req.headers["content-type"] ?? "application/octet-stream" },
+            body: req.method === "POST" ? body : undefined,
+          });
+          const mergedEnv = { ...process.env, ...readDotEnv() } as Record<string, string | undefined>;
+          const webRes: Response = await handleSignableDocumentsRequest(webReq, mergedEnv);
+
+          res.statusCode = webRes.status;
+          webRes.headers.forEach((v: string, k: string) => res.setHeader(k, v));
+          res.end(await webRes.text());
+        } catch (err) {
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Signable document request failed" }));
+        }
+      });
+    },
+  };
+}
+
+// Dev-only middleware: serve /api/live-chat locally — same shape as
+// signableDocumentsDevPlugin above. Body is plain JSON for most POST
+// actions (GET for polling, start/message/typing), except action=upload
+// which is multipart/form-data (a photo attachment) — the raw chunks are
+// passed through with whatever content-type the browser actually sent, so
+// the multipart boundary survives regardless of which action this is.
+function liveChatDevPlugin() {
+  return {
+    name: "live-chat-dev",
+    configureServer(server: any) {
+      server.middlewares.use("/api/live-chat", async (req: any, res: any) => {
+        try {
+          const chunks: Buffer[] = [];
+          for await (const c of req) chunks.push(c);
+          const body = Buffer.concat(chunks);
+
+          const { handleLiveChatRequest } = await server.ssrLoadModule("/src/lib/server/liveChatBridge.ts");
+          const webReq = new Request(`http://localhost${req.url}`, {
+            method: req.method,
+            headers: { "content-type": req.headers["content-type"] ?? "application/json" },
+            body: req.method === "POST" ? body : undefined,
+          });
+          const mergedEnv = { ...process.env, ...readDotEnv() } as Record<string, string | undefined>;
+          const webRes: Response = await handleLiveChatRequest(webReq, mergedEnv);
+
+          res.statusCode = webRes.status;
+          webRes.headers.forEach((v: string, k: string) => res.setHeader(k, v));
+          res.end(await webRes.text());
+        } catch (err) {
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Live chat request failed" }));
+        }
+      });
+    },
+  };
+}
+
+// Dev-only middleware: serve /api/live-chat-staff locally — same shape as
+// liveChatDevPlugin above, plain JSON only (no multipart action here).
+function liveChatStaffDevPlugin() {
+  return {
+    name: "live-chat-staff-dev",
+    configureServer(server: any) {
+      server.middlewares.use("/api/live-chat-staff", async (req: any, res: any) => {
+        try {
+          const chunks: Buffer[] = [];
+          for await (const c of req) chunks.push(c);
+          const body = Buffer.concat(chunks);
+
+          const { handleLiveChatStaffRequest } = await server.ssrLoadModule("/src/lib/server/liveChatStaffBridge.ts");
+          const webReq = new Request(`http://localhost${req.url}`, {
+            method: req.method,
+            headers: { "content-type": req.headers["content-type"] ?? "application/json" },
+            body: req.method === "POST" ? body : undefined,
+          });
+          const mergedEnv = { ...process.env, ...readDotEnv() } as Record<string, string | undefined>;
+          const webRes: Response = await handleLiveChatStaffRequest(webReq, mergedEnv);
+
+          res.statusCode = webRes.status;
+          webRes.headers.forEach((v: string, k: string) => res.setHeader(k, v));
+          res.end(await webRes.text());
+        } catch (err) {
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Live chat staff request failed" }));
+        }
+      });
+    },
+  };
+}
+
+// Dev-only middleware: serve /api/image-proxy locally — same bridge as
+// production. Unlike the other dev plugins above, the response body is
+// binary image bytes, not text/JSON, so it's streamed back as a Buffer
+// (res.end(string) would corrupt binary data by round-tripping it through
+// UTF-8) — and the query string (?url=...) must survive, so this builds
+// the Request from req.url rather than a hardcoded path.
+function imageProxyDevPlugin() {
+  return {
+    name: "image-proxy-dev",
+    configureServer(server: any) {
+      server.middlewares.use("/api/image-proxy", async (req: any, res: any) => {
+        try {
+          const { handleImageProxyRequest } = await server.ssrLoadModule(
+            "/src/lib/server/imageProxyBridge.ts"
+          );
+          const webReq = new Request(`http://localhost${req.url}`, { method: req.method });
+          const webRes: Response = await handleImageProxyRequest(webReq);
+
+          res.statusCode = webRes.status;
+          webRes.headers.forEach((v: string, k: string) => res.setHeader(k, v));
+          res.end(Buffer.from(await webRes.arrayBuffer()));
+        } catch (err) {
+          res.statusCode = 502;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Image proxy failed" }));
+        }
+      });
+    },
+  };
+}
+
+// Dev-only middleware: serve /api/google-drive locally — same bridge as
+// production. Handles both the OAuth connect/callback (GET, ends in a
+// redirect Response — res.statusCode + Location header forward that
+// through as a real HTTP redirect) and the upload action (POST,
+// multipart/form-data carrying the generated PDF — raw body passthrough
+// like customFormsDevPlugin, since this carries binary file data too).
+// Unlike the other dev plugins here, this one builds the internal Request
+// from the real req.headers.host (not a hardcoded "localhost" with no
+// port) — googleDriveBridge.ts derives its OAuth redirect_uri and the
+// post-connect redirect target from the request's own origin, so getting
+// the actual dev-server port right here actually matters, whereas none of
+// the other bridges ever construct a URL back out of their own origin.
+// Uses req.originalUrl (falling back to req.url) for the same reason:
+// Connect's server.middlewares.use("/api/google-drive", ...) strips that
+// mount prefix off req.url before this handler ever sees it, so
+// reconstructing the URL from req.url alone silently drops "/api/google-drive"
+// — req.originalUrl is Connect/Express's standard convention for the
+// pre-strip, full original path.
+function googleDriveDevPlugin() {
+  return {
+    name: "google-drive-dev",
+    configureServer(server: any) {
+      server.middlewares.use("/api/google-drive", async (req: any, res: any) => {
+        try {
+          const chunks: Buffer[] = [];
+          for await (const c of req) chunks.push(c);
+          const body = Buffer.concat(chunks);
+
+          const { handleGoogleDriveRequest } = await server.ssrLoadModule(
+            "/src/lib/server/googleDriveBridge.ts"
+          );
+          const webReq = new Request(`http://${req.headers.host ?? "localhost"}${req.originalUrl ?? req.url}`, {
+            method: req.method,
+            headers: { "content-type": req.headers["content-type"] ?? "application/octet-stream" },
+            body: req.method === "POST" ? body : undefined,
+          });
+          const mergedEnv = { ...process.env, ...readDotEnv() } as Record<string, string | undefined>;
+          const webRes: Response = await handleGoogleDriveRequest(webReq, mergedEnv);
+
+          res.statusCode = webRes.status;
+          webRes.headers.forEach((v: string, k: string) => res.setHeader(k, v));
+          res.end(await webRes.text());
+        } catch (err) {
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Google Drive request failed" }));
+        }
+      });
+    },
+  };
+}
+
+// Dev-only middleware: serve /api/admin-update-email locally — same bridge
+// as production. Plain JSON POST, same shape as liveChatDevPlugin minus the
+// multipart-upload branch (this route never carries a file).
+function adminUpdateEmailDevPlugin() {
+  return {
+    name: "admin-update-email-dev",
+    configureServer(server: any) {
+      server.middlewares.use("/api/admin-update-email", async (req: any, res: any) => {
+        try {
+          const chunks: Buffer[] = [];
+          for await (const c of req) chunks.push(c);
+          const body = Buffer.concat(chunks);
+
+          const { handleAdminUpdateEmailRequest } = await server.ssrLoadModule("/src/lib/server/adminUpdateEmailBridge.ts");
+          const webReq = new Request(`http://localhost${req.url}`, {
+            method: req.method,
+            headers: { "content-type": req.headers["content-type"] ?? "application/json" },
+            body: req.method === "POST" ? body : undefined,
+          });
+          const mergedEnv = { ...process.env, ...readDotEnv() } as Record<string, string | undefined>;
+          const webRes: Response = await handleAdminUpdateEmailRequest(webReq, mergedEnv);
+
+          res.statusCode = webRes.status;
+          webRes.headers.forEach((v: string, k: string) => res.setHeader(k, v));
+          res.end(await webRes.text());
+        } catch (err) {
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Email update request failed" }));
+        }
+      });
+    },
+  };
+}
+
 // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
 // @cloudflare/vite-plugin builds from this — wrangler.jsonc main alone is insufficient.
 export default defineConfig({
@@ -280,10 +576,14 @@ export default defineConfig({
   vite: {
     define: SERVER_DEFINE,
     // Vite's default asset list doesn't include .pdf — needed so the blank
-    // W-4/W-8BEN/W-9 templates (src/assets/*.pdf) resolve to a URL via a
+    // W-8BEN template (src/assets/w8ben-blank.pdf) resolves to a URL via a
     // plain `import` the same way the logo/ribbon/footer PNGs already do.
     assetsInclude: ["**/*.pdf"],
-    plugins: [supabaseTokenDevPlugin(), adminUpdateEmailDevPlugin(), servicePowerDevPlugin(), marconeDevPlugin(), nsaDevPlugin()],
+    // Dev-server only (never shipped in the Cloudflare production build):
+    // lets a temporary cloudflared/ngrok tunnel hostname reach the local dev
+    // server for testing webhooks (e.g. Jotform) that need a public URL.
+    server: { allowedHosts: [".trycloudflare.com"] },
+    plugins: [supabaseTokenDevPlugin(), servicePowerDevPlugin(), marconeDevPlugin(), nsaDevPlugin(), jotformDevPlugin(), customFormsDevPlugin(), imageProxyDevPlugin(), googleDriveDevPlugin(), signableDocumentsDevPlugin(), liveChatDevPlugin(), liveChatStaffDevPlugin(), adminUpdateEmailDevPlugin()],
     build: {
       chunkSizeWarningLimit: 800,
       // See the rmSync call above — we clean dist/ ourselves once, up

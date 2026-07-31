@@ -113,7 +113,13 @@ export const REGION_LOCATIONS: Record<Region, string[]> = {
 
 // Real synced ticket.location values sometimes drop the space after a
 // comma (e.g. "Jackson,MS" instead of "Jackson, MS") — match loosely.
-function normalizeLocationForRegionMatch(v: string): string {
+// Exported since other location lookups (e.g. getOfficeCoordinates in
+// ticket.$ticketNo.tsx) need the exact same normalization for the same
+// reason — LOCATIONS_DATA stores "Jackson,MS" without the space, but
+// canonicalBranchLabel() normalizes real ticket.location values to the
+// spaced "Jackson, MS" form, so a strict string match between the two
+// never succeeds.
+export function normalizeLocationForRegionMatch(v: string): string {
   return (v || "").trim().replace(/,\s+/g, ",");
 }
 
@@ -191,14 +197,29 @@ export function normalizeLocationName(location: string) {
   return String(location || "").trim().replace(/\s*,\s*/g, ", ");
 }
 
+export function mergeLocationOptions(...groups: Array<Iterable<string>>) {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+
+  groups.forEach((group) => {
+    for (const location of group) {
+      const normalized = normalizeLocationName(location);
+      if (!normalized || seen.has(normalized)) continue;
+      seen.add(normalized);
+      merged.push(normalized);
+    }
+  });
+
+  return merged;
+}
+
 /**
- * Parse a profile's `branch_access` value into a list of location names.
- * Stored pipe-delimited ("Jackson, MS|Jackson, TN") so multi-word names that
- * already contain a comma don't get split into phantom entries; "*" means
- * every location. Legacy comma-separated values (pre-pipe-delimiter) are
- * recovered by greedy-matching against the known LOCATIONS list, longest
- * name first, so "Jackson, MS" is recognized before "Jackson".
- * Mirrors AdminUserManagementPage.tsx's parseSelectedBranches.
+ * Parse the `branch_access` profile field into a list of location strings.
+ * Formats supported:
+ *   - Empty / null → [] (no branches)
+ *   - "*"          → all LOCATIONS
+ *   - Pipe-separated: "Memphis|Atlanta|Nashville"
+ *   - Comma-separated or concatenated: "MemphisAtlanta"
  */
 export function parseBranchAccess(value: string | null | undefined): string[] {
   const raw = String(value ?? "").trim();
@@ -223,20 +244,4 @@ export function parseBranchAccess(value: string | null | undefined): string[] {
     working = working.slice(hit.length);
   }
   return Array.from(new Set(found));
-}
-
-export function mergeLocationOptions(...groups: Array<Iterable<string>>) {
-  const seen = new Set<string>();
-  const merged: string[] = [];
-
-  groups.forEach((group) => {
-    for (const location of group) {
-      const normalized = normalizeLocationName(location);
-      if (!normalized || seen.has(normalized)) continue;
-      seen.add(normalized);
-      merged.push(normalized);
-    }
-  });
-
-  return merged;
 }

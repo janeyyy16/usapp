@@ -18,7 +18,7 @@ import { Link } from "@tanstack/react-router";
 import { AlertTriangle, CheckCircle, ChevronLeft, Clock, Loader2, Trash2, Users, XCircle } from "lucide-react";
 import { AppHeader } from "@/components/Header";
 import { useAuth } from "@/lib/auth";
-import { normalizeRole, ROLE_LABELS } from "@/lib/roleLabels";
+import { normalizeRole, ROLE_LABELS, canSubmitConductNote, canFastTrackConductNote } from "@/lib/roleLabels";
 import { getCompanyUsers } from "@/lib/supabase/users";
 import { getCompanyTickets, getTicketAuditLog } from "@/lib/supabase/tickets";
 import { getCsrTeamComposition } from "@/lib/supabase/csrTeams";
@@ -31,24 +31,18 @@ const ACTION_LABELS: Record<string, string> = {
   reschedule: "Rescheduled",
 };
 
-// Any manager-flavored role can submit a warning/mistake for review — this
-// page is used for every employee, not just CSR staff.
-const MANAGER_ROLES = new Set([
-  "CSR_TEAM_LEADER", "CSR_MANAGER", "MANAGER", "ADMIN", "SUPERADMIN", "HR",
-  "BRANCH_MANAGER", "SENIOR_BRANCH_MANAGER", "TECHNICIAN_MANAGER",
-  "CLAIMS_MANAGER", "PARTS_MANAGER", "BIZOPS_MANAGER", "BIZOPS_SENIOR_MANAGER",
-]);
 // Two-stage review, matching the real chain of command (e.g. for CSR staff:
 // Team Leader submits -> CSR Manager reviews first -> HR makes the final
 // call). Stage 1 = the employee's department-level manager, acting on
-// 'pending'; stage 2 = HR, acting on 'manager_approved'. Admin/Superadmin
-// sit in both stages so they're never blocked.
+// 'pending'; stage 2 (canSubmitConductNote/canFastTrackConductNote, shared
+// with the Attendance Monitoring page's Warnings tab) = HR, acting on
+// 'manager_approved'. Admin/Superadmin sit in both stages so they're never
+// blocked.
 const STAGE1_ROLES = new Set([
   "CSR_MANAGER", "BRANCH_MANAGER", "SENIOR_BRANCH_MANAGER", "TECHNICIAN_MANAGER",
   "CLAIMS_MANAGER", "PARTS_MANAGER", "BIZOPS_MANAGER", "BIZOPS_SENIOR_MANAGER",
-  "MANAGER", "ADMIN", "SUPERADMIN",
+  "MANAGER", "SENIOR_MANAGER", "ADMIN", "SUPERADMIN",
 ]);
-const STAGE2_ROLES = new Set(["HR", "ADMIN", "SUPERADMIN"]);
 
 const STATUS_BADGE: Record<CsrAgentNote["status"], string> = {
   pending: "bg-slate-500/20 text-slate-300 border-slate-500/30",
@@ -77,9 +71,9 @@ interface RecentEntry {
 export function CsrAgentDetailPage({ agentId }: { agentId: string }) {
   const { role: myRole, ready } = useAuth();
   const normalizedMyRole = normalizeRole(myRole);
-  const canManage = ready && MANAGER_ROLES.has(normalizedMyRole);
+  const canManage = ready && canSubmitConductNote(normalizedMyRole);
   const canStage1Review = ready && STAGE1_ROLES.has(normalizedMyRole);
-  const canStage2Review = ready && STAGE2_ROLES.has(normalizedMyRole);
+  const canStage2Review = ready && canFastTrackConductNote(normalizedMyRole);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -195,9 +189,13 @@ export function CsrAgentDetailPage({ agentId }: { agentId: string }) {
     }
   };
 
-  const removeNote = async (id: string) => {
+  const removeNote = async (note: CsrAgentNote) => {
+    // Retracting an already-approved note removes the official record
+    // entirely (unlike a still-pending one, which was never final to begin
+    // with) — confirm first so this can't happen from an accidental click.
+    if (note.status === "approved" && !window.confirm("Retract this approved warning/mistake? This permanently removes the official record.")) return;
     try {
-      await deleteAgentNote(id);
+      await deleteAgentNote(note.id);
       await loadNotes();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete note.");
@@ -402,7 +400,12 @@ export function CsrAgentDetailPage({ agentId }: { agentId: string }) {
                       </div>
                     )}
                     {canManage && n.status === "pending" && (
-                      <button type="button" onClick={() => removeNote(n.id)} title="Retract" className="shrink-0 text-muted-foreground hover:text-red-400 transition-colors">
+                      <button type="button" onClick={() => removeNote(n)} title="Retract" className="shrink-0 text-muted-foreground hover:text-red-400 transition-colors">
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {canStage2Review && n.status === "approved" && (
+                      <button type="button" onClick={() => removeNote(n)} title="Retract this approved record" className="shrink-0 text-muted-foreground hover:text-red-400 transition-colors">
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     )}

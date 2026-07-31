@@ -71,12 +71,12 @@ Create/update `.env` file with Firebase credentials:
 
 ```env
 # Firebase Configuration
-VITE_FIREBASE_API_KEY="AIzaSyAWhEAxjUpTAWsKiYLYr6faHzfFklK_jVs"
-VITE_FIREBASE_AUTH_DOMAIN="ah-solutions-usapp.firebaseapp.com"
-VITE_FIREBASE_PROJECT_ID="ah-solutions-usapp"
-VITE_FIREBASE_STORAGE_BUCKET="ah-solutions-usapp.firebasestorage.app"
-VITE_FIREBASE_MESSAGING_SENDER_ID="764674735133"
-VITE_FIREBASE_APP_ID="1:764674735133:web:6947dd486f0760c2815af4"
+VITE_FIREBASE_API_KEY="your_firebase_api_key_here"
+VITE_FIREBASE_AUTH_DOMAIN="your_project.firebaseapp.com"
+VITE_FIREBASE_PROJECT_ID="your_project_id"
+VITE_FIREBASE_STORAGE_BUCKET="your_project.firebasestorage.app"
+VITE_FIREBASE_MESSAGING_SENDER_ID="your_sender_id"
+VITE_FIREBASE_APP_ID="your_app_id"
 
 # Supabase Configuration (for future use)
 VITE_SUPABASE_URL=https://your-project.supabase.co

@@ -259,6 +259,15 @@ const dashboardMod: ModuleDef = {
       seed: () => ({}),
     },
     {
+      slug: "live-chat-support",
+      title: "Live Chat",
+      description: "See and reply to live chat messages from the public website.",
+      custom: "live-chat-support" as any,
+      fields: [],
+      count: 0,
+      seed: () => ({}),
+    },
+    {
       slug: "parts-dashboard",
       title: "Parts Dashboard",
       description: "Parts operations overview — PO queue, collections, receives and distributor breakdown.",
@@ -1410,6 +1419,30 @@ const adminMod: ModuleDef = {
           updated: dateStr(-(i % 30)),
         };
       },
+    },
+    {
+      slug: "data-migration",
+      title: "Data Migration",
+      description: "Manually resync ServicePower and NSA tickets into Supabase for a date range.",
+      custom: "data-migration" as any,
+      fields: [],
+      seed: () => ({}),
+    },
+    {
+      slug: "login-security",
+      title: "Login Security",
+      description: "Last/most-used login IP, browser, and device per user — flags unusual locations and IPs shared between employees.",
+      custom: "login-security" as any,
+      fields: [],
+      seed: () => ({}),
+    },
+    {
+      slug: "company-settings",
+      title: "Company Settings",
+      description: "Edit this company's own record — name, address, subscription plan, login alias. Only available to this company's SuperAdmin.",
+      custom: "company-settings" as any,
+      fields: [],
+      seed: () => ({}),
     },
   ],
 };

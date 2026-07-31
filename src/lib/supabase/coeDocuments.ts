@@ -1,7 +1,7 @@
 /**
  * Certificate of Employment sent-history — one row per COE sent via
  * "Preview & Send" on the Generate COE tab (ReportHRDaily.tsx). Rows are
- * stamped with company_id/sent_by automatically (see migration 0059).
+ * stamped with company_id/sent_by automatically (see migration 0064).
  */
 
 import { supabase } from "./client";
