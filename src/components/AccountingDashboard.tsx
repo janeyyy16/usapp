@@ -28,8 +28,9 @@ import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 import { supabase } from "@/lib/supabase/client";
 import { EmployeePayrollDetailModal } from "@/components/EmployeePayrollDetailModal";
 import { ROLE_LABELS } from "@/lib/roleLabels";
-import { calcWorkedHours, getMyProfileSchedule } from "@/lib/supabase/timecards";
+import { calcWorkedHours, getMyProfileSchedule, resolveScheduledNetHours } from "@/lib/supabase/timecards";
 import { createNotification } from "@/lib/supabase/notifications";
+import { getCompanyPtoRequests, type PtoRequestRow } from "@/lib/supabase/pto";
 import { useAuth } from "@/lib/auth";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -135,14 +136,26 @@ function rollBackToWeekday(d: Date): Date {
   return d;
 }
 
-// Regular/overtime hours per employee from a set of raw timecard rows —
-// shared by the live preview and by generatePayroll() when re-picked dates
-// exactly match an existing run (recomputing it in place).
-function computeHoursMap(entries: TimecardEntry[]): Map<string, { regular: number; overtime: number }> {
+// Regular/overtime hours per employee from a set of raw timecard rows, PLUS
+// approved PTO days credited at the employee's own net scheduled hours (see
+// resolveScheduledNetHours) so approved time off doesn't reduce pay — shared
+// by the live preview and by generatePayroll() when re-picked dates exactly
+// match an existing run (recomputing it in place).
+function computeHoursMap(
+  entries: TimecardEntry[],
+  employees: SupabaseEmployee[],
+  ptoRequests: PtoRequestRow[],
+  periodStart: string,
+  periodEnd: string,
+): Map<string, { regular: number; overtime: number }> {
   const hoursMap = new Map<string, { regular: number; overtime: number }>();
+  // A real punch always wins — a PTO day the employee also clocked in on
+  // (shouldn't normally happen, but must never double-count) is skipped below.
+  const punchedDates = new Set<string>();
   for (const tc of entries) {
     const key = tc.profile_id || tc.employee_id;
     if (!key || !tc.check_in || !tc.check_out) continue;
+    punchedDates.add(`${key}|${tc.work_date}`);
     const hours = calcWorkedHours({
       checkIn: tc.check_in,
       checkOut: tc.check_out,
@@ -154,6 +167,32 @@ function computeHoursMap(entries: TimecardEntry[]): Map<string, { regular: numbe
     const ot = Math.max(0, hours - REGULAR_HOURS_PER_DAY);
     const prev = hoursMap.get(key) ?? { regular: 0, overtime: 0 };
     hoursMap.set(key, { regular: prev.regular + reg, overtime: prev.overtime + ot });
+  }
+
+  const employeeById = new Map(employees.map((e) => [e.id, e]));
+  for (const pto of ptoRequests) {
+    if (pto.status !== "approved") continue;
+    // Unpaid leave is, by definition, not paid — see ptoRequestsInYear in
+    // pto.ts, which likewise excludes it from the paid-PTO allowance.
+    if (pto.ptoType === "unpaid") continue;
+    const emp = employeeById.get(pto.profileId);
+    if (!emp) continue;
+    const netHours = resolveScheduledNetHours(emp.requiredCheckIn || "", emp.requiredCheckOut || "", emp.workingHours, emp.mealMinutes);
+    if (netHours <= 0) continue;
+    const offDays = new Set(emp.offDays ?? []);
+    // Clip the PTO range to the picked payroll period — a request can span
+    // dates outside it.
+    const start = pto.startDate < periodStart ? periodStart : pto.startDate;
+    const end = pto.endDate > periodEnd ? periodEnd : pto.endDate;
+    if (start > end) continue;
+    for (let d = new Date(start + "T00:00:00"); d <= new Date(end + "T00:00:00"); d.setDate(d.getDate() + 1)) {
+      if (offDays.has(d.getDay())) continue;
+      const iso = d.toISOString().slice(0, 10);
+      if (punchedDates.has(`${pto.profileId}|${iso}`)) continue;
+      const reg = Math.min(netHours, REGULAR_HOURS_PER_DAY);
+      const prev = hoursMap.get(pto.profileId) ?? { regular: 0, overtime: 0 };
+      hoursMap.set(pto.profileId, { regular: prev.regular + reg, overtime: prev.overtime });
+    }
   }
   return hoursMap;
 }
@@ -237,6 +276,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   const [employees, setEmployees] = useState<SupabaseEmployee[]>([]);
   const [salaryEntries, setSalaryEntries] = useState<SalaryEntry[]>([]);
   const [timecardEntries, setTimecardEntries] = useState<TimecardEntry[]>([]);
+  const [ptoRequests, setPtoRequests] = useState<PtoRequestRow[]>([]);
   const [payrollRuns, setPayrollRuns] = useState<PayrollRun[]>([]);
   const [payrollLineItems, setPayrollLineItems] = useState<PayrollLineItem[]>([]);
   const [auditLog, setAuditLog] = useState<PayrollAuditLogRow[]>([]);
@@ -269,17 +309,22 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
         runsRes,
         lineRes,
         auditRes,
+        ptoRows,
       ] = await Promise.all([
         supabase.from("profiles").select("id,display_name,username,role,assigned_branch,off_days,required_check_in,required_check_out").neq("role", "SUPERSUPERADMIN"),
         supabase.from("salary_entries").select("profile_id,effective_date,hourly_rate").not("profile_id", "is", null).order("effective_date", { ascending: false }),
         supabase.from("payroll_runs").select("id,period_start,period_end,status,generated_at").order("generated_at", { ascending: false }),
         supabase.from("payroll_line_items").select("payroll_run_id,profile_id,hours_worked,overtime_hours,hourly_rate,regular_pay,overtime_pay,gross_pay,net_pay,currency"),
         supabase.from("payroll_audit_log").select("action,employee_name,details,amount,created_at").order("created_at", { ascending: false }).limit(100),
+        // Best-effort — approved PTO days just don't get credited toward
+        // payroll if this fails, rather than blocking the whole dashboard.
+        getCompanyPtoRequests().catch((err) => { console.error("Failed to load PTO requests:", err); return [] as PtoRequestRow[]; }),
       ]);
 
       for (const res of [empRes, salRes, runsRes, lineRes, auditRes]) {
         if (res.error) throw new Error(res.error.message);
       }
+      setPtoRequests(ptoRows);
 
       const runs = (runsRes.data ?? []) as PayrollRun[];
 
@@ -383,8 +428,9 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   }
 
   // Hours worked per employee in current period. Computed from real
-  // check_in/check_out punches (see REGULAR_HOURS_PER_DAY comment above).
-  const hoursMap = computeHoursMap(timecardEntries);
+  // check_in/check_out punches (see REGULAR_HOURS_PER_DAY comment above),
+  // plus any approved PTO days within the picked period.
+  const hoursMap = computeHoursMap(timecardEntries, employees, ptoRequests, genStart, genEnd);
 
   // Build payroll rows. salary_entries.hourly_rate is always entered as a
   // plain USD figure (the shared "Add Rate Change" form labels it "$/hr"
