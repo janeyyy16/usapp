@@ -103,3 +103,17 @@ export async function updatePayrollLineItemExtra(
     .eq("profile_id", profileId);
   if (error) throw new Error(error.message);
 }
+
+/** Finance-only: toggle whether this employee's salary for this specific payroll run has actually been sent — see migration 0116. Independent of payroll_runs.status, since a run can be generated well before the money actually goes out, and different employees on the same run may be paid at different times. */
+export async function updatePayrollLineItemSalarySent(
+  runId: string,
+  profileId: string,
+  sent: boolean
+): Promise<void> {
+  const { error } = await supabase
+    .from("payroll_line_items")
+    .update({ salary_sent: sent })
+    .eq("payroll_run_id", runId)
+    .eq("profile_id", profileId);
+  if (error) throw new Error(error.message);
+}
