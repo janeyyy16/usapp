@@ -21,7 +21,7 @@
  * underneath that button (read straight from the saved entry, not a
  * transient toast) — so it stays visible/correct even after a refresh.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth";
 import { getMyProfileSchedule, getEntryForDate, saveEntry, resolveScheduledShiftHours, type UITimeEntry } from "@/lib/supabase/timecards";
 import { getCompanyPtoRequests } from "@/lib/supabase/pto";
@@ -55,6 +55,26 @@ export function TimeClockButtons() {
   const [mealMinutes, setMealMinutes] = useState<number | null>(null);
   const [entry, setEntry] = useState<UITimeEntry>(EMPTY_ENTRY);
   const [saving, setSaving] = useState(false);
+  // Time In/Meal In/Meal Out/Time Out sit right next to each other — `saving`
+  // alone only disables the row for the duration of the network round-trip,
+  // which on a fast connection can be well under a second, so two adjacent
+  // buttons clicked in one quick motion (or an accidental double-click) could
+  // both land before the first punch's disabled state is even visible. This
+  // adds a floor: once any punch fires, every button in the row stays
+  // disabled for a couple seconds regardless of how fast the save itself
+  // finishes, so two punches can never register as one near-instant motion.
+  const [locked, setLocked] = useState(false);
+  const lockRef = useRef(false);
+  const withLock = (fn: () => void) => {
+    if (lockRef.current) return;
+    lockRef.current = true;
+    setLocked(true);
+    fn();
+    setTimeout(() => {
+      lockRef.current = false;
+      setLocked(false);
+    }, 2000);
+  };
   const [onApprovedPtoToday, setOnApprovedPtoToday] = useState(false);
 
   useEffect(() => {
@@ -130,7 +150,7 @@ export function TimeClockButtons() {
       alert(ptoBlockMessage);
       return;
     }
-    void persist({ ...entry, checkIn: nowTime() });
+    withLock(() => void persist({ ...entry, checkIn: nowTime() }));
   };
 
   const handleTimeOut = () => {
@@ -139,7 +159,7 @@ export function TimeClockButtons() {
       alert(ptoBlockMessage);
       return;
     }
-    void persist({ ...entry, checkOut: nowTime() });
+    withLock(() => void persist({ ...entry, checkOut: nowTime() }));
   };
 
   const handleMealIn = () => {
@@ -164,7 +184,7 @@ export function TimeClockButtons() {
       );
       return;
     }
-    void persist({ ...entry, mealStart: nowTime() });
+    withLock(() => void persist({ ...entry, mealStart: nowTime() }));
   };
 
   const handleMealOut = () => {
@@ -177,7 +197,7 @@ export function TimeClockButtons() {
       alert(ptoBlockMessage);
       return;
     }
-    void persist({ ...entry, mealEnd: nowTime() });
+    withLock(() => void persist({ ...entry, mealEnd: nowTime() }));
   };
 
   const btnClass =
@@ -196,7 +216,7 @@ export function TimeClockButtons() {
         <button
           type="button"
           onClick={handleTimeIn}
-          disabled={saving || !!entry.checkIn || onApprovedPtoToday}
+          disabled={saving || locked || !!entry.checkIn || onApprovedPtoToday}
           title={onApprovedPtoToday ? "You have an approved PTO for today" : undefined}
           className={`${btnClass} text-green-300 hover:bg-green-500/15`}
         >
@@ -210,7 +230,7 @@ export function TimeClockButtons() {
           <button
             type="button"
             onClick={handleMealIn}
-            disabled={saving || !entry.checkIn || !!entry.checkOut || !!entry.mealStart || onApprovedPtoToday}
+            disabled={saving || locked || !entry.checkIn || !!entry.checkOut || !!entry.mealStart || onApprovedPtoToday}
             title={onApprovedPtoToday ? "You have an approved PTO for today" : undefined}
             className={`${btnClass} text-orange-300 hover:bg-orange-500/15`}
           >
@@ -224,7 +244,7 @@ export function TimeClockButtons() {
           <button
             type="button"
             onClick={handleMealOut}
-            disabled={saving || !!entry.checkOut || !entry.mealStart || !!entry.mealEnd || onApprovedPtoToday}
+            disabled={saving || locked || !!entry.checkOut || !entry.mealStart || !!entry.mealEnd || onApprovedPtoToday}
             title={onApprovedPtoToday ? "You have an approved PTO for today" : undefined}
             className={`${btnClass} text-orange-300 hover:bg-orange-500/15`}
           >
@@ -237,7 +257,7 @@ export function TimeClockButtons() {
         <button
           type="button"
           onClick={handleTimeOut}
-          disabled={saving || !entry.checkIn || !!entry.checkOut || onApprovedPtoToday}
+          disabled={saving || locked || !entry.checkIn || !!entry.checkOut || onApprovedPtoToday}
           title={onApprovedPtoToday ? "You have an approved PTO for today" : undefined}
           className={`${btnClass} text-red-300 hover:bg-red-500/15`}
         >

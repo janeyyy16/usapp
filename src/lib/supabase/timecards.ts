@@ -111,12 +111,12 @@ export function resolveScheduledShiftHours(
 }
 
 /**
- * Net (meal-excluded) scheduled hours for a day the employee didn't
- * actually punch — e.g. an approved PTO day, credited toward payroll at
- * this many hours so time off doesn't reduce pay. working_hours is already
- * net (see resolveScheduledShiftHours above), so it's used as-is; otherwise
- * this is the gross Time In/Out span minus the meal break, matching what a
- * real worked day nets out to via calcWorkedHours.
+ * Scheduled NET hours for a day the employee didn't actually punch (e.g. an
+ * approved PTO day being credited toward payroll) — the productive time
+ * they'd have worked, i.e. the gross scheduled shift minus the meal break.
+ * Prefers the explicit working_hours override (already net) same as
+ * resolveScheduledShiftHours; otherwise derives it from Check-In/Check-Out
+ * minus the meal.
  */
 export function resolveScheduledNetHours(
   requiredCheckIn: string,
@@ -124,7 +124,9 @@ export function resolveScheduledNetHours(
   workingHours: number | null | undefined,
   mealMinutes?: number | null | undefined
 ): number {
-  if (typeof workingHours === "number" && workingHours > 0) return workingHours;
+  if (typeof workingHours === "number" && workingHours > 0) {
+    return workingHours;
+  }
   if (!requiredCheckIn || !requiredCheckOut) return 0;
   const gross = hoursBetween(requiredCheckIn, requiredCheckOut);
   const meal = typeof mealMinutes === "number" && mealMinutes > 0 ? mealMinutes / 60 : 0;

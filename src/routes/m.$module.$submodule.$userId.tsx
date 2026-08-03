@@ -14,6 +14,7 @@ import { normalizeRole } from "@/lib/roleLabels";
 import { useAuth } from "@/lib/auth";
 import { usePersistedTab } from "@/lib/usePersistedTab";
 import { auth as firebaseAuth } from "@/lib/firebase/config";
+import { logModuleActivity } from "@/lib/supabase/moduleActivityLog";
 
 const TABS = [
   "General Information",
@@ -465,7 +466,7 @@ const WEEK_DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 function UserDetailsPage() {
   const { module, submodule, userId } = Route.useLoaderData();
-  const { ready, role: viewerRole } = useAuth();
+  const { ready, role: viewerRole, displayName: viewerDisplayName, email: viewerEmail } = useAuth();
   const navigate = useNavigate();
   // Only Admin/SuperAdmin may edit a user's email — it's the actual Firebase
   // Auth login credential (landing.tsx's username-login path resolves a
@@ -688,6 +689,15 @@ function UserDetailsPage() {
         console.warn("Employee info save skipped:", e);
       }
       setStatus("Saved.");
+      void logModuleActivity({
+        module: "user-management",
+        actorName: viewerDisplayName || viewerEmail || "Admin",
+        action: "user_edited",
+        targetType: "profile",
+        targetId: profileId,
+        targetLabel: form.displayName || newUsername || userId,
+        details: { role: primaryRole, extraRoles, isActive: form.isActive },
+      });
       // The URL is keyed by username (userId route param) - if it just
       // changed, the address bar is now stale (a refresh would 404 via
       // getProfileByUsername). Move to the new URL so it keeps working.

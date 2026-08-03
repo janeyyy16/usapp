@@ -39,6 +39,54 @@ export const ROLE_LABELS: Record<string, string> = {
 };
 
 /**
+ * Splits a role code into which department it belongs to and what tier the
+ * person holds within it (e.g. CSR_TEAM_LEADER -> department "CSR", role
+ * "Team Leader") — used anywhere department and role need to be shown as
+ * two separate columns (e.g. AccountingDashboard.tsx's Payroll table),
+ * instead of one flat "CSR Team Leader"-style label.
+ */
+export const ROLE_DEPARTMENT_BREAKDOWN: Record<string, { department: string; roleLabel: string }> = {
+  SUPERADMIN: { department: "Admin", roleLabel: "Super Admin" },
+  SUPERSUPERADMIN: { department: "Admin", roleLabel: "Super Super Admin" },
+  ADMIN: { department: "Admin", roleLabel: "Admin" },
+  MANAGER: { department: "Management", roleLabel: "Manager" },
+  SENIOR_MANAGER: { department: "Management", roleLabel: "Senior Manager" },
+  CSR: { department: "CSR", roleLabel: "CSR" },
+  TECHNICIAN: { department: "Technician", roleLabel: "Technician" },
+  TECHNICIAN_MANAGER: { department: "Technician", roleLabel: "Manager" },
+  TECHNICAL_DIRECTOR: { department: "Technician", roleLabel: "Director" },
+  TECHNICAL_ASSISTANT_DIRECTOR: { department: "Technician", roleLabel: "Assistant Director" },
+  DISPATCHER: { department: "Dispatch", roleLabel: "Dispatcher" },
+  HR: { department: "HR", roleLabel: "HR" },
+  IT: { department: "IT", roleLabel: "IT" },
+  PARTS: { department: "Parts", roleLabel: "Parts" },
+  FINANCE: { department: "Finance", roleLabel: "Finance" },
+  CLAIMS: { department: "Claims", roleLabel: "Claims" },
+  CSR_AGENT: { department: "CSR", roleLabel: "Agent" },
+  CSR_TEAM_LEADER: { department: "CSR", roleLabel: "Team Leader" },
+  CSR_MANAGER: { department: "CSR", roleLabel: "Manager" },
+  BRANCH_MANAGER: { department: "Branch Manager", roleLabel: "Manager" },
+  SENIOR_BRANCH_MANAGER: { department: "Branch Manager", roleLabel: "Senior Manager" },
+  CLAIMS_MANAGER: { department: "Claims", roleLabel: "Manager" },
+  CLAIMS_TEAM_LEADER: { department: "Claims", roleLabel: "Team Leader" },
+  PARTS_MANAGER: { department: "Parts", roleLabel: "Manager" },
+  PARTS_TEAM_LEADER: { department: "Parts", roleLabel: "Team Leader" },
+  BIZOPS_MANAGER: { department: "BizOps", roleLabel: "Manager" },
+  BIZOPS_SENIOR_MANAGER: { department: "BizOps", roleLabel: "Senior Manager" },
+  TRIAGE_USER: { department: "Triage", roleLabel: "Agent" },
+  TRIAGE_MANAGER: { department: "Triage", roleLabel: "Manager" },
+};
+
+/** Falls back to the flat ROLE_LABELS value for both fields if the role isn't in the breakdown map above. */
+export function getRoleDepartmentBreakdown(role: string | null | undefined): { department: string; roleLabel: string } {
+  const code = normalizeRole(role);
+  const known = ROLE_DEPARTMENT_BREAKDOWN[code];
+  if (known) return known;
+  const fallback = ROLE_LABELS[code] ?? (role ? String(role) : "—");
+  return { department: fallback, roleLabel: fallback };
+}
+
+/**
  * Normalize a raw role string to the canonical snake-case-uppercase code
  * (e.g. "CSR_MANAGER") used by the UserRole enum. Some profiles have a
  * legacy space-separated value (e.g. "CSR Manager") instead of the enum
