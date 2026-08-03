@@ -541,7 +541,15 @@ function UserDetailsPage() {
           // admin role, not a hardcoded name list. Stored as free-text
           // (manager_name matched against real profiles by display name —
           // see resolveTeamLeadOrManager in src/lib/notifyRouting.ts).
-          const eligible = all.filter((u) => ["ADMIN", "SUPERADMIN"].includes((u.role || "").toUpperCase()) || (u.role || "").toUpperCase().includes("MANAGER"));
+          // Checked against the user's FULL role set (primary + extra_roles),
+          // not just the primary role — a user whose primary role is e.g.
+          // "Claims Team Leader" but who also holds "Claims Manager" as a
+          // secondary role should still be selectable.
+          const isManagerish = (r: string | null | undefined) => {
+            const v = (r || "").toUpperCase();
+            return v === "ADMIN" || v === "SUPERADMIN" || v.includes("MANAGER");
+          };
+          const eligible = all.filter((u) => [u.role, ...(u.extra_roles ?? [])].some(isManagerish));
           setManagerCandidates(
             Array.from(new Set(eligible.map((u) => u.display_name || u.email).filter(Boolean))).sort((a, b) => a.localeCompare(b))
           );
