@@ -756,30 +756,36 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
   // is just: group everyone by their manager's name, then start from
   // whoever's own manager name doesn't resolve to a real person in view
   // (blank, "Unassigned", or a typo/former manager) — those are the roots.
+  // Deactivated accounts (e.g. an inactive placeholder like "Dummy.csr")
+  // don't belong in the org chart at all — excluded from every hierarchy
+  // structure below. Anyone whose real manager turns out to be one of these
+  // simply surfaces as their own root instead (same as an unassigned/typo'd
+  // manager already does), rather than nesting under a deactivated account.
+  const activeForHierarchy = useMemo(() => filtered.filter((r) => r.isActive !== false), [filtered]);
+
   const usersByName = useMemo(() => {
     const map = new Map<string, UserManagementRecord>();
-    filtered.forEach((r) => { if (r.userName) map.set(r.userName, r); });
+    activeForHierarchy.forEach((r) => { if (r.userName) map.set(r.userName, r); });
     return map;
-  }, [filtered]);
+  }, [activeForHierarchy]);
 
   const childrenByManagerName = useMemo(() => {
     const map = new Map<string, UserManagementRecord[]>();
-    filtered.forEach((record) => {
+    activeForHierarchy.forEach((record) => {
       if (!record.manager) return;
       map.set(record.manager, [...(map.get(record.manager) ?? []), record]);
     });
     for (const list of map.values()) list.sort((a, b) => a.userName.localeCompare(b.userName));
     return map;
-  }, [filtered]);
+  }, [activeForHierarchy]);
 
   // Roots with actual direct reports (real department heads) sort first,
   // alphabetically among themselves; roots with no one under them at all
-  // (disconnected/unused accounts, e.g. an inactive placeholder like
-  // "Dummy.csr") sink to the bottom instead of interleaving alphabetically
-  // with the real org chart.
+  // (disconnected/unused accounts) sink to the bottom instead of
+  // interleaving alphabetically with the real org chart.
   const hierarchyRoots = useMemo(
     () =>
-      filtered
+      activeForHierarchy
         .filter((record) => !record.manager || !usersByName.has(record.manager))
         .sort((a, b) => {
           const aHasChildren = (childrenByManagerName.get(a.userName)?.length ?? 0) > 0;
@@ -787,7 +793,7 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
           if (aHasChildren !== bHasChildren) return aHasChildren ? -1 : 1;
           return a.userName.localeCompare(b.userName);
         }),
-    [filtered, usersByName, childrenByManagerName],
+    [activeForHierarchy, usersByName, childrenByManagerName],
   );
 
   // Manager dropdown candidates: real users with a manager-ish or admin
