@@ -1,7 +1,7 @@
 /**
  * Tech Payroll — technicians are paid per completed repair ticket instead
  * of hourly. Two pieces:
- *  - tech_repair_rates (migration 0117): the $ amount per repair_type,
+ *  - tech_repair_rates (migration 0120): the $ amount per repair_type,
  *    optionally overridden per branch. Edited on TechPayrollSetup.tsx.
  *  - getTechCompletedRepairCounts: counts completed visits per technician
  *    (grouped by repair_type + branch, so AccountingDashboard.tsx can look

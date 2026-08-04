@@ -1,5 +1,5 @@
 -- =====================================================================
--- 0117 — Tech Payroll piece rates (per repair type, optionally per branch)
+-- 0120 — Tech Payroll piece rates (per repair type, optionally per branch)
 --
 -- Backs the "Tech Payroll" split on AccountingDashboard.tsx's Payroll tab:
 -- technicians are paid per completed repair ticket instead of hourly, at a
@@ -12,7 +12,7 @@
 -- a disconnected UI mockup with nothing persisted.
 --
 -- Same company-scoped RLS pattern as csr_teams (0027).
--- Run once in the Supabase SQL Editor, after 0116.
+-- Run once in the Supabase SQL Editor, after 0119.
 -- =====================================================================
 
 create table if not exists tech_repair_rates (
