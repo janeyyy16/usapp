@@ -213,9 +213,13 @@ function createPlannerTickets(rows: TicketRecord[]): PlannerTicket[] {
   });
 }
 
-function getSelectedTechRoster(location: string) {
+// `techsByLocation` is the live, active-technician roster (see
+// technicianRoster.ts) keyed by branch — falls back to the static
+// TECHNICIANS_BY_LOCATION seed for a location the live fetch hasn't
+// populated yet (still loading, or no active tech has that assigned_branch).
+function getSelectedTechRoster(location: string, techsByLocation: Record<string, string[]>) {
   if (!location) return [];
-  const roster = getTechniciansForLocation(location);
+  const roster = techsByLocation[location] ?? getTechniciansForLocation(location);
   if (roster.length) return roster;
   return ALL_TECHNICIANS.slice(0, 8);
 }
@@ -248,6 +252,21 @@ export function WorkPlannerPage({ mod, sub }: Props) {
   useEffect(() => {
     let cancelled = false;
     getCompanyMapProvider().then((p) => { if (!cancelled) setMapProvider(p); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Live active-technician roster by branch (see technicianRoster.ts) — the
+  // tech columns below are keyed off this instead of the frozen static
+  // TECHNICIANS_BY_LOCATION seed, so new hires appear and departed/deactivated
+  // techs disappear without a code change.
+  const [techsByLocation, setTechsByLocation] = useState<Record<string, string[]>>({});
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { getActiveTechniciansByLocation } = await import("@/lib/supabase/technicianRoster");
+      const map = await getActiveTechniciansByLocation();
+      if (!cancelled) setTechsByLocation(map);
+    })();
     return () => { cancelled = true; };
   }, []);
   const leafletContainerRef = useRef<HTMLDivElement | null>(null);
@@ -374,7 +393,7 @@ export function WorkPlannerPage({ mod, sub }: Props) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const selectedTechRoster = useMemo(() => getSelectedTechRoster(location), [location]);
+  const selectedTechRoster = useMemo(() => getSelectedTechRoster(location, techsByLocation), [location, techsByLocation]);
 
   const visibleTickets = useMemo(() => {
     const selectedDate = plannerDate;

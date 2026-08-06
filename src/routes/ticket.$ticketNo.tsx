@@ -4077,74 +4077,24 @@ function TicketDetailsPage() {
   // multi-role check below piles up the caller's primary role and their
   // extra_roles the same way.
 
-  // Merged technician list for the Add Visit / Edit Schedule
-  // dropdowns. Combines the canonical ALL_TECHNICIANS constant with
-  // every Supabase profile that has TECHNICIAN as primary role OR in
-  // extra_roles — so multi-role users like Daven Hodge (BizOps + Tech)
-  // show up in the technician picker. De-duplicated, sorted
-  // alphabetically. Falls back to the static list when the fetch
-  // hasn't completed yet.
-  const [companyTechUsers, setCompanyTechUsers] = useState<string[]>([]);
+  // Technician list for the Add Visit / Edit Schedule / Compensation
+  // dropdowns — the live, active-technician roster (primary OR
+  // secondary/extra Technician role; see technicianRoster.ts), which
+  // itself falls back to the static ALL_TECHNICIANS seed only for names
+  // with no matching Supabase profile at all (never-migrated field techs).
+  // Falls back to the static list outright while the fetch is still in
+  // flight or if it fails.
+  const [technicianOptions, setTechnicianOptions] = useState<string[]>(ALL_TECHNICIANS);
   useEffect(() => {
     if (!authReady) return;
     let cancelled = false;
     (async () => {
-      try {
-        const { getCompanyUsers } = await import("@/lib/supabase/users");
-        const rows = await getCompanyUsers();
-        if (cancelled) return;
-        const names = new Set<string>();
-        for (const u of rows as any[]) {
-          const primary = String(u?.role ?? "").toUpperCase();
-          const extras = ((u?.extra_roles as string[] | null | undefined) ?? []).map((r) =>
-            String(r ?? "").toUpperCase(),
-          );
-          if (primary === "TECHNICIAN" || extras.includes("TECHNICIAN")) {
-            const name = String(u?.display_name || u?.username || u?.email || "").trim();
-            if (name) names.add(name);
-          }
-        }
-        setCompanyTechUsers(Array.from(names));
-      } catch (err) {
-        console.warn("technician user list load failed:", err);
-        if (!cancelled) setCompanyTechUsers([]);
-      }
+      const { getActiveTechnicianNames } = await import("@/lib/supabase/technicianRoster");
+      const names = await getActiveTechnicianNames();
+      if (!cancelled) setTechnicianOptions(names);
     })();
     return () => { cancelled = true; };
   }, [authReady]);
-  const technicianOptions = useMemo(() => {
-    // De-duplicate across the canonical roster + Supabase-driven names.
-    // The key is aggressive enough to collapse common variants of the
-    // same person (case, whitespace, middle initials, email local part,
-    // trailing "(Tech)" markers) so a user listed in both sources — or
-    // as "Daven Hodge" and "Daven J Hodge" — renders once. We keep the
-    // longer/more-formal string (usually the display_name) as the
-    // canonical label.
-    const canonicalKey = (n: string) =>
-      String(n || "")
-        .toLowerCase()
-        .replace(/@.*$/g, "") // drop email domain
-        .replace(/\(.*?\)/g, "") // drop parenthetical tags
-        .replace(/[^a-z\s]/g, " ") // strip punctuation
-        .replace(/\b[a-z]\b/g, "") // strip single-letter middle initials
-        .replace(/\s+/g, " ")
-        .trim();
-
-    const chosen = new Map<string, string>();
-    const add = (raw: string) => {
-      const t = String(raw || "").trim();
-      if (!t) return;
-      const key = canonicalKey(t);
-      if (!key) return;
-      const existing = chosen.get(key);
-      if (!existing || t.length > existing.length) {
-        chosen.set(key, t);
-      }
-    };
-    for (const n of ALL_TECHNICIANS) add(n);
-    for (const n of companyTechUsers) add(n);
-    return Array.from(chosen.values()).sort((a, b) => a.localeCompare(b));
-  }, [companyTechUsers]);
 
   const isClaimsRole = useMemo(() => {
     const primary = String(currentUserRole || "").toUpperCase();
