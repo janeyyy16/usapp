@@ -1,4 +1,5 @@
-import { normalizeRole, ATTENDANCE_MANAGER_TIER_ROLES_ARRAY } from "./roleLabels";
+import { normalizeRole, ATTENDANCE_MANAGER_TIER_ROLES_ARRAY, isSubmoduleAllowed, isCompanySuperAdminRole } from "./roleLabels";
+import type { ModuleDef, SubModuleDef } from "./modules";
 
 /**
  * Role gates for the Dashboard module's submodules (mod.slug === "dashboard").
@@ -59,4 +60,49 @@ export function hasDashboardAccess(
   const normalizedAllowed = allowedRoles.map((r) => normalizeRole(r));
   if (normalizedAllowed.includes(primary)) return true;
   return (extraRoles || []).some((r) => normalizedAllowed.includes(normalizeRole(r)));
+}
+
+/**
+ * Roles allowed into the admin module overall, and into User Management
+ * specifically. Hoisted here (out of m.$module.$submodule.tsx, the only
+ * place that used to declare these) so the Accessibility Management page's
+ * displayed defaults can never drift from what the route gate actually
+ * enforces — both read the exact same constants.
+ */
+export const ADMIN_MODULE_ROLES = ["ADMIN", "SUPERADMIN"];
+export const USER_MANAGEMENT_ROLES = ["HR", "MANAGER", "ADMIN", "SUPERADMIN"];
+
+/** Admin-module submodules open to every role regardless of the admin-module gate — company-wide utilities like the internal team messenger. */
+export const ALL_ROLES_ADMIN_SUBMODULES = new Set(["internal-message-support"]);
+
+/**
+ * Collapses the five hardcoded "can this role open this submodule at all"
+ * checks m.$module.$submodule.tsx runs (CSR allow-list, Admin-module gate,
+ * User Management gate, Company Settings gate, Dashboard-submodule gate)
+ * into one boolean, for a role in the abstract (no extraRoles/signed-in
+ * user — this answers "what can this role code do on its own"). Used by
+ * both the real route gate (as its fallback when no explicit
+ * role_module_access override exists) and the Accessibility Management
+ * matrix page (to seed each checkbox's default state) — so the two can
+ * never disagree about what today's rules actually allow.
+ */
+export function computeSubmoduleFallbackAccess(mod: ModuleDef, sub: SubModuleDef, role: string): boolean {
+  if (!isSubmoduleAllowed(role, mod.slug, sub.slug, [])) return false;
+
+  if (mod.slug === "admin") {
+    const hasAdmin = hasDashboardAccess(ADMIN_MODULE_ROLES, role, []);
+    const hasItTickets = (sub as any).custom === "it-tickets" && hasDashboardAccess(getDashboardRoleGate("it-tickets") || [], role, []);
+    if (!hasAdmin && !hasItTickets && !ALL_ROLES_ADMIN_SUBMODULES.has(sub.slug)) return false;
+  }
+
+  if (sub.custom === "user-management" && !hasDashboardAccess(USER_MANAGEMENT_ROLES, role, [])) return false;
+
+  if ((sub as any).custom === "company-settings" && !isCompanySuperAdminRole(role, [])) return false;
+
+  if (mod.slug === "dashboard") {
+    const gate = getDashboardRoleGate(sub.slug);
+    if (gate && !hasDashboardAccess(gate, role, [])) return false;
+  }
+
+  return true;
 }
