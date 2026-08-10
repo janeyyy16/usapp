@@ -455,10 +455,23 @@ const USER_TABS = [
 const SMS_OPTIONS = ["SMS Available", "Chat available", "View available", "Not available"];
 const WEEK_DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+// Only these roles may open an employee's detail/edit page at all — every
+// field here (Role, Direct Manager, Status, branch, work plan, ...) can
+// reshape the org hierarchy or someone's access, so it isn't limited to
+// just the email field like canEditEmail below. Checked against primary
+// role OR any extra_roles entry, same "holding it either way counts"
+// convention as everywhere else in this file.
+const ACCOUNT_EDIT_ROLES = new Set(["ADMIN", "SUPERADMIN", "SUPERSUPERADMIN", "HR"]);
+function canEditAccountDetails(role: string | null | undefined, extraRoles: string[] | null | undefined): boolean {
+  const held = [role, ...(extraRoles ?? [])].map((r) => normalizeRole(r));
+  return held.some((r) => ACCOUNT_EDIT_ROLES.has(r));
+}
+
 function UserDetailsPage() {
   const { module, submodule, userId } = Route.useLoaderData();
-  const { ready, role: viewerRole, displayName: viewerDisplayName, email: viewerEmail } = useAuth();
+  const { ready, role: viewerRole, extraRoles: viewerExtraRoles, displayName: viewerDisplayName, email: viewerEmail } = useAuth();
   const navigate = useNavigate();
+  const hasAccountAccess = canEditAccountDetails(viewerRole, viewerExtraRoles);
   // Only Admin/SuperAdmin may edit a user's email — it's the actual Firebase
   // Auth login credential (landing.tsx's username-login path resolves a
   // username to profiles.email before calling Firebase), not just contact
@@ -742,6 +755,25 @@ function UserDetailsPage() {
       />
     </label>
   );
+
+  if (ready && !hasAccountAccess) {
+    return (
+      <>
+        <AppHeader />
+        <main className="flex-1 bg-slate-950 py-6">
+          <div className="max-w-5xl mx-auto px-6">
+            <div className="rounded-xl border border-white/15 bg-white/8 p-6 text-white backdrop-blur-md">
+              <h1 className="text-2xl font-bold mb-2">Access restricted</h1>
+              <p className="text-slate-300">Only Admin, Super Admin, and HR can view or edit employee details.</p>
+              <p className="mt-2 text-sm text-slate-400">Current sign-in: {viewerEmail}</p>
+              <p className="mt-1 text-sm text-slate-400">Your role: {viewerRole || "No role assigned"}</p>
+            </div>
+          </div>
+        </main>
+        <Footer />
+      </>
+    );
+  }
 
   return (
     <>
