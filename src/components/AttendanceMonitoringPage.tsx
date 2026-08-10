@@ -21,7 +21,8 @@ import { logModuleActivity } from "@/lib/supabase/moduleActivityLog";
 import { getOrCreateDmThread, sendMessage } from "@/lib/supabase/messaging";
 import { resolveTeamLeadOrManager, visibleAttendanceProfileIds } from "@/lib/notifyRouting";
 import { getCsrTeamComposition, type CsrTeamComposition } from "@/lib/supabase/csrTeams";
-import { ATTENDANCE_GRACE_MINUTES, addMinutesToHHMM, nowInTimezone, timezoneForBranch, DEFAULT_ATTENDANCE_TIMEZONE } from "@/lib/attendanceGrace";
+import { ATTENDANCE_GRACE_MINUTES, addMinutesToHHMM, nowInTimezone, timezoneForBranch, DEFAULT_ATTENDANCE_TIMEZONE, payGraceMinutesFor, applyGraceToCheckIn, roundCheckOutToSchedule, toSeconds, ON_TIME_BUFFER_SECONDS } from "@/lib/attendanceGrace";
+import { formatClockTime } from "@/lib/payslipTemplate";
 import {
   getCompanyPtoRequests,
   createPtoRequest,
@@ -46,6 +47,8 @@ import {
 
 interface DailyRecord {
   profileId: string;
+  /** Only set in date-range mode (Daily Attendance Tracker's From/To filter) — the single-day view already carries its date in the section heading instead. */
+  date?: string;
   name: string;
   email: string;
   location: string;
@@ -60,6 +63,9 @@ interface DailyRecord {
   isOffDay: boolean;
   /** Display name of whoever clocked this person in, if it wasn't themselves (a manager's proxy clock-in). */
   clockedInBy: string | null;
+  /** Scheduled shift times ("HH:MM", possibly "") — shown in the name popover, see requiredTimePopoverId. */
+  requiredCheckIn: string;
+  requiredCheckOut: string;
 }
 
 const PTO_TYPE_LABELS: Record<PtoType, string> = {
@@ -102,9 +108,24 @@ function fmtHoursMinutes(hours: number): string {
  * zone) when scoring today live, or `null` when scoring a day that's
  * already over (e.g. past days in the monthly summary) — grace never
  * applies then, since anything still missing at that point is definitively
- * missing, not "not due yet." A 5-minute grace period applies uniformly to
- * both clock-in and clock-out (and softens "Late Check In" — arriving a
- * couple minutes late no longer gets flagged).
+ * missing, not "not due yet."
+ *
+ * `graceMinutes` is the caller-computed per-region/role grace window (see
+ * payGraceMinutesFor in attendanceGrace.ts — PH 5 min, US office 15 min,
+ * Technicians 0), applied to both clock-in and clock-out detection timing.
+ * A late-but-within-grace clock-in still shows a flag (so it isn't silently
+ * invisible) but distinguished from a real (beyond-grace) late arrival —
+ * and the same grace-adjusted check-in/rounded check-out feeds the
+ * Over/Under Time worked-hours calc, so a fully-forgiven late arrival
+ * doesn't also throw a false "Under Time" flag.
+ *
+ * Real punches carry seconds ("08:00:45"); schedules are plain "HH:MM".
+ * Lateness/grace comparisons below go through toSeconds() rather than raw
+ * string comparison (which is unsound across that precision mismatch — see
+ * attendanceGrace.ts). A punch within ON_TIME_BUFFER_SECONDS (60s) of the
+ * scheduled check-in is rounded to exactly on time before lateness is even
+ * considered, same clock-precision courtesy applied to pay in
+ * applyGraceToCheckIn/roundCheckOutToSchedule.
  */
 function computeAlerts(
   checkIn: string,
@@ -114,12 +135,14 @@ function computeAlerts(
   requiredCheckIn: string,
   requiredCheckOut: string,
   isOffDay: boolean,
-  nowHHMM: string | null
+  nowHHMM: string | null,
+  graceMinutes: number = ATTENDANCE_GRACE_MINUTES,
+  workingHours?: number | null
 ): string[] {
   if (isOffDay) return [];
 
-  const graceIn = requiredCheckIn ? addMinutesToHHMM(requiredCheckIn, ATTENDANCE_GRACE_MINUTES) : null;
-  const graceOut = requiredCheckOut ? addMinutesToHHMM(requiredCheckOut, ATTENDANCE_GRACE_MINUTES) : null;
+  const graceIn = requiredCheckIn ? addMinutesToHHMM(requiredCheckIn, graceMinutes) : null;
+  const graceOut = requiredCheckOut ? addMinutesToHHMM(requiredCheckOut, graceMinutes) : null;
   const pastInGrace = !graceIn || nowHHMM === null || nowHHMM > graceIn;
   const pastOutGrace = !graceOut || nowHHMM === null || nowHHMM > graceOut;
 
@@ -129,17 +152,36 @@ function computeAlerts(
   const alerts: string[] = [];
   if (!checkIn) {
     if (pastInGrace) alerts.push("No Clock In");
-  } else if (graceIn && checkIn > graceIn) {
-    alerts.push("Late Check In");
+  } else if (requiredCheckIn) {
+    const lateInSeconds = toSeconds(checkIn) - toSeconds(requiredCheckIn);
+    if (lateInSeconds > ON_TIME_BUFFER_SECONDS) {
+      if (lateInSeconds <= graceMinutes * 60) alerts.push("Late Check In (Covered by Grace)");
+      else alerts.push("Late Check In");
+    }
   }
   if (checkIn && !checkOut && pastOutGrace) alerts.push("No Clock Out");
   if (checkIn && checkOut) {
-    const worked = calcWorkedHours({ checkIn, checkOut, mealStart, mealEnd, notes: "" });
-    const requiredHours = requiredCheckIn && requiredCheckOut ? hoursDiff(requiredCheckIn, requiredCheckOut) : 8;
+    const paidCheckIn = requiredCheckIn ? applyGraceToCheckIn(checkIn, requiredCheckIn, graceMinutes) : checkIn;
+    const paidCheckOut = requiredCheckOut ? roundCheckOutToSchedule(checkOut, requiredCheckOut) : checkOut;
+    const worked = calcWorkedHours({ checkIn: paidCheckIn, checkOut: paidCheckOut, mealStart, mealEnd, notes: "" });
+    // `worked` already has the meal break subtracted (calcWorkedHours), so
+    // the target it's compared against needs to be the NET duty-hours
+    // figure too — the profile's own working_hours (already meal-excluded)
+    // when set. Falling back to the raw requiredCheckIn/requiredCheckOut
+    // span here would compare a meal-EXCLUSIVE worked total against a
+    // meal-INCLUSIVE required span, so anyone who takes their full
+    // scheduled lunch reads as "Under Time" by about the length of their
+    // lunch even after working their entire required shift.
+    const requiredHours = workingHours != null ? workingHours : requiredCheckIn && requiredCheckOut ? hoursDiff(requiredCheckIn, requiredCheckOut) : 8;
     if (worked - requiredHours > 0.25) alerts.push(`Over Time (${fmtHoursMinutes(worked)})`);
     else if (requiredHours - worked > 0.25) alerts.push(`Under Time (${fmtHoursMinutes(worked)})`);
   }
   return alerts;
+}
+
+/** "Late Check In" counts toward late-arrival stats/filters; the grace-covered variant is still shown as a flag on the day itself but doesn't count as an actual lateness incident. */
+function isPenalizedLateAlert(alert: string): boolean {
+  return alert.includes("Late") && !alert.includes("Covered by Grace");
 }
 
 export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) {
@@ -173,11 +215,28 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
     ["daily-attendance", "pto-management", "corrections", "warnings"],
     "daily-attendance",
   );
-  const [summaryView, setSummaryView] = useState<"weekly" | "monthly">("weekly");
+  const [summaryView, setSummaryView] = useState<"weekly" | "monthly" | "custom">("weekly");
   const [searchEmployee, setSearchEmployee] = useState<string>("");
   const [filterDepartment, setFilterDepartment] = useState<string>("all");
   const [summaryDepartmentFilter, setSummaryDepartmentFilter] = useState<string>("all");
+  // Weekly Attendance Summary: narrow the roster to who checked in (or was
+  // absent) on one specific day of the current week, instead of always
+  // showing everyone's full Mon-Fri row.
+  const [weeklyDayFilter, setWeeklyDayFilter] = useState<number | "all">("all");
+  const [weeklyStatusFilter, setWeeklyStatusFilter] = useState<"all" | "present" | "absent">("all");
   const [filterLocation, setFilterLocation] = useState<string>("all");
+  // Daily Attendance Tracker only — hides everyone still missing either
+  // punch (absent, or clocked in but not out yet) so the table only shows
+  // employees whose attendance for the day is actually complete.
+  const [completeOnly, setCompleteOnly] = useState(false);
+  // Daily Attendance Tracker — clicking an employee's name shows their
+  // scheduled shift (Required Check In/Out) right there instead of only
+  // linking out to their full profile. Keyed by the SAME id used for the
+  // row key (profileId, or profileId|date in date-range mode) so opening
+  // one person's popover on one date doesn't also open it for the same
+  // person on a different date. Only one open at a time — clicking the
+  // same name again, or a different name, closes/switches it.
+  const [requiredTimePopoverKey, setRequiredTimePopoverKey] = useState<string | null>(null);
   const [selectedNote, setSelectedNote] = useState<string | null>(null);
   const [selectedCorrection, setSelectedCorrection] = useState<TimecardCorrectionRow | null>(null);
   const [correctionTimecardData, setCorrectionTimecardData] = useState<{ checkIn: string; checkOut: string; mealStart: string; mealEnd: string }>({ checkIn: "", checkOut: "", mealStart: "", mealEnd: "" });
@@ -187,6 +246,9 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
   const [notifyTeamLead, setNotifyTeamLead] = useState(false);
   const [alertModalOpen, setAlertModalOpen] = useState(false);
   const [selectedAlertType, setSelectedAlertType] = useState<"missing-clockin" | "missing-clockout" | "late-arrival" | null>(null);
+  // Custom Attendance Summary — clicking a row's Present/Absent/Late count
+  // opens a day-by-day breakdown for that one employee over the picked range.
+  const [customDetailModal, setCustomDetailModal] = useState<{ profileId: string; name: string; type: "present" | "absent" | "late" } | null>(null);
   const [showPtoForm, setShowPtoForm] = useState(false);
   const [ptoForm, setPtoForm] = useState({ profileId: "", ptoType: "vacation" as PtoType, startDate: "", endDate: "", reason: "" });
   const [ptoFormHireDate, setPtoFormHireDate] = useState<string | null>(null);
@@ -283,6 +345,28 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
     return () => { cancelled = true; };
   }, [dailyDate, rangeStart, rangeEnd, ready, uid]);
 
+  // Daily Attendance Tracker date-RANGE filter — separate from `dailyDate`
+  // above (the single-day picker next to the table heading). When both
+  // From/To are set, the tracker table switches to showing one row per
+  // employee per date in the range instead of the single selected day.
+  const [filterDateFrom, setFilterDateFrom] = useState<string>("");
+  const [filterDateTo, setFilterDateTo] = useState<string>("");
+  const dateRangeActive = Boolean(filterDateFrom && filterDateTo && filterDateFrom <= filterDateTo);
+  const clearDateRange = () => { setFilterDateFrom(""); setFilterDateTo(""); };
+
+  const [rangeFilterEntries, setRangeFilterEntries] = useState<CompanyTimecardEntry[]>([]);
+  const [rangeFilterLoading, setRangeFilterLoading] = useState(false);
+  useEffect(() => {
+    if (!dateRangeActive) { setRangeFilterEntries([]); return; }
+    if (!ready || !uid) return;
+    let cancelled = false;
+    setRangeFilterLoading(true);
+    getCompanyTimecardEntries(filterDateFrom, filterDateTo)
+      .then((rows) => { if (!cancelled) setRangeFilterEntries(rows); })
+      .finally(() => { if (!cancelled) setRangeFilterLoading(false); });
+    return () => { cancelled = true; };
+  }, [dateRangeActive, filterDateFrom, filterDateTo, ready, uid]);
+
   const dailyEntryByProfileId = useMemo(() => {
     const map = new Map<string, CompanyTimecardEntry>();
     if (dailyDate >= rangeStart && dailyDate <= rangeEnd) {
@@ -292,6 +376,27 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
     }
     return map;
   }, [dailyDate, rangeStart, rangeEnd, entries, dailyDateEntries]);
+
+  // Custom Attendance Summary — lets HR/managers pick any date range instead
+  // of being limited to the current week or month-to-date. Defaults to the
+  // same window already loaded (rangeStart/rangeEnd) so switching to Custom
+  // shows real data immediately, before the user picks their own dates.
+  const [customRangeStart, setCustomRangeStart] = useState<string>(rangeStart);
+  const [customRangeEnd, setCustomRangeEnd] = useState<string>(rangeEnd);
+  const [customRangeEntries, setCustomRangeEntries] = useState<CompanyTimecardEntry[]>([]);
+  const [customRangeLoading, setCustomRangeLoading] = useState(false);
+  // Same "only fetch when outside what's already loaded" rule as dailyDateEntries above.
+  const customRangeCovered = customRangeStart >= rangeStart && customRangeEnd <= rangeEnd;
+  useEffect(() => {
+    if (summaryView !== "custom" || customRangeCovered) { setCustomRangeEntries([]); return; }
+    if (!ready || !uid || !customRangeStart || !customRangeEnd || customRangeStart > customRangeEnd) return;
+    let cancelled = false;
+    setCustomRangeLoading(true);
+    getCompanyTimecardEntries(customRangeStart, customRangeEnd)
+      .then((rows) => { if (!cancelled) setCustomRangeEntries(rows); })
+      .finally(() => { if (!cancelled) setCustomRangeLoading(false); });
+    return () => { cancelled = true; };
+  }, [summaryView, customRangeStart, customRangeEnd, customRangeCovered, ready, uid]);
 
   // PTO eligibility for whoever is selected in the New PTO Request form —
   // hire date lives in profiles.employee_info, fetched on demand per
@@ -364,13 +469,22 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
     return map;
   }, [entries]);
 
+  const customEntriesByKey = useMemo(() => {
+    if (customRangeCovered) return entriesByKey;
+    const map = new Map<string, CompanyTimecardEntry>();
+    customRangeEntries.forEach((e) => map.set(`${e.profileId}|${e.workDate}`, e));
+    return map;
+  }, [customRangeCovered, entriesByKey, customRangeEntries]);
+
   const isDailyDateToday = dailyDate === todayISO;
   const dailyDateLabel = isDailyDateToday ? "Today" : dailyDate;
 
-  const dailyRecords: DailyRecord[] = useMemo(() => {
-    const dow = new Date(dailyDate + "T00:00:00").getDay();
-    return visibleProfiles.map((p) => {
-      const entry = dailyEntryByProfileId.get(p.id);
+  // Shared by the single-day tracker and the date-range filter below — same
+  // per-employee-per-date computation either way, just called once per date
+  // in range mode instead of once for `dailyDate`.
+  const buildDailyRecord = useCallback(
+    (p: ProfileRow, dateISO: string, entry: CompanyTimecardEntry | undefined, isToday: boolean): DailyRecord => {
+      const dow = new Date(dateISO + "T00:00:00").getDay();
       const offDays = new Set<number>(p.off_days ?? []);
       const isOffDay = offDays.has(dow);
       const checkIn = entry?.checkIn || "";
@@ -381,11 +495,14 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
       // Grace-period/"not due yet" logic only makes sense for today — a
       // past day is already fully over, so anything still missing there is
       // definitively missing (see computeAlerts' nowHHMM=null doc comment).
-      const rowNowHHMM = isDailyDateToday ? (nowByTimezone[branchTz] ?? nowInTimezone(branchTz).hhmm) : null;
-      const alerts = computeAlerts(checkIn, checkOut, mealIn, mealOut, p.required_check_in || "", p.required_check_out || "", isOffDay, rowNowHHMM);
+      const rowNowHHMM = isToday ? (nowByTimezone[branchTz] ?? nowInTimezone(branchTz).hhmm) : null;
+      const country = p.assigned_branch === "Philippines" ? "PH" : "US";
+      const graceMinutes = payGraceMinutesFor(country, normalizeRole(p.role) === "TECHNICIAN");
+      const alerts = computeAlerts(checkIn, checkOut, mealIn, mealOut, p.required_check_in || "", p.required_check_out || "", isOffDay, rowNowHHMM, graceMinutes, p.working_hours);
       const clockedInByName = entry?.clockedInBy ? allProfileById.get(entry.clockedInBy)?.display_name || null : null;
       return {
         profileId: p.id,
+        date: dateISO,
         name: p.display_name || p.email,
         email: p.email,
         location: p.assigned_branch || "",
@@ -399,14 +516,43 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
         alerts,
         isOffDay,
         clockedInBy: clockedInByName,
+        requiredCheckIn: p.required_check_in || "",
+        requiredCheckOut: p.required_check_out || "",
       };
-    });
-  }, [visibleProfiles, dailyEntryByProfileId, dailyDate, isDailyDateToday, nowByTimezone, allProfileById]);
+    },
+    [nowByTimezone, allProfileById]
+  );
+
+  const dailyRecords: DailyRecord[] = useMemo(
+    () => visibleProfiles.map((p) => buildDailyRecord(p, dailyDate, dailyEntryByProfileId.get(p.id), isDailyDateToday)),
+    [visibleProfiles, dailyEntryByProfileId, dailyDate, isDailyDateToday, buildDailyRecord]
+  );
+
+  const rangeEntryByKey = useMemo(() => {
+    const map = new Map<string, CompanyTimecardEntry>();
+    for (const e of rangeFilterEntries) map.set(`${e.profileId}|${e.workDate}`, e);
+    return map;
+  }, [rangeFilterEntries]);
+
+  // One record per employee per date in [filterDateFrom, filterDateTo], inclusive.
+  const rangeRecords: DailyRecord[] = useMemo(() => {
+    if (!dateRangeActive) return [];
+    const records: DailyRecord[] = [];
+    const end = new Date(`${filterDateTo}T00:00:00`);
+    for (let d = new Date(`${filterDateFrom}T00:00:00`); d <= end; d.setDate(d.getDate() + 1)) {
+      const iso = toISODate(d);
+      const isToday = iso === todayISO;
+      for (const p of visibleProfiles) {
+        records.push(buildDailyRecord(p, iso, rangeEntryByKey.get(`${p.id}|${iso}`), isToday));
+      }
+    }
+    return records;
+  }, [dateRangeActive, filterDateFrom, filterDateTo, visibleProfiles, rangeEntryByKey, todayISO, buildDailyRecord]);
 
   const totalEmployees = visibleProfiles.length;
   const presentToday = dailyRecords.filter((r) => r.checkIn !== "—").length;
   const absentToday = dailyRecords.filter((r) => r.checkIn === "—" && !r.isOffDay).length;
-  const lateToday = dailyRecords.filter((r) => r.alerts.some((a) => a.includes("Late"))).length;
+  const lateToday = dailyRecords.filter((r) => r.alerts.some(isPenalizedLateAlert)).length;
   const ptoPendingApproval = ptoRequests.filter((r) => r.status === "pending").length;
 
   const getAlertColor = (alert: string) => {
@@ -416,14 +562,23 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
     return "bg-red-500/20 text-red-300 border-red-500/30";
   };
 
-  const filteredAndSortedData = dailyRecords
+  const filteredAndSortedData = (dateRangeActive ? rangeRecords : dailyRecords)
     .filter((record) => {
+      // Employees who never clocked in for this date don't belong in the
+      // Daily Attendance Tracker table at all — it's a list of the day's
+      // actual attendance, not a roster. They're still counted in the
+      // Absent KPI card and the Missing Clock-In alert above, just not
+      // listed row-by-row here.
+      if (record.checkIn === "—") return false;
       if (searchEmployee && !record.name.toLowerCase().includes(searchEmployee.toLowerCase())) return false;
       if (filterDepartment !== "all" && record.department !== filterDepartment) return false;
       if (filterLocation !== "all" && record.location !== filterLocation) return false;
+      // checkIn is already guaranteed above — this now only additionally
+      // requires a completed checkOut.
+      if (completeOnly && record.checkOut === "—") return false;
       return true;
     })
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .sort((a, b) => (dateRangeActive && a.date !== b.date ? (a.date! < b.date! ? -1 : 1) : a.name.localeCompare(b.name)));
 
   // Grouped by department, both the department groups and each group's
   // employees sorted alphabetically — same treatment as the Payroll pages.
@@ -485,6 +640,14 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
     });
   }, [summaryProfiles, weekDates, entriesByKey, todayISO]);
 
+  // Narrows weeklySummary to rows matching the selected day + status (e.g.
+  // "who was absent on Wednesday") — "all" for either just shows everyone,
+  // same as before this filter existed.
+  const filteredWeeklySummary = useMemo(() => {
+    if (weeklyDayFilter === "all" || weeklyStatusFilter === "all") return weeklySummary;
+    return weeklySummary.filter((row) => row.cells[weeklyDayFilter] === weeklyStatusFilter);
+  }, [weeklySummary, weeklyDayFilter, weeklyStatusFilter]);
+
   // ---- Monthly summary (month-to-date) ----
   const monthlySummary = useMemo(() => {
     const today = new Date();
@@ -503,8 +666,10 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
         const checkIn = entry?.checkIn || "";
         const checkOut = entry?.checkOut || "";
         if (checkIn) present++;
-        const alerts = computeAlerts(checkIn, checkOut, entry?.mealStart || "", entry?.mealEnd || "", p.required_check_in || "", p.required_check_out || "", false, null);
-        if (alerts.some((a) => a.includes("Late"))) late++;
+        const monthlyCountry = p.assigned_branch === "Philippines" ? "PH" : "US";
+        const monthlyGraceMinutes = payGraceMinutesFor(monthlyCountry, normalizeRole(p.role) === "TECHNICIAN");
+        const alerts = computeAlerts(checkIn, checkOut, entry?.mealStart || "", entry?.mealEnd || "", p.required_check_in || "", p.required_check_out || "", false, null, monthlyGraceMinutes, p.working_hours);
+        if (alerts.some(isPenalizedLateAlert)) late++;
       }
       const absent = Math.max(0, workingDays - present);
       const pct = workingDays > 0 ? Math.round((present / workingDays) * 100) : 100;
@@ -512,6 +677,73 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
       return { profileId: p.id, name: p.display_name || p.email, workingDays, present, absent, late, pct, status };
     });
   }, [summaryProfiles, entriesByKey]);
+
+  // ---- Custom-range summary — same shape as monthlySummary above, just
+  // over whatever [customRangeStart, customRangeEnd] the user picked instead
+  // of a fixed week/month-to-date window. ----
+  const customSummary = useMemo(() => {
+    if (!customRangeStart || !customRangeEnd || customRangeStart > customRangeEnd) return [];
+    const start = new Date(customRangeStart + "T00:00:00");
+    const end = new Date(customRangeEnd + "T00:00:00");
+    return summaryProfiles.map((p) => {
+      const offDays = new Set<number>(p.off_days ?? []);
+      let workingDays = 0;
+      let present = 0;
+      let late = 0;
+      for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+        const iso = toISODate(d);
+        if (iso > todayISO) break; // don't count days that haven't happened yet as absences
+        const dow = d.getDay();
+        if (offDays.has(dow)) continue;
+        workingDays++;
+        const entry = customEntriesByKey.get(`${p.id}|${iso}`);
+        const checkIn = entry?.checkIn || "";
+        const checkOut = entry?.checkOut || "";
+        if (checkIn) present++;
+        const alerts = computeAlerts(checkIn, checkOut, entry?.mealStart || "", entry?.mealEnd || "", p.required_check_in || "", p.required_check_out || "", false, null, ATTENDANCE_GRACE_MINUTES, p.working_hours);
+        if (alerts.some((a) => a.includes("Late"))) late++;
+      }
+      const absent = Math.max(0, workingDays - present);
+      const pct = workingDays > 0 ? Math.round((present / workingDays) * 100) : 100;
+      const status = pct >= 90 ? "Good" : pct >= 70 ? "Warning" : "Poor";
+      return { profileId: p.id, name: p.display_name || p.email, workingDays, present, absent, late, pct, status };
+    });
+  }, [summaryProfiles, customEntriesByKey, customRangeStart, customRangeEnd, todayISO]);
+
+  // Day-by-day breakdown behind the Custom Attendance Summary's Present/
+  // Absent/Late numbers — same day-iteration/off-day rules as customSummary
+  // above, just returning one row per day instead of an aggregate count.
+  // Only computed on demand (the modal is rarely open), so a plain function
+  // rather than a memo.
+  interface CustomDayDetail {
+    date: string;
+    checkIn: string;
+    mealStart: string;
+    mealEnd: string;
+    checkOut: string;
+    isLate: boolean;
+  }
+  const buildCustomDayDetails = (profileId: string): CustomDayDetail[] => {
+    const p = summaryProfiles.find((pr) => pr.id === profileId);
+    if (!p || !customRangeStart || !customRangeEnd || customRangeStart > customRangeEnd) return [];
+    const offDays = new Set<number>(p.off_days ?? []);
+    const start = new Date(customRangeStart + "T00:00:00");
+    const end = new Date(customRangeEnd + "T00:00:00");
+    const days: CustomDayDetail[] = [];
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+      const iso = toISODate(d);
+      if (iso > todayISO) break;
+      if (offDays.has(d.getDay())) continue;
+      const entry = customEntriesByKey.get(`${p.id}|${iso}`);
+      const checkIn = entry?.checkIn || "";
+      const checkOut = entry?.checkOut || "";
+      const mealStart = entry?.mealStart || "";
+      const mealEnd = entry?.mealEnd || "";
+      const alerts = computeAlerts(checkIn, checkOut, mealStart, mealEnd, p.required_check_in || "", p.required_check_out || "", false, null, ATTENDANCE_GRACE_MINUTES, p.working_hours);
+      days.push({ date: iso, checkIn, mealStart, mealEnd, checkOut, isLate: alerts.some((a) => a.includes("Late")) });
+    }
+    return days;
+  };
 
   // ---- Warnings tab: month-to-date late counts, tardiest first ----
   const warnEmployees = useMemo(() => {
@@ -823,12 +1055,35 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
               <ChevronLeft className="h-4 w-4" /> {mod.label}
             </Link>
           </div>
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
-              <span className="inline-block h-2.5 w-2.5 rounded-full bg-primary" />
-              {sub.title}
-            </h1>
-            <p className="text-sm text-muted-foreground">{sub.description}</p>
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
+                <span className="inline-block h-2.5 w-2.5 rounded-full bg-primary" />
+                {sub.title}
+              </h1>
+              <p className="text-sm text-muted-foreground">{sub.description}</p>
+            </div>
+            {/* Drives every "daily" scoped view on this page — the KPI
+                cards above and the Daily Attendance Tracker table below —
+                so HR/managers can review any earlier date from one control. */}
+            <div className="flex items-center gap-2">
+              {!isDailyDateToday && (
+                <button
+                  type="button"
+                  onClick={() => setDailyDate(todayISO)}
+                  className="text-xs px-2 py-1.5 rounded-md bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 transition"
+                >
+                  Jump to Today
+                </button>
+              )}
+              <input
+                type="date"
+                value={dailyDate}
+                max={todayISO}
+                onChange={(e) => e.target.value && setDailyDate(e.target.value)}
+                className="bg-slate-800/50 border border-white/10 rounded-lg px-2 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-none"
+              />
+            </div>
           </div>
         </div>
 
@@ -956,7 +1211,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                           <p className="text-xs font-semibold text-orange-300 truncate">Late Arrival</p>
                           <div className="flex items-center gap-1">
                             <span className="inline-block w-1.5 h-1.5 rounded-full bg-orange-500"></span>
-                            <span className="text-xs font-bold text-orange-300">{dailyRecords.filter(r => r.alerts.some(a => a.includes("Late"))).length}</span>
+                            <span className="text-xs font-bold text-orange-300">{dailyRecords.filter(r => r.alerts.some(isPenalizedLateAlert)).length}</span>
                           </div>
                         </div>
                       </div>
@@ -973,7 +1228,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
 
               {/* Filters and Search for Daily */}
               <div className="bg-slate-900/50 border border-white/10 rounded-lg p-4">
-                <div className="grid gap-3 md:grid-cols-3">
+                <div className="grid gap-3 md:grid-cols-5">
                   <div>
                     <label className="block text-xs text-slate-400 uppercase mb-2">Search Employee</label>
                     <input
@@ -1002,35 +1257,63 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                       ))}
                     </select>
                   </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 uppercase mb-2">
+                      Filter by Date Range
+                      {dateRangeActive && (
+                        <button type="button" onClick={clearDateRange} className="ml-2 text-blue-400 hover:text-blue-300 normal-case">
+                          Clear
+                        </button>
+                      )}
+                    </label>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="date"
+                        value={filterDateFrom}
+                        max={filterDateTo || undefined}
+                        onChange={(e) => setFilterDateFrom(e.target.value)}
+                        className="w-full bg-slate-800/50 border border-white/10 rounded-lg p-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+                      />
+                      <span className="text-slate-500 text-xs shrink-0">to</span>
+                      <input
+                        type="date"
+                        value={filterDateTo}
+                        min={filterDateFrom || undefined}
+                        onChange={(e) => setFilterDateTo(e.target.value)}
+                        className="w-full bg-slate-800/50 border border-white/10 rounded-lg p-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-end pb-2">
+                    <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={completeOnly}
+                        onChange={(e) => setCompleteOnly(e.target.checked)}
+                        className="h-4 w-4 rounded border-white/20 bg-slate-800/50 accent-blue-500"
+                      />
+                      Complete only (Clock In &amp; Out)
+                    </label>
+                  </div>
                 </div>
               </div>
 
               {/* Daily Attendance Table */}
               <div className="bg-slate-900/50 border border-white/10 rounded-lg p-6 overflow-x-auto">
                 <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-                  <h2 className="text-lg font-bold text-white">Daily Attendance Tracker — {dailyDate}</h2>
-                  <div className="flex items-center gap-2">
-                    {!isDailyDateToday && (
-                      <button
-                        type="button"
-                        onClick={() => setDailyDate(todayISO)}
-                        className="text-xs px-2 py-1.5 rounded-md bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 transition"
-                      >
-                        Jump to Today
-                      </button>
-                    )}
-                    <input
-                      type="date"
-                      value={dailyDate}
-                      max={todayISO}
-                      onChange={(e) => e.target.value && setDailyDate(e.target.value)}
-                      className="bg-slate-800/50 border border-white/10 rounded-lg px-2 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-none"
-                    />
-                  </div>
+                  {/* The single-date picker/Jump-to-Today control lives up in the
+                      page header (drives the KPI cards too) — not duplicated
+                      here. This heading just reflects whichever mode is active. */}
+                  <h2 className="text-lg font-bold text-white">
+                    {dateRangeActive
+                      ? `Attendance — ${filterDateFrom} to ${filterDateTo}`
+                      : `Daily Attendance Tracker — ${dailyDate}`}
+                  </h2>
                 </div>
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-white/10">
+                      {dateRangeActive && <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date</th>}
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Employee</th>
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Location</th>
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Department</th>
@@ -1042,23 +1325,49 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                     </tr>
                   </thead>
                   <tbody>
-                    {loading || dailyDateLoading ? (
-                      <tr><td colSpan={8} className="px-3 py-8 text-center text-slate-400">Loading attendance…</td></tr>
+                    {loading || dailyDateLoading || (dateRangeActive && rangeFilterLoading) ? (
+                      <tr><td colSpan={dateRangeActive ? 9 : 8} className="px-3 py-8 text-center text-slate-400">Loading attendance…</td></tr>
                     ) : filteredAndSortedData.length === 0 ? (
-                      <tr><td colSpan={8} className="px-3 py-8 text-center text-slate-400">No employees match this filter.</td></tr>
+                      <tr><td colSpan={dateRangeActive ? 9 : 8} className="px-3 py-8 text-center text-slate-400">No employees match this filter.</td></tr>
                     ) : dailyDataByDepartment.map((group) => (
                       <Fragment key={group.department}>
                         <tr className="bg-white/[0.03]">
-                          <td colSpan={8} className="px-3 py-2 text-xs font-bold text-blue-300 uppercase tracking-wide">
+                          <td colSpan={dateRangeActive ? 9 : 8} className="px-3 py-2 text-xs font-bold text-blue-300 uppercase tracking-wide">
                             {group.department} <span className="text-slate-500 font-normal normal-case">({group.records.length})</span>
                           </td>
                         </tr>
                         {group.records.map((record) => (
-                      <tr key={record.profileId} className="border-b border-white/5 hover:bg-white/5 transition">
-                        <td className="px-3 py-3 text-white font-medium">
-                          <a href={`/employee/${record.profileId}`} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 hover:underline cursor-pointer">
+                      <tr key={dateRangeActive ? `${record.profileId}|${record.date}` : record.profileId} className="border-b border-white/5 hover:bg-white/5 transition">
+                        {dateRangeActive && <td className="px-3 py-3 text-slate-300 whitespace-nowrap">{record.date}</td>}
+                        <td className="px-3 py-3 text-white font-medium relative">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const key = dateRangeActive ? `${record.profileId}|${record.date}` : record.profileId;
+                              setRequiredTimePopoverKey((cur) => (cur === key ? null : key));
+                            }}
+                            className="text-blue-400 hover:text-blue-300 hover:underline cursor-pointer text-left"
+                          >
                             {record.name}
-                          </a>
+                          </button>
+                          {requiredTimePopoverKey === (dateRangeActive ? `${record.profileId}|${record.date}` : record.profileId) && (
+                            <div className="absolute left-0 top-full z-10 mt-1 w-56 rounded-lg border border-white/10 bg-slate-800 p-3 shadow-xl">
+                              <p className="text-[10px] uppercase tracking-wide text-slate-400 mb-1">Scheduled Shift</p>
+                              <p className="text-xs text-slate-200">
+                                {record.requiredCheckIn && record.requiredCheckOut
+                                  ? `${formatClockTime(record.requiredCheckIn)} – ${formatClockTime(record.requiredCheckOut)}`
+                                  : "No schedule set"}
+                              </p>
+                              <a
+                                href={`/employee/${record.profileId}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="mt-2 inline-block text-[11px] text-blue-400 hover:text-blue-300 hover:underline"
+                              >
+                                View full profile ↗
+                              </a>
+                            </div>
+                          )}
                         </td>
                         <td className="px-3 py-3 text-slate-300">{record.location || "—"}</td>
                         <td className="px-3 py-3 text-slate-300">{record.department || "—"}</td>
@@ -1070,7 +1379,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                               (by {record.clockedInBy})
                             </span>
                           )}
-                          {isDailyDateToday && record.role === "TECHNICIAN" && record.checkIn === "—" && !record.isOffDay && (
+                          {(record.date ?? dailyDate) === todayISO && record.role === "TECHNICIAN" && record.checkIn === "—" && !record.isOffDay && (
                             <button
                               type="button"
                               disabled={clockingInIds.has(record.profileId)}
@@ -1130,19 +1439,74 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                     >
                       Monthly
                     </button>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-slate-400 uppercase">Department</span>
-                    <select
-                      value={summaryDepartmentFilter}
-                      onChange={(e) => setSummaryDepartmentFilter(e.target.value)}
-                      className="bg-slate-800/50 border border-white/10 rounded-lg p-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+                    <button
+                      onClick={() => setSummaryView("custom")}
+                      className={`px-4 py-2 rounded-lg text-sm font-semibold transition ${summaryView === "custom" ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300 hover:bg-slate-700"}`}
                     >
-                      <option value="all">All Departments</option>
-                      {departments.map((dept) => (
-                        <option key={dept} value={dept}>{dept}</option>
-                      ))}
-                    </select>
+                      Custom
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    {summaryView === "weekly" && (
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs text-slate-400 uppercase">Day</span>
+                        <select
+                          value={weeklyDayFilter}
+                          onChange={(e) => setWeeklyDayFilter(e.target.value === "all" ? "all" : Number(e.target.value))}
+                          className="bg-slate-800/50 border border-white/10 rounded-lg p-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+                        >
+                          <option value="all">All Days</option>
+                          {["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"].map((label, i) => (
+                            <option key={label} value={i}>{label}</option>
+                          ))}
+                        </select>
+                        <select
+                          value={weeklyStatusFilter}
+                          onChange={(e) => setWeeklyStatusFilter(e.target.value as "all" | "present" | "absent")}
+                          disabled={weeklyDayFilter === "all"}
+                          title={weeklyDayFilter === "all" ? "Pick a day first" : undefined}
+                          className="bg-slate-800/50 border border-white/10 rounded-lg p-2 text-white text-sm focus:border-blue-500 focus:outline-none disabled:opacity-50"
+                        >
+                          <option value="all">Present or Absent</option>
+                          <option value="present">Checked In</option>
+                          <option value="absent">Absent</option>
+                        </select>
+                      </div>
+                    )}
+                    {summaryView === "custom" && (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="date"
+                          value={customRangeStart}
+                          max={customRangeEnd || todayISO}
+                          onChange={(e) => e.target.value && setCustomRangeStart(e.target.value)}
+                          className="bg-slate-800/50 border border-white/10 rounded-lg px-2 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-none"
+                        />
+                        <span className="text-slate-500 text-sm">to</span>
+                        <input
+                          type="date"
+                          value={customRangeEnd}
+                          min={customRangeStart || undefined}
+                          max={todayISO}
+                          onChange={(e) => e.target.value && setCustomRangeEnd(e.target.value)}
+                          className="bg-slate-800/50 border border-white/10 rounded-lg px-2 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-none"
+                        />
+                        {customRangeLoading && <Loader2 className="h-4 w-4 animate-spin text-slate-400" />}
+                      </div>
+                    )}
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-slate-400 uppercase">Department</span>
+                      <select
+                        value={summaryDepartmentFilter}
+                        onChange={(e) => setSummaryDepartmentFilter(e.target.value)}
+                        className="bg-slate-800/50 border border-white/10 rounded-lg p-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+                      >
+                        <option value="all">All Departments</option>
+                        {departments.map((dept) => (
+                          <option key={dept} value={dept}>{dept}</option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1150,22 +1514,40 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
               {/* Weekly Attendance */}
               {summaryView === "weekly" && (
               <div className="bg-slate-900/50 border border-white/10 rounded-lg p-6 overflow-x-auto">
-                <h2 className="text-lg font-bold text-white mb-4">Weekly Attendance Summary</h2>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-bold text-white">Weekly Attendance Summary</h2>
+                  {weeklyDayFilter !== "all" && weeklyStatusFilter !== "all" && (
+                    <span className="text-xs text-slate-400">
+                      {filteredWeeklySummary.length} {weeklyStatusFilter === "present" ? "checked in" : "absent"} on{" "}
+                      {["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"][weeklyDayFilter]}
+                    </span>
+                  )}
+                </div>
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-white/10">
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Employee</th>
-                      <th className="px-3 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Mon</th>
-                      <th className="px-3 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Tue</th>
-                      <th className="px-3 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Wed</th>
-                      <th className="px-3 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Thu</th>
-                      <th className="px-3 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Fri</th>
+                      {["Mon", "Tue", "Wed", "Thu", "Fri"].map((label, i) => (
+                        <th
+                          key={label}
+                          className={`px-3 py-3 text-center text-xs font-semibold uppercase ${weeklyDayFilter === i ? "text-blue-300" : "text-slate-400"}`}
+                        >
+                          {label}
+                        </th>
+                      ))}
                       <th className="px-3 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Total Days</th>
                       <th className="px-3 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Attendance %</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {weeklySummary.map((row) => (
+                    {filteredWeeklySummary.length === 0 ? (
+                      <tr>
+                        <td colSpan={8} className="px-3 py-8 text-center text-slate-500">
+                          No employees match this filter.
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredWeeklySummary.map((row) => (
                       <tr key={row.profileId} className="border-b border-white/5 hover:bg-white/5 transition">
                         <td className="px-3 py-3 text-white font-medium">
                           <a href={`/employee/${row.profileId}`} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 hover:underline cursor-pointer">
@@ -1173,7 +1555,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                           </a>
                         </td>
                         {row.cells.map((cell, i) => (
-                          <td key={i} className="px-3 py-3 text-center text-xs">
+                          <td key={i} className={`px-3 py-3 text-center text-xs ${weeklyDayFilter === i ? "bg-blue-500/5" : ""}`}>
                             {cell === "off" ? (
                               <span className="inline-block px-2 py-1 rounded bg-slate-700/50 text-slate-400">OFF</span>
                             ) : cell === "future" ? (
@@ -1188,7 +1570,8 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                         <td className="px-3 py-3 text-center text-white font-semibold">{row.presentCount} / {row.workingDays}</td>
                         <td className="px-3 py-3 text-center text-white font-semibold">{row.pct}%</td>
                       </tr>
-                    ))}
+                      ))
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -1230,6 +1613,78 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                     ))}
                   </tbody>
                 </table>
+              </div>
+              )}
+
+              {/* Custom-range Attendance */}
+              {summaryView === "custom" && (
+              <div className="bg-slate-900/50 border border-white/10 rounded-lg p-6 overflow-x-auto">
+                <h2 className="text-lg font-bold text-white mb-4">
+                  Custom Attendance Summary {customRangeStart && customRangeEnd ? `(${customRangeStart} – ${customRangeEnd})` : ""}
+                </h2>
+                {!customRangeStart || !customRangeEnd || customRangeStart > customRangeEnd ? (
+                  <p className="text-sm text-slate-400">Pick a valid start and end date above.</p>
+                ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-white/10">
+                      <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Employee</th>
+                      <th className="px-3 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Total Days</th>
+                      <th className="px-3 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Present</th>
+                      <th className="px-3 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Absent</th>
+                      <th className="px-3 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Late</th>
+                      <th className="px-3 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Attendance %</th>
+                      <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {customSummary.map((row) => (
+                      <tr key={row.profileId} className="border-b border-white/5 hover:bg-white/5 transition">
+                        <td className="px-3 py-3 text-white font-medium">
+                          <a href={`/employee/${row.profileId}`} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 hover:underline cursor-pointer">
+                            {row.name}
+                          </a>
+                        </td>
+                        <td className="px-3 py-3 text-center text-slate-300">{row.workingDays}</td>
+                        <td className="px-3 py-3 text-center">
+                          <button
+                            type="button"
+                            onClick={() => setCustomDetailModal({ profileId: row.profileId, name: row.name, type: "present" })}
+                            disabled={row.present === 0}
+                            className="text-green-300 font-semibold hover:underline disabled:no-underline disabled:cursor-default"
+                          >
+                            {row.present}
+                          </button>
+                        </td>
+                        <td className="px-3 py-3 text-center">
+                          <button
+                            type="button"
+                            onClick={() => setCustomDetailModal({ profileId: row.profileId, name: row.name, type: "absent" })}
+                            disabled={row.absent === 0}
+                            className="text-red-300 font-semibold hover:underline disabled:no-underline disabled:cursor-default"
+                          >
+                            {row.absent}
+                          </button>
+                        </td>
+                        <td className="px-3 py-3 text-center">
+                          <button
+                            type="button"
+                            onClick={() => setCustomDetailModal({ profileId: row.profileId, name: row.name, type: "late" })}
+                            disabled={row.late === 0}
+                            className="text-yellow-300 font-semibold hover:underline disabled:no-underline disabled:cursor-default"
+                          >
+                            {row.late}
+                          </button>
+                        </td>
+                        <td className="px-3 py-3 text-center text-white font-semibold">{row.pct}%</td>
+                        <td className="px-3 py-3">
+                          <span className={`inline-block px-2 py-1 rounded text-xs font-semibold border ${row.status === "Good" ? "bg-green-500/20 text-green-300 border-green-500/30" : row.status === "Warning" ? "bg-yellow-500/20 text-yellow-300 border-yellow-500/30" : "bg-red-500/20 text-red-300 border-red-500/30"}`}>{row.status}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                )}
               </div>
               )}
             </>
@@ -2009,7 +2464,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                     </div>
                   ))}
 
-                  {selectedAlertType === "late-arrival" && dailyRecords.filter(r => r.alerts.some(a => a.includes("Late"))).map(record => (
+                  {selectedAlertType === "late-arrival" && dailyRecords.filter(r => r.alerts.some(isPenalizedLateAlert)).map(record => (
                     <div key={record.profileId} className="bg-slate-800/50 border border-orange-500/30 rounded-lg p-4 hover:bg-slate-800/70 transition">
                       <div className="flex items-start justify-between">
                         <div className="flex-1">
@@ -2041,6 +2496,97 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
             </div>
           </div>
         )}
+
+        {/* Custom Attendance Summary — per-employee day-by-day detail behind
+            the Present/Absent/Late counts. */}
+        {customDetailModal && (() => {
+          const allDays = buildCustomDayDetails(customDetailModal.profileId);
+          const days =
+            customDetailModal.type === "present"
+              ? allDays.filter((d) => d.checkIn)
+              : customDetailModal.type === "late"
+                ? allDays.filter((d) => d.checkIn && d.isLate)
+                : allDays.filter((d) => !d.checkIn);
+          const typeLabel = customDetailModal.type === "present" ? "Present" : customDetailModal.type === "late" ? "Late" : "Absent";
+          const badgeClass =
+            customDetailModal.type === "present"
+              ? "bg-green-500/20 text-green-300 border-green-500/40"
+              : customDetailModal.type === "late"
+                ? "bg-yellow-500/20 text-yellow-300 border-yellow-500/40"
+                : "bg-red-500/20 text-red-300 border-red-500/40";
+          const fmtDay = (iso: string) =>
+            new Date(iso + "T00:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+          return (
+            <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={() => setCustomDetailModal(null)}>
+              <div className="bg-slate-900 border border-white/10 rounded-lg max-w-xl w-full max-h-[90vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
+                <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
+                  <div>
+                    <h2 className="text-lg font-bold text-white">{customDetailModal.name}</h2>
+                    <p className="text-xs text-slate-400 mt-0.5">{typeLabel} — {customRangeStart} – {customRangeEnd}</p>
+                  </div>
+                  <button onClick={() => setCustomDetailModal(null)} className="p-1 hover:bg-white/10 rounded transition">
+                    <svg className="w-5 h-5 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-6">
+                  {days.length === 0 ? (
+                    <p className="text-sm text-slate-400">No days to show.</p>
+                  ) : customDetailModal.type === "absent" ? (
+                    <div className="space-y-2">
+                      {days.map((d) => (
+                        <div key={d.date} className="flex items-center justify-between bg-slate-800/50 border border-red-500/30 rounded-lg px-4 py-3">
+                          <span className="text-white font-medium">{fmtDay(d.date)}</span>
+                          <span className={`inline-block px-3 py-1 text-xs font-semibold rounded border ${badgeClass}`}>Absent</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {days.map((d) => (
+                        <div key={d.date} className="bg-slate-800/50 border border-white/10 rounded-lg px-4 py-3">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-white font-medium">{fmtDay(d.date)}</span>
+                            {d.isLate && (
+                              <span className={`inline-block px-2 py-0.5 text-[10px] font-semibold rounded border ${badgeClass}`}>Late</span>
+                            )}
+                          </div>
+                          <div className="grid grid-cols-4 gap-2 text-center text-xs">
+                            <div>
+                              <p className="text-slate-500 uppercase text-[10px] mb-1">Time In</p>
+                              <p className="text-slate-200 font-mono">{d.checkIn || "—"}</p>
+                            </div>
+                            <div>
+                              <p className="text-slate-500 uppercase text-[10px] mb-1">Meal In</p>
+                              <p className="text-slate-200 font-mono">{d.mealStart || "—"}</p>
+                            </div>
+                            <div>
+                              <p className="text-slate-500 uppercase text-[10px] mb-1">Meal Out</p>
+                              <p className="text-slate-200 font-mono">{d.mealEnd || "—"}</p>
+                            </div>
+                            <div>
+                              <p className="text-slate-500 uppercase text-[10px] mb-1">Time Out</p>
+                              <p className="text-slate-200 font-mono">{d.checkOut || "—"}</p>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="border-t border-white/10 px-6 py-4">
+                  <button
+                    onClick={() => setCustomDetailModal(null)}
+                    className="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold transition"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </main>
     </div>
   );

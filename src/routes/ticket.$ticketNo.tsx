@@ -2,10 +2,9 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { AppHeader } from "@/components/Header";
 import { Footer } from "@/components/Footer";
-import { ALL_TECHNICIANS } from "@/lib/locations";
 import { savePartOrder, createPartOrderFromTicket, placeMarconeOrder, isMarconeDist, type MarconeOrderPayload, type ShipToAddress } from "@/lib/supabase/partOrders";
 import { getPartAddresses, getLocations } from "@/lib/supabase/locationManagement";
-import { Copy, Map as MapIcon, CalendarDays, Send, ExternalLink, Pencil, Lock, Smartphone } from "lucide-react";
+import { Copy, Map as MapIcon, CalendarDays, Send, ExternalLink, Pencil, Lock, Smartphone, ClipboardCheck, ChevronDown } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { isFirebaseReady } from "@/lib/firebase/config";
 import { useIsPhone } from "@/lib/device";
@@ -18,6 +17,7 @@ import { CLAIM_STATUSES, CLAIM_TOS, PAYMENT_METHODS } from "@/lib/claimDropdowns
 import { resolveTierCode } from "@/lib/tierCodes";
 import { CANCEL_REASONS } from "@/lib/operationsBranchMetrics";
 import { getCompanyMapProvider, type MapProvider } from "@/lib/supabase/companySettings";
+import type { TechnicianOption } from "@/lib/supabase/users";
 import { computeOfficeDistanceMiles } from "@/lib/mapEngine";
 import {
   buildSquaretradeUrlFromToken,
@@ -236,19 +236,6 @@ interface TicketData {
   nsaCoverageExclusions?: string;
 }
 
-interface CompensationRow {
-  id: string;
-  item: string;
-  beneficiary: string;
-  amount: string;
-  rate: string;
-  activityDate: string;
-  requiresClaimOrCxPayment: string;
-  comment: string;
-  createdBy: string;
-  lastModifiedBy: string;
-}
-
 interface PartTransactionRow {
   id: string;
   partNo: string;
@@ -303,6 +290,8 @@ interface VisitLogEntry {
   by: string;
   scheduleDate: string;
   technician: string;
+  /** Optional assisting technician on a "Two Tech" job (Tech Payroll's per-visit second-tech count). */
+  secondTechnician?: string;
   timeSlot: string;
   activity: string;
   actionType: string;
@@ -354,8 +343,8 @@ const TICKET_AUDIT_KEY_PREFIX = "ahs:ticket-audit:";
 const TICKET_VISIT_LOG_KEY_PREFIX = "ahs:ticket-visit-log:";
 const TICKET_PART_LOG_KEY_PREFIX = "ahs:ticket-part-log:";
 const TICKET_ACTIVE_TAB_KEY_PREFIX = "ahs:ticket-active-tab:";
-type TicketDetailsTab = "general" | "tracking" | "compensation" | "billing";
-const TICKET_DETAILS_TABS: TicketDetailsTab[] = ["general", "tracking", "compensation", "billing"];
+type TicketDetailsTab = "general" | "tracking";
+const TICKET_DETAILS_TABS: TicketDetailsTab[] = ["general", "tracking"];
 
 function formatAuditValue(value: unknown) {
   if (value === null || value === undefined || value === "") return "—";
@@ -626,6 +615,15 @@ function isNearAnyTimestamp(entryTimestamp: string, anchors: string[]): boolean 
   });
 }
 
+// Pulls one "Label: value" field back out of a summarizePartRow()-style
+// snapshot string (e.g. a deleted part's audit-log `before` value) — used
+// to show a deleted part's number/description without re-parsing the
+// whole snapshot.
+function snapshotField(summary: string, label: string): string {
+  const match = summary.match(new RegExp(`(?:^|\\| )${label}: ([^|]*)`));
+  return match ? match[1].trim() : "";
+}
+
 function renderVisitSummary(summary: string, comparedSummary?: string) {
   const summaryParts = summary.split(" | ");
   const comparedParts = comparedSummary?.split(" | ") ?? [];
@@ -734,16 +732,6 @@ function createAuditEntry(params: Omit<AuditLogEntry, "id" | "timestamp">): Audi
     ...params,
   };
 }
-
-const COMPENSATION_FIELD_LABELS: Record<keyof Omit<CompensationRow, "id" | "createdBy" | "lastModifiedBy">, string> = {
-  item: "Compensation Item",
-  beneficiary: "Beneficiary",
-  amount: "Amount",
-  rate: "Rate",
-  activityDate: "Activity Date",
-  requiresClaimOrCxPayment: "Requires Approved Claim / Requires Cx Payment",
-  comment: "Comment",
-};
 
 const PART_FIELD_LABELS: Record<keyof Omit<PartTransactionRow, "id" | "createdBy" | "lastModifiedBy">, string> = {
   partNo: "Part No",
@@ -1148,6 +1136,9 @@ function TicketDetailsPage() {
   const [newVisitNote, setNewVisitNote] = useState("");
   const [newVisitScheduleDate, setNewVisitScheduleDate] = useState("");
   const [newVisitTechnician, setNewVisitTechnician] = useState("Memphis Admin");
+  // Optional assisting technician on a "Two Tech" job — feeds Tech Payroll's
+  // per-visit second-technician count, distinct from the "2 Man Job" repair_type.
+  const [newVisitSecondTechnician, setNewVisitSecondTechnician] = useState("");
   const [newVisitTimeSlot, setNewVisitTimeSlot] = useState("");
   const [newVisitActivity, setNewVisitActivity] = useState("");
   const [newVisitActionType, setNewVisitActionType] = useState("SCHEDULE");
@@ -1202,6 +1193,9 @@ function TicketDetailsPage() {
   const [isPartModalOpen, setIsPartModalOpen] = useState(false);
   const [viewingPartEntry, setViewingPartEntry] = useState<PartTransactionRow | null>(null);
   const [isPartListModalOpen, setIsPartListModalOpen] = useState(false);
+  // Which deleted-part audit entry (by entry.id) currently has its full
+  // before-deletion snapshot expanded in the Part Transaction Log modal.
+  const [expandedDeletedPartLogId, setExpandedDeletedPartLogId] = useState<string | null>(null);
   const currentEditor = currentUserEmail ?? "Current User";
   const [auditEntries, setAuditEntries] = useState<AuditLogEntry[]>([]);
   const [auditEntriesLoaded, setAuditEntriesLoaded] = useState(false);
@@ -1218,6 +1212,23 @@ function TicketDetailsPage() {
   const [ticketDbId, setTicketDbId] = useState<string | null>(null);
   const [visitLogEntries, setVisitLogEntries] = useState<VisitLogEntry[]>([]);
   const [visitsLoaded, setVisitsLoaded] = useState(false);
+  // Visit History cards: the latest visit is expanded by default, every
+  // older one starts collapsed (header row only). This set holds ids whose
+  // expanded state has been manually flipped AWAY from that default — so
+  // isVisitExpanded below XORs membership against "is this the latest
+  // visit", rather than storing expanded/collapsed directly. That means the
+  // default (latest = open) always recomputes live off current data instead
+  // of needing to be seeded once when visitLogEntries first loads (which
+  // happens asynchronously) or re-seeded whenever a new visit is added.
+  const [visitExpandOverrides, setVisitExpandOverrides] = useState<Set<string>>(new Set());
+  const toggleVisitExpanded = (id: string) => {
+    setVisitExpandOverrides((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
   const [partRows, setPartRows] = useState<PartTransactionRow[]>([]);
   const [partRowsLoaded, setPartRowsLoaded] = useState(false);
   // Marcone Parts Order modal state — pre-filtered Marcone parts and the
@@ -1305,21 +1316,6 @@ function TicketDetailsPage() {
   // Marcone /parts/lookup state for the inline Add row's "Lookup" button.
   const [marconeLookupBusy, setMarconeLookupBusy] = useState(false);
   const [marconeLookupMsg, setMarconeLookupMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
-  const [compensationRows, setCompensationRows] = useState<CompensationRow[]>([
-    {
-      id: "comp-1",
-      item: "Extra Labor",
-      beneficiary: "Anna Seo",
-      amount: "1",
-      rate: "",
-      activityDate: "05/29/2026",
-      requiresClaimOrCxPayment: "",
-      comment: "",
-      createdBy: currentEditor,
-      lastModifiedBy: currentEditor,
-    },
-  ]);
-
   // ServicePower status sending
   const [spStatus, setSpStatus] = useState("");
   const [spStatusSending, setSpStatusSending] = useState(false);
@@ -1913,6 +1909,14 @@ function TicketDetailsPage() {
     () => auditEntries.filter((entry) => entry.field === "Part Transaction"),
     [auditEntries],
   );
+  // deletePartRow already logs a full before-deletion snapshot (via
+  // summarizePartRow) on every delete — this just surfaces those entries in
+  // the Part Transaction Log modal so a deleted part (and who deleted it)
+  // stays visible instead of silently vanishing once it's gone from partRows.
+  const deletedPartAuditEntries = useMemo(
+    () => partAuditEntries.filter((entry) => entry.action === "Deleted part transaction"),
+    [partAuditEntries],
+  );
   // Who has flagged/unflagged this ticket as misdiagnosed, most recent
   // first — shown inline next to the checkbox itself rather than folded
   // into the visit-scoped change log below, since this isn't tied to any
@@ -1988,29 +1992,31 @@ function TicketDetailsPage() {
     setSelectedTicket(ticketNo);
   }, [ticketNo]);
 
-  // Load photo count for Claims Readiness Checklist (ADMIN/CLAIMS/BIZOPS only).
+  // Load photo count for the Claims Readiness checklist — visible to every
+  // role now, so this loads for everyone, not just Admin/Claims/BizOps.
   // Uses listTicketPhotos from Firebase Storage — non-blocking, best-effort.
   const [ticketPhotoCount, setTicketPhotoCount] = useState<number | null>(null);
   useEffect(() => {
-    const r = String(currentUserRole || "").toUpperCase();
-    const canSeeChecklist = [
-      "SUPERADMIN","ADMIN","MANAGER","SENIOR_MANAGER","CLAIMS","CLAIMS_MANAGER",
-      "BIZOPS_MANAGER","BIZOPS_SENIOR_MANAGER","FINANCE","SENIOR_BRANCH_MANAGER",
-    ].includes(r);
-    if (!canSeeChecklist || !authReady) return;
+    if (!authReady) return;
     let cancelled = false;
     (async () => {
       try {
         const { listTicketPhotos } = await import("@/lib/firebase/storage");
         const cid = currentCompanyId || "COMP001";
-        const photos = await listTicketPhotos(cid, ticketNo);
+        // TicketPhotos.tsx (the Attachments tab and Mobile Tech App) both
+        // upload under category "service" — .../tickets/{ticketNo}/service/…
+        // — not the bare ticket folder, so this has to match that same
+        // subpath or listAll() finds nothing (subfolders are prefixes, not
+        // items) and the checklist always reads "no photos" even when there
+        // are some.
+        const photos = await listTicketPhotos(cid, `${ticketNo}/service`);
         if (!cancelled) setTicketPhotoCount(photos.length);
       } catch {
         if (!cancelled) setTicketPhotoCount(0);
       }
     })();
     return () => { cancelled = true; };
-  }, [ticketNo, currentUserRole, authReady, currentCompanyId]);
+  }, [ticketNo, authReady, currentCompanyId]);
 
   // Load ticket from centralized system
   const [ticketData, setTicketData] = useState<TicketData | null>(null);
@@ -2757,6 +2763,7 @@ function TicketDetailsPage() {
         by: currentEditor,
         scheduleDate: newVisitScheduleDate,
         technician: newVisitTechnician,
+        secondTechnician: newVisitSecondTechnician || undefined,
         timeSlot: newVisitTimeSlot,
         activity: newVisitActivity,
         actionType: newVisitActionType,
@@ -2779,6 +2786,7 @@ function TicketDetailsPage() {
       by: currentEditor,
       scheduleDate: newVisitScheduleDate,
       technician: newVisitTechnician,
+      secondTechnician: newVisitSecondTechnician || undefined,
       timeSlot: newVisitTimeSlot,
       activity: newVisitActivity,
       actionType: newVisitActionType,
@@ -2905,6 +2913,7 @@ function TicketDetailsPage() {
     setNewVisitStatus("Visited");
     setNewVisitScheduleDate("");
     setNewVisitTechnician(defaultTechnicianForLocation(ticket?.location));
+    setNewVisitSecondTechnician("");
     setNewVisitTimeSlot("");
     setNewVisitActivity("");
     setNewVisitActionType("SCHEDULE");
@@ -3162,6 +3171,7 @@ function TicketDetailsPage() {
     setNewVisitNote(entry.note || "");
     setNewVisitScheduleDate(entry.scheduleDate || "");
     setNewVisitTechnician(entry.technician || "");
+    setNewVisitSecondTechnician(entry.secondTechnician || "");
     setNewVisitTimeSlot(entry.timeSlot || "");
     setNewVisitActivity(entry.activity || "");
     setNewVisitActionType(entry.actionType || "");
@@ -4077,24 +4087,36 @@ function TicketDetailsPage() {
   // multi-role check below piles up the caller's primary role and their
   // extra_roles the same way.
 
-  // Technician list for the Add Visit / Edit Schedule / Compensation
-  // dropdowns — the live, active-technician roster (primary OR
-  // secondary/extra Technician role; see technicianRoster.ts), which
-  // itself falls back to the static ALL_TECHNICIANS seed only for names
-  // with no matching Supabase profile at all (never-migrated field techs).
-  // Falls back to the static list outright while the fetch is still in
-  // flight or if it fails.
-  const [technicianOptions, setTechnicianOptions] = useState<string[]>(ALL_TECHNICIANS);
+  // Live technician list for the Add Visit / Edit Schedule dropdowns —
+  // every ACTIVE technician (primary role TECHNICIAN/TECHNICIAN_MANAGER, or
+  // either in extra_roles, so multi-role users like Daven Hodge (BizOps +
+  // Tech) show up), sourced from getCompanyTechnicians() — the same
+  // is_active-filtered roster used by Work Planner and every other
+  // technician picker in the app. The ticket's own currently-assigned
+  // technician is always folded in, even if they're no longer an active
+  // TECHNICIAN-role user, so an existing assignment never silently
+  // disappears from its own dropdown.
+  const [liveTechnicians, setLiveTechnicians] = useState<TechnicianOption[]>([]);
   useEffect(() => {
     if (!authReady) return;
     let cancelled = false;
     (async () => {
-      const { getActiveTechnicianNames } = await import("@/lib/supabase/technicianRoster");
-      const names = await getActiveTechnicianNames();
-      if (!cancelled) setTechnicianOptions(names);
+      try {
+        const { getCompanyTechnicians } = await import("@/lib/supabase/users");
+        const rows = await getCompanyTechnicians();
+        if (!cancelled) setLiveTechnicians(rows);
+      } catch (err) {
+        console.warn("technician roster load failed:", err);
+        if (!cancelled) setLiveTechnicians([]);
+      }
     })();
     return () => { cancelled = true; };
   }, [authReady]);
+  const technicianOptions = useMemo(() => {
+    const names = new Set<string>(liveTechnicians.map((t) => t.name));
+    if (ticket?.technician) names.add(ticket.technician);
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [liveTechnicians, ticket?.technician]);
 
   const isClaimsRole = useMemo(() => {
     const primary = String(currentUserRole || "").toUpperCase();
@@ -4111,24 +4133,18 @@ function TicketDetailsPage() {
   // locked. Adding brand-new rows is also blocked when the lock is on.
   const partsEditDisabled = isTicketPartLocked && !isClaimsRole && !isNaveen;
 
-  // Claim Transaction section visibility. Only the Claims department and
-  // Admin / Manager / Branch-level roles can see (or interact with) the
-  // claim transaction grid. Everyone else — CSR, technician, parts, triage
-  // — never sees the section. Naveen also retained as an explicit allow
-  // by name (matches the Part-lock allow-list semantics so the two
-  // surfaces stay symmetrical).
+  // Claim Transaction section visibility — deliberately narrow: only
+  // Super Admin and the Claims department can see (or interact with) the
+  // claim transaction grid. Everyone else, including plain Admin/Manager/
+  // Branch-level roles, never sees the section. Naveen also retained as an
+  // explicit allow by name (matches the Part-lock allow-list semantics so
+  // the two surfaces stay symmetrical).
   const CLAIM_VIEW_ROLES = useMemo(
     () => new Set([
       "CLAIMS",
       "CLAIMS_MANAGER",
-      "MANAGER",
-      "SENIOR_MANAGER",
-      "ADMIN",
+      "CLAIMS_TEAM_LEADER",
       "SUPERADMIN",
-      "BRANCH_MANAGER",
-      "SENIOR_BRANCH_MANAGER",
-      "BIZOPS_MANAGER",
-      "BIZOPS_SENIOR_MANAGER",
     ]),
     [],
   );
@@ -4145,6 +4161,110 @@ function TicketDetailsPage() {
     );
   }, [currentUserRole, currentUserExtraRoles, CLAIM_VIEW_ROLES, isNaveen]);
 
+  // Claims Readiness — what's missing before this ticket can go to Claims.
+  // Visible to EVERY role (not just Admin/Claims/BizOps) since the whole
+  // point is helping whoever's working the ticket see what's left, not
+  // gatekeeping the information. Computed once here so both the compact
+  // header alert (next to the ticket actions) and the full checklist
+  // further down the page read the same values.
+  const claimsReadiness = useMemo(() => {
+    if (!ticket) return null;
+
+    // NOTE: ticket.problemDescription is the customer's original
+    // complaint, auto-populated from NSA/ServicePower at sync time — it
+    // exists before any service happens, so it can't be used as evidence a
+    // technician documented their work.
+    const hasServiceNotes = Boolean(
+      visitLogEntries.some(v => (v as any).resolution?.trim() || (v as any).diagnosis?.trim())
+    );
+    const hasPhotos = (ticketPhotoCount !== null && ticketPhotoCount > 0) ||
+      partRows.some(p => (p as any).inTracking);
+    const hasCorrectPartStatus = partRows.length === 0 || partRows.every(p => {
+      const s = String((p as any).status || "").toLowerCase();
+      return s && s !== "tech pickup" && s !== "need po" && s !== "";
+    });
+    // Same-day: the most recent visit must have been created/updated on
+    // the same calendar day as the visit's schedule date. Also passes if
+    // there's no visit yet (nothing to check).
+    const hasSameDayUpdate = (() => {
+      if (visitLogEntries.length === 0) return true; // no visit logged yet — N/A
+      const latest = visitLogEntries[0];
+      const schedDate = String((latest as any).scheduleDate || "").slice(0, 10);
+      if (!schedDate) return true; // no date set — can't evaluate
+      const ts = (latest as any).updatedAt || (latest as any).createdAt || (latest as any).timestamp;
+      if (!ts) return false;
+      const updatedDay = new Date(ts).toISOString().slice(0, 10);
+      const onTime = updatedDay === schedDate;
+      // Also check if photos were uploaded (if we have a photo count and
+      // the visit was today, photos being present means same-day upload is
+      // satisfied)
+      const visitWasToday = schedDate === new Date().toISOString().slice(0, 10);
+      const photosSatisfied = ticketPhotoCount !== null && ticketPhotoCount > 0 && visitWasToday;
+      return onTime || photosSatisfied;
+    })();
+    // Warranty case — check if case number / warranty agent note is present
+    const warrantyStatuses = [
+      "unsuccessful repair", "infestation", "physical damage",
+      "unrepairable", "model/serial mismatch", "no fault found",
+    ];
+    const needsWarrantyCall = visitLogEntries.some(v => {
+      const rs = String((v as any).repairStatus || "").toLowerCase();
+      return warrantyStatuses.some(w => rs.includes(w.split(" ")[0]));
+    });
+    const hasWarrantyCase = !needsWarrantyCall || Boolean(
+      visitLogEntries.some(v =>
+        (v as any).note?.toLowerCase().includes("case") ||
+        (v as any).note?.toLowerCase().includes("agent")
+      )
+    );
+
+    const items = [
+      {
+        label: "Warranty Call (if required)",
+        done: hasWarrantyCase,
+        detail: needsWarrantyCall
+          ? "Special scenario detected — ensure case number & agent name are in visit notes"
+          : "Not required for this ticket",
+        skip: !needsWarrantyCall,
+      },
+      {
+        label: "Service Notes Complete",
+        done: hasServiceNotes,
+        detail: "Diagnosis, issue found, part used/needed, repair result must be documented",
+      },
+      {
+        label: "Required Photos Uploaded",
+        done: hasPhotos,
+        detail: ticketPhotoCount === null
+          ? "Checking photo count…"
+          : ticketPhotoCount > 0
+            ? `${ticketPhotoCount} photo${ticketPhotoCount !== 1 ? "s" : ""} uploaded — work order, model/serial tag, installed parts, damage proof`
+            : "No photos found — work order, model/serial tag, installed parts, damage proof required",
+      },
+      {
+        label: "Part Status Correct",
+        done: hasCorrectPartStatus,
+        detail: partRows.length === 0 ? "No parts on this ticket" : "All parts marked with correct status (not stuck as Tech Pickup)",
+        // No parts ordered yet is a genuine "nothing to check" state, same
+        // as Warranty Call's skip — not evidence anything was actually
+        // verified correct.
+        skip: partRows.length === 0,
+      },
+      {
+        label: "Same-Day Updates",
+        done: hasSameDayUpdate,
+        detail: visitLogEntries.length === 0 ? "No visit logged yet" : "Notes, photos, part status, warranty info updated same day as visit",
+        // No visit yet means there's nothing to have been "same-day" about
+        // — not evidence anything was verified.
+        skip: visitLogEntries.length === 0,
+      },
+    ];
+
+    const allDone = items.every(i => i.skip || i.done);
+    const doneCount = items.filter(i => i.skip || i.done).length;
+    return { items, allDone, doneCount };
+  }, [ticket, visitLogEntries, partRows, ticketPhotoCount]);
+
   // CSR-only accounts (agents, team leaders, CSR managers) should see
   // the Part Transaction table but not the write-side toolbar (View
   // Log / Sync Parts from Notes / Truck Stock / Submit POs / Update).
@@ -4159,27 +4279,39 @@ function TicketDetailsPage() {
     ]),
     [],
   );
+  // Triage identifies the part a repair needs, so they can add/edit parts on
+  // an open ticket — but unlike PART_LOCK_BYPASS_ROLES above, they do NOT
+  // bypass the post-claim lock; once a ticket is Claimed / Data Closed it's
+  // still Parts/Claims/Manager-only. Kept as its own set (rather than folded
+  // into PART_LOCK_BYPASS_ROLES) specifically so the lock-bypass stays
+  // untouched for Triage.
+  const TRIAGE_PART_ROLES = useMemo(
+    () => new Set(["TRIAGE_USER", "TRIAGE_MANAGER"]),
+    [],
+  );
   const canUsePartToolbar = useMemo(() => {
     if (isNaveen) return true;
     const primary = String(currentUserRole || "").toUpperCase();
     const allRoles = [primary, ...currentUserExtraRoles.map((r) => String(r).toUpperCase())];
     // If they hold ANY non-CSR role we consider valid for parts, allow it.
-    if (allRoles.some((r) => PART_LOCK_BYPASS_ROLES.has(r))) return true;
+    if (allRoles.some((r) => PART_LOCK_BYPASS_ROLES.has(r) || TRIAGE_PART_ROLES.has(r))) return true;
     // If the user is *only* a CSR-family role, hide the toolbar.
     if (allRoles.every((r) => CSR_ONLY_ROLES.has(r) || !r)) return false;
-    // Everyone else (Technician, Triage, Dispatcher, etc.) also loses
-    // the toolbar per current business rule.
+    // Everyone else (Technician, Dispatcher, etc.) also loses the toolbar
+    // per current business rule.
     return false;
-  }, [currentUserRole, currentUserExtraRoles, isNaveen, PART_LOCK_BYPASS_ROLES, CSR_ONLY_ROLES]);
+  }, [currentUserRole, currentUserExtraRoles, isNaveen, PART_LOCK_BYPASS_ROLES, TRIAGE_PART_ROLES, CSR_ONLY_ROLES]);
 
-  // Split of PART_LOCK_BYPASS_ROLES into two disjoint tiers — everyone in
-  // that set can still SEE the Part Transaction toolbar (canUsePartToolbar,
-  // unchanged above), but which specific actions they can actually use now
-  // depends on which tier they're in. Team Leaders/Admins procure (Submit
-  // POs); the day-to-day Parts/Claims/Manager tier maintains the part
-  // records themselves (add/edit/delete/Update). Neither tier overlaps the
-  // other — a mixed-role user (e.g. primary ADMIN + extra_roles PARTS_MANAGER)
-  // gets the union of both, same as every other multi-role check in this file.
+  // Split of PART_LOCK_BYPASS_ROLES (plus Triage, see TRIAGE_PART_ROLES
+  // above) into two disjoint tiers — everyone who can see the Part
+  // Transaction toolbar (canUsePartToolbar) falls into one of these, but
+  // which specific actions they can actually use depends on which tier
+  // they're in. Team Leaders/Admins procure (Submit POs); the day-to-day
+  // Parts/Claims/Manager tier — plus Triage, who identifies the part during
+  // diagnosis — maintains the part records themselves (add/edit/delete/
+  // Update). Neither tier overlaps the other — a mixed-role user (e.g.
+  // primary ADMIN + extra_roles PARTS_MANAGER) gets the union of both, same
+  // as every other multi-role check in this file.
   const PARTS_ORDER_ONLY_ROLES = useMemo(
     () => new Set(["PARTS_TEAM_LEADER", "ADMIN", "SUPERADMIN"]),
     [],
@@ -4196,6 +4328,8 @@ function TicketDetailsPage() {
       "SENIOR_BRANCH_MANAGER",
       "BIZOPS_MANAGER",
       "BIZOPS_SENIOR_MANAGER",
+      "TRIAGE_USER",
+      "TRIAGE_MANAGER",
     ]),
     [],
   );
@@ -4851,31 +4985,6 @@ function TicketDetailsPage() {
     setClaimDraft(rest);
   };
 
-  const addCompensationRow = () => {
-    appendAuditEntry({
-      by: currentEditor,
-      action: "Added compensation row",
-      field: "Compensation Grid",
-      before: "—",
-      after: "Blank row created",
-    });
-    setCompensationRows((rows) => [
-      ...rows,
-      {
-        id: `comp-${Date.now()}`,
-        item: "",
-        beneficiary: "",
-        amount: "",
-        rate: "",
-        activityDate: "05/29/2026",
-        requiresClaimOrCxPayment: "",
-        comment: "",
-        createdBy: currentEditor,
-        lastModifiedBy: currentEditor,
-      },
-    ]);
-  };
-
   const copyToNewTicket = () => {
     if (!ticket) return;
 
@@ -4891,6 +5000,9 @@ function TicketDetailsPage() {
   // Open a small modal, type a teammate's name (or pick from suggestions),
   // and DM them the ticket number.
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  // Claims Readiness compact alert, up near the ticket actions — see
+  // claimsReadiness memo for the underlying computation.
+  const [claimsReadinessPopoverOpen, setClaimsReadinessPopoverOpen] = useState(false);
   const [shareQuery, setShareQuery] = useState("");
   const [shareMessage, setShareMessage] = useState("");
   const [shareContacts, setShareContacts] = useState<Array<{ id: string; display_name: string | null; email: string | null; role: string | null }>>([]);
@@ -4989,31 +5101,6 @@ function TicketDetailsPage() {
       return;
     }
     void sendTicketToContact(target);
-  };
-
-  const updateCompensationRow = (rowId: string, field: keyof Omit<CompensationRow, "id" | "createdBy" | "lastModifiedBy">, value: string) => {
-    setCompensationRows((rows) =>
-      rows.map((row) =>
-        row.id === rowId ? (() => {
-          const previousValue = row[field];
-          if (previousValue !== value) {
-            appendAuditEntry({
-              by: currentEditor,
-              action: "Updated compensation row",
-              field: COMPENSATION_FIELD_LABELS[field],
-              before: formatAuditValue(previousValue),
-              after: formatAuditValue(value),
-            });
-          }
-
-          return {
-            ...row,
-            [field]: value,
-            lastModifiedBy: currentEditor,
-          };
-        })() : row,
-      ),
-    );
   };
 
   // Editable Part Transaction rows used both at the top of the table (Add
@@ -5276,7 +5363,44 @@ function TicketDetailsPage() {
               >
                 <Send className="h-4 w-4" />
               </button>
-              
+
+              {/* Claims Readiness — compact alert next to the ticket
+                  actions, showing what's missing before this ticket can go
+                  to Claims. Visible to everyone; click for the short list
+                  of what's left (the full checklist with detail text is
+                  further down the page). */}
+              {claimsReadiness && (
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setClaimsReadinessPopoverOpen((v) => !v)}
+                    title="Claims Readiness"
+                    className={`inline-flex items-center gap-1.5 rounded border p-2 text-xs font-semibold transition ${
+                      claimsReadiness.allDone
+                        ? "border-emerald-400/40 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25"
+                        : "border-amber-400/40 bg-amber-500/15 text-amber-200 hover:bg-amber-500/25"
+                    }`}
+                  >
+                    <ClipboardCheck className="h-4 w-4" />
+                    {claimsReadiness.doneCount}/{claimsReadiness.items.length}
+                  </button>
+                  {claimsReadinessPopoverOpen && (
+                    <div className="absolute left-0 top-full z-20 mt-1 w-72 rounded-lg border border-white/10 bg-slate-900 p-3 shadow-xl">
+                      <p className="text-xs font-semibold text-slate-200 mb-2">Claims Readiness</p>
+                      {claimsReadiness.allDone ? (
+                        <p className="text-xs text-emerald-300">✓ Ready for Claims</p>
+                      ) : (
+                        <ul className="space-y-1">
+                          {claimsReadiness.items.filter((item) => !item.skip && !item.done).map((item, i) => (
+                            <li key={i} className="text-xs text-rose-300">✗ {item.label}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Alert Messages Display - Inline beside controls. Only
                   alerts flagged "Show internally" clutter this view — a
                   mobile-popup-only alert stays out of the way here. */}
@@ -5322,11 +5446,11 @@ function TicketDetailsPage() {
               })()}
             </div>
             <div>
-              <div className="flex flex-col gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
                 <h1 className="text-3xl font-bold text-white">Ticket #{ticketNo}</h1>
-                
+
                 {ticket ? (
-                  <div className="text-sm text-slate-300 leading-relaxed">
+                  <div className="text-sm text-slate-300 leading-relaxed text-right">
                     <span className="text-slate-400">Account</span>{" "}
                     {(() => {
                       // Squaretrade tickets jump to the appointment-completion
@@ -5440,7 +5564,7 @@ function TicketDetailsPage() {
                     )}
                   </div>
                 ) : (
-                  <div className="mt-3 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+                  <div className="w-full mt-3 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
                     No ticket data is available for this number yet.
                   </div>
                 )}
@@ -5460,8 +5584,6 @@ function TicketDetailsPage() {
               {([
                 { tab: "general", label: "General" },
                 { tab: "tracking", label: "Tracking" },
-                { tab: "compensation", label: "Compensation" },
-                { tab: "billing", label: "Billing" },
               ] as const).map(({ tab, label }) => (
                 <button
                   key={tab}
@@ -5958,7 +6080,7 @@ function TicketDetailsPage() {
               </div>
 
               {/* Call Service Information */}
-              <div className="space-y-4 mb-8">
+              <div className="space-y-4 mb-8 rounded-lg border border-white/10 bg-slate-900/50 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <h4 className="font-semibold text-slate-300">Call Service Information</h4>
                   <div className="flex items-center gap-2">
@@ -6448,142 +6570,39 @@ function TicketDetailsPage() {
                 </div>
               )}
 
-              {/* Claims Readiness Checklist — visible to Admin, BizOps, Claims roles only */}
-              {(() => {
-                const r = String(currentUserRole || "").toUpperCase();
-                const canSeeChecklist = [
-                  "SUPERADMIN","ADMIN","MANAGER","SENIOR_MANAGER","CLAIMS","CLAIMS_MANAGER",
-                  "BIZOPS_MANAGER","BIZOPS_SENIOR_MANAGER","FINANCE","SENIOR_BRANCH_MANAGER",
-                ].includes(r);
-                if (!canSeeChecklist || !ticket) return null;
-
-                // Evaluate each of the 5 requirements
-                // NOTE: ticket.problemDescription is the customer's original
-                // complaint, auto-populated from NSA/ServicePower at sync
-                // time — it exists before any service happens, so it can't
-                // be used as evidence a technician documented their work.
-                const hasServiceNotes = Boolean(
-                  visitLogEntries.some(v => (v as any).resolution?.trim() || (v as any).diagnosis?.trim())
-                );
-                const hasPhotos = (ticketPhotoCount !== null && ticketPhotoCount > 0) ||
-                  partRows.some(p => (p as any).inTracking);
-                const hasCorrectPartStatus = partRows.length === 0 || partRows.every(p => {
-                  const s = String((p as any).status || "").toLowerCase();
-                  return s && s !== "tech pickup" && s !== "need po" && s !== "";
-                });
-                // Same-day: the most recent visit must have been created/updated
-                // on the same calendar day as the visit's schedule date.
-                // Also passes if there's no visit yet (nothing to check).
-                const hasSameDayUpdate = (() => {
-                  if (visitLogEntries.length === 0) return true; // no visit logged yet — N/A
-                  const latest = visitLogEntries[0];
-                  const schedDate = String((latest as any).scheduleDate || "").slice(0, 10);
-                  if (!schedDate) return true; // no date set — can't evaluate
-                  // Check the visit's own created/updated timestamp
-                  const ts = (latest as any).updatedAt || (latest as any).createdAt || (latest as any).timestamp;
-                  if (!ts) return false;
-                  const updatedDay = new Date(ts).toISOString().slice(0, 10);
-                  const onTime = updatedDay === schedDate;
-                  // Also check if photos were uploaded (if we have a photo count and the
-                  // visit was today, photos being present means same-day upload is satisfied)
-                  const visitWasToday = schedDate === new Date().toISOString().slice(0, 10);
-                  const photosSatisfied = ticketPhotoCount !== null && ticketPhotoCount > 0 && visitWasToday;
-                  return onTime || photosSatisfied;
-                })();
-                // Warranty case — check if case number / warranty agent note is present
-                const warrantyStatuses = [
-                  "unsuccessful repair", "infestation", "physical damage",
-                  "unrepairable", "model/serial mismatch", "no fault found",
-                ];
-                const needsWarrantyCall = visitLogEntries.some(v => {
-                  const rs = String((v as any).repairStatus || "").toLowerCase();
-                  return warrantyStatuses.some(w => rs.includes(w.split(" ")[0]));
-                });
-                const hasWarrantyCase = !needsWarrantyCall || Boolean(
-                  visitLogEntries.some(v =>
-                    (v as any).note?.toLowerCase().includes("case") ||
-                    (v as any).note?.toLowerCase().includes("agent")
-                  )
-                );
-
-                const items = [
-                  {
-                    label: "Warranty Call (if required)",
-                    done: hasWarrantyCase,
-                    detail: needsWarrantyCall
-                      ? "Special scenario detected — ensure case number & agent name are in visit notes"
-                      : "Not required for this ticket",
-                    skip: !needsWarrantyCall,
-                  },
-                  {
-                    label: "Service Notes Complete",
-                    done: hasServiceNotes,
-                    detail: "Diagnosis, issue found, part used/needed, repair result must be documented",
-                  },
-                  {
-                    label: "Required Photos Uploaded",
-                    done: hasPhotos,
-                    detail: ticketPhotoCount === null
-                      ? "Checking photo count…"
-                      : ticketPhotoCount > 0
-                        ? `${ticketPhotoCount} photo${ticketPhotoCount !== 1 ? "s" : ""} uploaded — work order, model/serial tag, installed parts, damage proof`
-                        : "No photos found — work order, model/serial tag, installed parts, damage proof required",
-                  },
-                  {
-                    label: "Part Status Correct",
-                    done: hasCorrectPartStatus,
-                    detail: partRows.length === 0 ? "No parts on this ticket" : "All parts marked with correct status (not stuck as Tech Pickup)",
-                    // No parts ordered yet is a genuine "nothing to check"
-                    // state, same as Warranty Call's skip — not evidence
-                    // anything was actually verified correct.
-                    skip: partRows.length === 0,
-                  },
-                  {
-                    label: "Same-Day Updates",
-                    done: hasSameDayUpdate,
-                    detail: visitLogEntries.length === 0 ? "No visit logged yet" : "Notes, photos, part status, warranty info updated same day as visit",
-                    // No visit yet means there's nothing to have been
-                    // "same-day" about — not evidence anything was verified.
-                    skip: visitLogEntries.length === 0,
-                  },
-                ];
-
-                const allDone = items.every(i => i.skip || i.done);
-                const doneCount = items.filter(i => i.skip || i.done).length;
-
-                return (
-                  <div className="mb-8 rounded-xl border border-slate-700 overflow-hidden">
-                    <div className={`flex items-center justify-between px-4 py-3 ${allDone ? "bg-emerald-900/30 border-b border-emerald-700/30" : "bg-slate-900/60 border-b border-slate-700"}`}>
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-semibold text-slate-200">Claims Readiness</span>
-                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${allDone ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" : "bg-amber-500/20 text-amber-300 border border-amber-500/30"}`}>
-                          {doneCount}/{items.length}
-                        </span>
-                      </div>
-                      {allDone ? (
-                        <span className="text-xs text-emerald-400 font-semibold">✓ Ready for Claims</span>
-                      ) : (
-                        <span className="text-xs text-amber-400">{items.length - doneCount} item{items.length - doneCount !== 1 ? "s" : ""} pending</span>
-                      )}
+              {/* Claims Readiness Checklist — visible to every role, see claimsReadiness above */}
+              {claimsReadiness && (
+                <div className="mb-8 rounded-xl border border-slate-700 overflow-hidden">
+                  <div className={`flex items-center justify-between px-4 py-3 ${claimsReadiness.allDone ? "bg-emerald-900/30 border-b border-emerald-700/30" : "bg-slate-900/60 border-b border-slate-700"}`}>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-slate-200">Claims Readiness</span>
+                      <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${claimsReadiness.allDone ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" : "bg-amber-500/20 text-amber-300 border border-amber-500/30"}`}>
+                        {claimsReadiness.doneCount}/{claimsReadiness.items.length}
+                      </span>
                     </div>
-                    <div className="divide-y divide-slate-800">
-                      {items.map((item, i) => (
-                        <div key={i} className={`flex items-start gap-3 px-4 py-3 text-sm ${item.skip ? "opacity-50" : ""}`}>
-                          <div className={`mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${item.skip ? "bg-slate-700 text-slate-400" : item.done ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40" : "bg-rose-500/20 text-rose-400 border border-rose-500/40"}`}>
-                            {item.skip ? "—" : item.done ? "✓" : "✗"}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className={`font-semibold ${item.skip ? "text-slate-500" : item.done ? "text-slate-300" : "text-rose-300"}`}>
-                              {item.label}
-                            </div>
-                            <div className="text-slate-500 text-xs mt-0.5">{item.detail}</div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
+                    {claimsReadiness.allDone ? (
+                      <span className="text-xs text-emerald-400 font-semibold">✓ Ready for Claims</span>
+                    ) : (
+                      <span className="text-xs text-amber-400">{claimsReadiness.items.length - claimsReadiness.doneCount} item{claimsReadiness.items.length - claimsReadiness.doneCount !== 1 ? "s" : ""} pending</span>
+                    )}
                   </div>
-                );
-              })()}
+                  <div className="divide-y divide-slate-800">
+                    {claimsReadiness.items.map((item, i) => (
+                      <div key={i} className={`flex items-start gap-3 px-4 py-3 text-sm ${item.skip ? "opacity-50" : ""}`}>
+                        <div className={`mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${item.skip ? "bg-slate-700 text-slate-400" : item.done ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40" : "bg-rose-500/20 text-rose-400 border border-rose-500/40"}`}>
+                          {item.skip ? "—" : item.done ? "✓" : "✗"}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className={`font-semibold ${item.skip ? "text-slate-500" : item.done ? "text-slate-300" : "text-rose-300"}`}>
+                            {item.label}
+                          </div>
+                          <div className="text-slate-500 text-xs mt-0.5">{item.detail}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Servicer Notes */}
               <div className="space-y-4 pb-12">
@@ -6704,19 +6723,392 @@ function TicketDetailsPage() {
               </div>
             </div>
 
+            {/* Part Transaction */}
+            <div id="section-part-transaction" className="scroll-mt-28">
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                <div className="flex items-center gap-2">
+                  <h4 className="font-semibold text-slate-300">Part Transaction</h4>
+                  <div className="text-xs font-semibold text-blue-300">{partCountLabel}</div>
+                  {isTicketPartLocked ? (
+                    <span
+                      className={`ml-2 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+                        partsEditDisabled
+                          ? "border-amber-400/40 bg-amber-500/15 text-amber-200"
+                          : "border-emerald-400/40 bg-emerald-500/15 text-emerald-200"
+                      }`}
+                      title={
+                        partsEditDisabled
+                          ? `Ticket is "${ticket?.status}". Only Claims can change parts.`
+                          : `Ticket is "${ticket?.status}". Claims-only edit window.`
+                      }
+                    >
+                      🔒 Locked — Claims only
+                    </span>
+                  ) : null}
+                </div>
+                {canUsePartToolbar && (
+                <div className="flex items-center gap-2">
+                  <button 
+                    type="button"
+                    onClick={() => {
+                      if (partRows.length === 0 && deletedPartAuditEntries.length === 0) {
+                        alert('No parts to view');
+                        return;
+                      }
+                      setIsPartListModalOpen(true);
+                    }}
+                    className="rounded border border-blue-400/40 bg-blue-600/20 px-3 py-1.5 text-xs font-semibold text-blue-200 transition hover:bg-blue-600/30"
+                    title="View all parts"
+                  >
+                    View Log
+                  </button>
+                  <button 
+                    type="button"
+                    onClick={() => void syncPartsFromNotes()}
+                    disabled={partsEditDisabled || syncingNotesParts}
+                    className={`rounded border px-3 py-1.5 text-xs font-semibold transition ${
+                      partsEditDisabled || syncingNotesParts
+                        ? "border-white/10 bg-slate-800 text-slate-500 cursor-not-allowed"
+                        : "border-purple-400/40 bg-purple-600/20 text-purple-200 hover:bg-purple-600/30"
+                    }`}
+                    title={
+                      partsEditDisabled
+                        ? "Locked: Parts / Claims / Manager roles only"
+                        : "Import parts the warranty company announced in SP customer notes (Squaretrade / Allstate). Adds Need-PO rows for new parts and overlays tracking numbers onto existing ones."
+                    }
+                  >
+                    {syncingNotesParts ? "Syncing…" : "Sync Parts from Notes"}
+                  </button>
+                  <button 
+                    type="button"
+                    onClick={openTruckStockBatch}
+                    disabled={partsEditDisabled}
+                    className={`rounded border px-3 py-1.5 text-xs font-semibold transition ${
+                      partsEditDisabled
+                        ? "border-white/10 bg-slate-800 text-slate-500 cursor-not-allowed"
+                        : "border-emerald-400/40 bg-emerald-600/20 text-emerald-200 hover:bg-emerald-600/30"
+                    }`}
+                    title={partsEditDisabled ? "Locked: Parts / Claims / Manager roles only" : "Fulfill Need PO parts from in-house Truck Stock"}
+                  >
+                    Truck Stock
+                  </button>
+                  <button
+                    type="button"
+                    onClick={submitAllPOs}
+                    disabled={partsEditDisabled || !canOrderParts}
+                    className={`rounded border px-3 py-1.5 text-xs font-semibold transition ${
+                      partsEditDisabled || !canOrderParts
+                        ? "border-white/10 bg-slate-800 text-slate-500 cursor-not-allowed"
+                        : "border-green-400/40 bg-green-600/20 text-green-200 hover:bg-green-600/30"
+                    }`}
+                    title={
+                      partsEditDisabled
+                        ? "Locked: Parts / Claims / Manager roles only"
+                        : !canOrderParts
+                          ? "Only Parts Team Leader, Admin, or Super Admin can submit part orders."
+                          : "Submit POs for parts that need ordering"
+                    }
+                  >
+                    Submit POs
+                  </button>
+                  <button
+                    type="button"
+                    onClick={saveAllRowEdits}
+                    disabled={partsEditDisabled || !canEditParts || rowEditsSaving || dirtyRowCount === 0}
+                    className={`rounded border px-3 py-1.5 text-xs font-semibold transition ${
+                      partsEditDisabled || !canEditParts || dirtyRowCount === 0
+                        ? "border-white/10 bg-slate-800 text-slate-500 cursor-not-allowed"
+                        : "border-blue-400/40 bg-blue-600/30 text-blue-200 hover:bg-blue-600/50"
+                    }`}
+                    title={
+                      partsEditDisabled
+                        ? "Locked: Parts / Claims / Manager roles only"
+                        : !canEditParts
+                        ? "Your role can only order parts, not add or edit them."
+                        : dirtyRowCount === 0
+                        ? "Edit any cell in a part row, then click Update to save"
+                        : `Save changes to ${dirtyRowCount} part row${dirtyRowCount === 1 ? "" : "s"}`
+                    }
+                  >
+                    {rowEditsSaving
+                      ? "Saving…"
+                      : dirtyRowCount > 0
+                      ? `Update (${dirtyRowCount})`
+                      : "Update"}
+                  </button>
+                  {/* Auto-sync indicator removed — Marcone order status
+                      is now manual-refresh only via the per-row Refresh
+                      button. */}
+                </div>
+                )}
+              </div>
+              {partsEditDisabled ? (
+                <div className="mb-3 rounded-md border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                  This ticket is <span className="font-semibold">{ticket?.status}</span>. Part Transactions are locked.
+                  Only Parts / Claims / Admin / Manager / Branch Manager roles can edit them. Any attempt will alert Naveen, Ian, and Tina.
+                </div>
+              ) : null}
+
+              <div className="overflow-x-auto border border-white/10 rounded-lg">
+                <table className="w-full text-xs pt-compact" style={{ minWidth: "1180px" }}>
+                  {/* Two-row header */}
+                  <thead>
+                    <tr className="bg-slate-800 border-b border-white/10 text-slate-300">
+                      <th className="px-2 py-2 text-left font-semibold w-10" rowSpan={2}>ID</th>
+                      <th className="px-2 py-2 text-left font-semibold">Part No*</th>
+                      <th className="px-2 py-2 text-left font-semibold">Part Dist.*</th>
+                      <th className="px-2 py-2 text-left font-semibold">Part Description</th>
+                      <th className="px-2 py-2 text-left font-semibold">PO No</th>
+                      <th className="px-2 py-2 text-left font-semibold">P/O Date</th>
+                      <th className="px-2 py-2 text-left font-semibold">Invoice No</th>
+                      <th className="px-2 py-2 text-left font-semibold">Invoice Date</th>
+                      <th className="px-2 py-2 text-left font-semibold">Qty*</th>
+                      <th className="px-2 py-2 text-left font-semibold">Part Price</th>
+                      <th className="px-2 py-2 text-left font-semibold">Core Value</th>
+                      <th className="px-2 py-2 text-left font-semibold">Ship Cost</th>
+                      <th className="px-2 py-2 text-left font-semibold">Markup</th>
+                      <th className="px-2 py-2 text-left font-semibold">Claim To</th>
+                    </tr>
+                    <tr className="bg-slate-800/70 border-b border-white/10 text-slate-400">
+                      <th className="px-2 py-2 text-left font-semibold">Part Status*</th>
+                      <th className="px-2 py-2 text-left font-semibold">Note</th>
+                      <th className="px-2 py-2 text-left font-semibold">Visit ID*</th>
+                      <th className="px-2 py-2 text-left font-semibold">Order #</th>
+                      <th className="px-2 py-2 text-left font-semibold">ETA</th>
+                      <th className="px-2 py-2 text-left font-semibold">In Tracking #</th>
+                      <th className="px-2 py-2 text-left font-semibold">RA Date</th>
+                      <th className="px-2 py-2 text-left font-semibold">RA #</th>
+                      <th className="px-2 py-2 text-left font-semibold">Out Tracking #</th>
+                      <th className="px-2 py-2 text-left font-semibold">Credit #</th>
+                      <th className="px-2 py-2 text-left font-semibold">Total (Markup)</th>
+                      <th className="px-2 py-2 text-left font-semibold">Hold</th>
+                      <th className="px-2 py-2 text-left font-semibold">Cx Paid</th>
+                      <th className="px-2 py-2 text-left font-semibold">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {/* ── Add inline row (hidden while editing — the editor
+                          appears in-place at the row being edited so the
+                          page does not jump to the top) ── */}
+                    {editingPartId ? null : renderPartDraftRows()}
+
+                    {/* ── Saved rows — every cell is an editable input. The
+                          user types changes that buffer into rowEdits; the
+                          global Update button (next to Submit POs) flushes
+                          them to Supabase. There is no separate "edit
+                          mode" or Edit button anymore. ── */}
+                    {partRows.length === 0 ? (
+                      <tr>
+                        <td colSpan={15} className="px-4 py-6 text-center text-slate-500">No parts recorded yet</td>
+                      </tr>
+                    ) : (
+                      partRows.map((row, index) => {
+                        const isDirty = !!rowEdits[row.id];
+                        const cellWrap = "px-1 py-1";
+                        const inputCls = "w-full rounded border border-white/10 bg-slate-950/80 px-2 py-1 text-white focus:outline-none focus:border-blue-500 disabled:opacity-50";
+                        const selectCls = inputCls;
+                        const val = <K extends keyof PartTransactionRow>(field: K) => getRowValue(row, field);
+                        const set = <K extends keyof PartTransactionRow>(field: K, v: PartTransactionRow[K]) =>
+                            updateRowField(row.id, field, v);
+                        return (
+                        <React.Fragment key={row.id}>
+                          <tr className={`align-top transition-colors ${isDirty ? "bg-blue-500/10" : "bg-slate-900/30"}`}>
+                            <td className="px-2 py-1.5 text-slate-400 font-semibold w-10" rowSpan={2}>
+                              P{index + 1}
+                              {isDirty ? (
+                                <span className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-blue-400" title="Unsaved changes — click Update to save" />
+                              ) : null}
+                            </td>
+                            <td className={cellWrap}><input value={String(val("partNo") ?? "")} onChange={(e) => set("partNo", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={`w-full rounded border border-white/10 bg-slate-950/80 px-2 py-1 font-semibold focus:outline-none focus:border-blue-500 disabled:opacity-50 ${val("status") ? partStatusTextClass(String(val("status"))) : "text-blue-300"}`} placeholder="Part No*" /></td>
+                            <td className={cellWrap}>
+                              <select value={String(val("partDist") ?? "")} onChange={(e) => set("partDist", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={selectCls}>
+                                <option value="">Dist.*</option>
+                                {String(val("partDist") ?? "").startsWith("In-House (") ? <option value={String(val("partDist"))}>{String(val("partDist"))}</option> : null}
+                                <option>AIG</option>
+                                <option>Electrolux</option>
+                                <option>Encompass</option>
+                                <option>Encompass-Birmingham / Montgomery</option>
+                                <option>GE</option>
+                                <option>LG</option>
+                                <option>Marcone- Birmingham / Montgomery</option>
+                                <option>Marcone-162468</option>
+                                <option>Midea</option>
+                                <option>Miele</option>
+                                <option>NSA</option>
+                                <option>OW</option>
+                                <option>SB</option>
+                                <option>Sharp</option>
+                                <option>SP</option>
+                                <option>Squaretrade</option>
+                                <option>SS</option>
+                              </select>
+                            </td>
+                            <td className={cellWrap}><input value={String(val("partDesc") ?? "")} onChange={(e) => set("partDesc", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="Description" /></td>
+                            <td className={cellWrap}><input value={String(val("poNo") ?? "")} onChange={(e) => set("poNo", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="PO No" /></td>
+                            <td className={cellWrap}><input type="date" value={String(val("poDate") ?? "")} onChange={(e) => set("poDate", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} /></td>
+                            <td className={cellWrap}><input value={String(val("invoiceNo") ?? "")} onChange={(e) => set("invoiceNo", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="Invoice No" /></td>
+                            <td className={cellWrap}><input type="date" value={String(val("invoiceDate") ?? "")} onChange={(e) => set("invoiceDate", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} /></td>
+                            <td className={cellWrap}><input value={String(val("quantity") ?? "")} onChange={(e) => set("quantity", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={`${inputCls} w-16`} placeholder="Qty*" /></td>
+                            <td className={cellWrap}><input value={String(val("partPrice") ?? "")} onChange={(e) => set("partPrice", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="$0.00" /></td>
+                            <td className={cellWrap}><input value={String(val("coreValue") ?? "")} onChange={(e) => set("coreValue", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="$0.00" /></td>
+                            <td className={cellWrap}><input value={String(val("shipCost") ?? "")} onChange={(e) => set("shipCost", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="$0.00" /></td>
+                            <td className={cellWrap}>
+                              <select value={String(val("markup") ?? "0")} onChange={(e) => set("markup", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={selectCls}>
+                                {Array.from({ length: 21 }, (_, i) => i * 5).map((v) => (
+                                  <option key={v} value={String(v)}>{v}%</option>
+                                ))}
+                              </select>
+                            </td>
+                            <td className={cellWrap}><input value={String(val("claimTo") ?? "")} onChange={(e) => set("claimTo", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="Claim To" /></td>
+                          </tr>
+                          <tr className={`align-top border-b border-white/5 ${isDirty ? "bg-blue-500/5" : "bg-slate-900/20"}`}>
+                            <td className={cellWrap}>
+                              <select value={String(val("status") ?? "")} onChange={(e) => set("status", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={`${selectCls} text-blue-300 font-semibold`}>
+                                <option value="">Status*</option>
+                                <option>Back Order</option>
+                                <option>Cancelled</option>
+                                <option>Claimed</option>
+                                <option>CX Home</option>
+                                <option>Cx Received</option>
+                                <option>Defective</option>
+                                <option>Hold for Estimation</option>
+                                <option>Hold for next vist</option>
+                                <option>In Review</option>
+                                <option>Lost</option>
+                                <option>Need PO</option>
+                                <option>Not Used &amp; Stocked</option>
+                                <option>PAID</option>
+                                <option>Part Ready</option>
+                                <option>PNN</option>
+                                <option>PO Made</option>
+                                <option>RA - Defect</option>
+                                <option>RA- DMG</option>
+                                <option>RA - PNN</option>
+                                <option>RA - Qty Discrepancy</option>
+                                <option>SQT Received</option>
+                                <option>Tech Pickup</option>
+                                <option>Transfer to Another Ticket</option>
+                                <option>Used</option>
+                              </select>
+                            </td>
+                            <td className={cellWrap}><input value={String(val("note") ?? "")} onChange={(e) => set("note", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="Note" /></td>
+                            <td className={cellWrap}>
+                              <select value={String(val("visitId") ?? "")} onChange={(e) => set("visitId", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={selectCls}>
+                                <option value="">Visit ID*</option>
+                                {visitLogEntries.map((entry) => (
+                                  <option key={entry.id} value={entry.visitNo}>{entry.visitNo}</option>
+                                ))}
+                                {/* Stale value from before this became a dropdown, or a
+                                    since-deleted visit — keep it selectable so it isn't
+                                    silently blanked out. */}
+                                {String(val("visitId") ?? "") && !visitLogEntries.some((entry) => entry.visitNo === String(val("visitId") ?? "")) && (
+                                  <option value={String(val("visitId") ?? "")}>{String(val("visitId"))} (not found)</option>
+                                )}
+                              </select>
+                            </td>
+                            <td className={cellWrap}><input value={String(val("orderNo") ?? "")} onChange={(e) => set("orderNo", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="Order #" /></td>
+                            <td className={cellWrap}><input type="date" value={String(val("eta") ?? "")} onChange={(e) => set("eta", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} /></td>
+                            <td className={cellWrap}><input value={String(val("inTracking") ?? "")} onChange={(e) => set("inTracking", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="In Track #" /></td>
+                            <td className={cellWrap}><input type="date" value={String(val("raDate") ?? "")} onChange={(e) => set("raDate", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} /></td>
+                            <td className={cellWrap}><input value={String(val("raNo") ?? "")} onChange={(e) => set("raNo", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="RA #" /></td>
+                            <td className={cellWrap}><input value={String(val("outTracking") ?? "")} onChange={(e) => set("outTracking", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="Out Track #" /></td>
+                            <td className={cellWrap}><input value={String(val("creditNo") ?? "")} onChange={(e) => set("creditNo", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="Credit #" /></td>
+                            <td className="px-2 py-1.5 text-slate-300">{val("totalMarkup") ? `$${val("totalMarkup")}` : "—"}</td>
+                            <td className={cellWrap}>
+                              <input type="checkbox" checked={val("hold") === "Hold"} onChange={(e) => set("hold", e.target.checked ? "Hold" : "No")} disabled={partsEditDisabled || !canEditParts} className="accent-blue-500" />
+                            </td>
+                            <td className={cellWrap}>
+                              <input type="checkbox" checked={val("cxPaid") === "Paid"} onChange={(e) => set("cxPaid", e.target.checked ? "Paid" : "No")} disabled={partsEditDisabled || !canEditParts} className="accent-blue-500" />
+                            </td>
+                            <td className="px-2 py-1.5 whitespace-nowrap">
+                              {row.orderNo && isMarconeDist(row.partDist) ? (
+                                <button
+                                  type="button"
+                                  onClick={() => refreshMarconeOrderStatus(row)}
+                                  disabled={marconeRefreshingId === row.id}
+                                  className="rounded border border-amber-400/40 bg-amber-500/15 px-2 py-1 text-xs font-semibold text-amber-200 hover:bg-amber-500/25 mr-1 disabled:opacity-40"
+                                  title={`Pull ETA / invoice / tracking from Marcone for order ${row.orderNo}`}
+                                >
+                                  {marconeRefreshingId === row.id ? "…" : "Refresh"}
+                                </button>
+                              ) : null}
+                              <button
+                                type="button"
+                                onClick={() => deletePartRow(row.id)}
+                                disabled={partsEditDisabled || !canEditParts}
+                                className={`rounded border px-2 py-1 text-xs font-semibold transition ${
+                                  partsEditDisabled || !canEditParts
+                                    ? "border-white/10 bg-slate-900 text-slate-500 cursor-not-allowed"
+                                    : "border-rose-400/30 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20"
+                                }`}
+                                title={
+                                  partsEditDisabled
+                                    ? "Locked: Parts / Claims / Manager roles only"
+                                    : !canEditParts
+                                      ? "Your role can only order parts, not add or edit them."
+                                      : "Delete part"
+                                }
+                              >
+                                Delete
+                              </button>
+                            </td>
+                          </tr>
+                        </React.Fragment>
+                        );
+                      })
+                    )}
+                  </tbody>
+                  {partRows.length > 0 && (() => {
+                    const totals = partRows.reduce((acc, r) => {
+                      const qty = parseFloat(r.quantity) || 0;
+                      acc.qty += qty;
+                      acc.partPrice += (parseFloat(r.partPrice) || 0) * (qty || 1);
+                      acc.coreValue += parseFloat(r.coreValue) || 0;
+                      acc.shipCost += parseFloat(r.shipCost) || 0;
+                      acc.markup += parseFloat(r.markup) || 0;
+                      return acc;
+                    }, { qty: 0, partPrice: 0, coreValue: 0, shipCost: 0, markup: 0 });
+                    const grand = totals.partPrice + totals.coreValue + totals.shipCost + totals.markup;
+                    const money = (n: number) => `$${n.toFixed(2)}`;
+                    return (
+                      <tfoot>
+                        <tr className="bg-yellow-200 text-slate-900 font-semibold text-[11px]">
+                          <td className="px-2 py-1.5 uppercase tracking-wide" colSpan={8}>Total</td>
+                          <td className="px-2 py-1.5">{totals.qty}</td>
+                          <td className="px-2 py-1.5">{money(totals.partPrice)}</td>
+                          <td className="px-2 py-1.5">{money(totals.coreValue)}</td>
+                          <td className="px-2 py-1.5">{money(totals.shipCost)}</td>
+                          <td className="px-2 py-1.5">{money(totals.markup)}</td>
+                          <td className="px-2 py-1.5 text-right" colSpan={20}>
+                            <span className="mr-2 text-slate-700">Grand Total:</span>
+                            <span className="text-slate-900">{money(grand)}</span>
+                          </td>
+                        </tr>
+                      </tfoot>
+                    );
+                  })()}
+                </table>
+              </div>
+            </div>
+
             {/* Visit Log */}
             <div id="section-visit-log" className="scroll-mt-28">
+              <div className="mb-4 rounded-lg border border-amber-400/20 bg-amber-500/5 p-5">
+                <div className="text-sm font-semibold uppercase tracking-[0.16em] text-amber-300">
+                  Problem Description
+                </div>
+                <div className="mt-2 whitespace-pre-wrap text-base leading-relaxed text-slate-200">
+                  {ticket?.problemDescription?.trim() ||
+                    "No problem description on file for this work order."}
+                </div>
+              </div>
               <h4 className="font-semibold text-slate-300 mb-4">Visit Log</h4>
-              <div className="space-y-4 text-sm">
+              <div className="flex flex-wrap gap-6 text-sm">
                 <div>
                   <label className="text-slate-500 font-semibold">Phone</label>
                   <div className="text-white mt-1">{ticket?.homePhone || ticket?.cellPhone || "—"}</div>
                 </div>
-                <div>
-                  <label className="text-slate-500 font-semibold">Chat</label>
-                  <button className="text-blue-400 hover:text-blue-300 font-semibold">Open Chat</button>
-                </div>
-                <div>
+                <div className="min-w-[200px]">
                   <div className="flex items-center justify-between gap-2">
                     <label className="text-slate-500 font-semibold">Redo Ticket #</label>
                     {!editingRedoTicket && (
@@ -6786,15 +7178,6 @@ function TicketDetailsPage() {
                   </button>
                 )}
               </div>
-              <div className="mt-4 rounded-lg border border-amber-400/20 bg-amber-500/5 p-4">
-                <div className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-300">
-                  Problem Description
-                </div>
-                <div className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-200">
-                  {ticket?.problemDescription?.trim() ||
-                    "No problem description on file for this work order."}
-                </div>
-              </div>
               <div className="mt-4 rounded-lg border border-white/10 bg-slate-900/50 p-4">
                 {visitFormMode === "view" ? (
                   <div className="mb-3 rounded-md border border-blue-400/30 bg-blue-500/10 px-3 py-2 text-sm text-blue-200">
@@ -6829,9 +7212,20 @@ function TicketDetailsPage() {
                           orderedIds.map((id, i) => [id, `V${i + 1}`])
                         );
 
-                        return [...visitLogEntries].reverse().map((entry) => (
+                        const latestVisitId = orderedIds[orderedIds.length - 1];
+
+                        return [...visitLogEntries].reverse().map((entry) => {
+                        // XOR against the default (latest = expanded, everything
+                        // else collapsed) — see visitExpandOverrides' declaration.
+                        const isExpanded = visitExpandOverrides.has(entry.id) !== (entry.id === latestVisitId);
+                        return (
                         <div key={entry.id} className="rounded-md border border-white/10 bg-slate-950/70 p-4 text-sm">
-                          <div className="flex flex-wrap items-start justify-between gap-2">
+                          <button
+                            type="button"
+                            onClick={() => toggleVisitExpanded(entry.id)}
+                            className="flex w-full flex-wrap items-start justify-between gap-2 text-left"
+                            aria-expanded={isExpanded}
+                          >
                             <div className="flex items-center gap-3">
                               {/* Fixed inline colors, not Tailwind's theme-swept blue-*
                                   classes — guarantees this stays readable in both dark
@@ -6865,8 +7259,13 @@ function TicketDetailsPage() {
                                 </div>
                               </div>
                             </div>
-                            <div className="text-xs font-semibold text-slate-300">{entry.by}</div>
-                          </div>
+                            <div className="flex items-center gap-2">
+                              <div className="text-xs font-semibold text-slate-300">{entry.by}</div>
+                              <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
+                            </div>
+                          </button>
+                          {isExpanded && (
+                          <>
                           {entry.updatedAt ? (
                             /* Schedule Information — the edited timestamp already shows at
                                the top of the card, so this box just highlights the current
@@ -6876,6 +7275,9 @@ function TicketDetailsPage() {
                                 <div><span className="font-semibold text-amber-200">Schedule:</span> <span className="font-semibold text-white">{entry.scheduleDate || "—"}</span></div>
                                 <div><span className="font-semibold text-amber-200">Technician:</span> <span className="font-semibold text-white">{entry.technician || "—"}</span></div>
                                 <div><span className="font-semibold text-amber-200">Time Slot:</span> <span className="font-semibold text-white">{entry.timeSlot || "—"}</span></div>
+                                {entry.secondTechnician ? (
+                                  <div><span className="font-semibold text-amber-200">2nd Technician:</span> <span className="font-semibold text-white">{entry.secondTechnician}</span></div>
+                                ) : null}
                               </div>
                             </div>
                           ) : (
@@ -6884,6 +7286,9 @@ function TicketDetailsPage() {
                               <div><span className="font-semibold text-slate-400">Schedule:</span> {entry.scheduleDate || "—"}</div>
                               <div><span className="font-semibold text-slate-400">Technician:</span> {entry.technician || "—"}</div>
                               <div><span className="font-semibold text-slate-400">Time Slot:</span> {entry.timeSlot || "—"}</div>
+                              {entry.secondTechnician ? (
+                                <div><span className="font-semibold text-slate-400">2nd Technician:</span> {entry.secondTechnician}</div>
+                              ) : null}
                             </div>
                           )}
 
@@ -6949,8 +7354,11 @@ function TicketDetailsPage() {
                               Delete
                             </button>
                           </div>
+                          </>
+                          )}
                         </div>
-                      ));
+                        );
+                      });
                       })()
                     )}
                   </div>
@@ -6996,6 +7404,17 @@ function TicketDetailsPage() {
                           </label>
                           <select id="visit-technician-modal" disabled={editingLockedVisit} value={newVisitTechnician} onChange={(event) => setNewVisitTechnician(event.target.value)} className="w-full rounded-md border border-white/15 bg-slate-950/90 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed">
                             <option value="">— select —</option>
+                            {technicianOptions.map((technician) => (
+                              <option key={technician} value={technician}>{technician}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="space-y-1.5">
+                          <label htmlFor="visit-second-technician-modal" className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">
+                            2nd Technician{editingLockedVisit ? <span className="ml-1.5 text-[10px] uppercase tracking-wide text-amber-400">Locked</span> : null}
+                          </label>
+                          <select id="visit-second-technician-modal" disabled={editingLockedVisit} value={newVisitSecondTechnician} onChange={(event) => setNewVisitSecondTechnician(event.target.value)} className="w-full rounded-md border border-white/15 bg-slate-950/90 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <option value="">— none —</option>
                             {technicianOptions.map((technician) => (
                               <option key={technician} value={technician}>{technician}</option>
                             ))}
@@ -7336,6 +7755,9 @@ function TicketDetailsPage() {
                       <div className="rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"><span className="font-semibold text-slate-400">Date:</span> {viewingVisitEntry.scheduleDate || "—"}</div>
                       <div className="rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"><span className="font-semibold text-slate-400">Technician:</span> {viewingVisitEntry.technician || "—"}</div>
                       <div className="rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"><span className="font-semibold text-slate-400">Time Slot:</span> {viewingVisitEntry.timeSlot || "—"}</div>
+                      {viewingVisitEntry.secondTechnician ? (
+                        <div className="rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"><span className="font-semibold text-slate-400">2nd Technician:</span> {viewingVisitEntry.secondTechnician}</div>
+                      ) : null}
                     </div>
                   </div>
 
@@ -7450,374 +7872,6 @@ function TicketDetailsPage() {
                 </div>
               </div>
             ) : null}
-
-            {/* Part Transaction */}
-            <div id="section-part-transaction" className="scroll-mt-28">
-              <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-                <div className="flex items-center gap-2">
-                  <h4 className="font-semibold text-slate-300">Part Transaction</h4>
-                  <div className="text-xs font-semibold text-blue-300">{partCountLabel}</div>
-                  {isTicketPartLocked ? (
-                    <span
-                      className={`ml-2 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
-                        partsEditDisabled
-                          ? "border-amber-400/40 bg-amber-500/15 text-amber-200"
-                          : "border-emerald-400/40 bg-emerald-500/15 text-emerald-200"
-                      }`}
-                      title={
-                        partsEditDisabled
-                          ? `Ticket is "${ticket?.status}". Only Claims can change parts.`
-                          : `Ticket is "${ticket?.status}". Claims-only edit window.`
-                      }
-                    >
-                      🔒 Locked — Claims only
-                    </span>
-                  ) : null}
-                </div>
-                {canUsePartToolbar && (
-                <div className="flex items-center gap-2">
-                  <button 
-                    type="button"
-                    onClick={() => {
-                      if (partRows.length === 0) {
-                        alert('No parts to view');
-                        return;
-                      }
-                      setIsPartListModalOpen(true);
-                    }}
-                    className="rounded border border-blue-400/40 bg-blue-600/20 px-3 py-1.5 text-xs font-semibold text-blue-200 transition hover:bg-blue-600/30"
-                    title="View all parts"
-                  >
-                    View Log
-                  </button>
-                  <button 
-                    type="button"
-                    onClick={() => void syncPartsFromNotes()}
-                    disabled={partsEditDisabled || syncingNotesParts}
-                    className={`rounded border px-3 py-1.5 text-xs font-semibold transition ${
-                      partsEditDisabled || syncingNotesParts
-                        ? "border-white/10 bg-slate-800 text-slate-500 cursor-not-allowed"
-                        : "border-purple-400/40 bg-purple-600/20 text-purple-200 hover:bg-purple-600/30"
-                    }`}
-                    title={
-                      partsEditDisabled
-                        ? "Locked: Parts / Claims / Manager roles only"
-                        : "Import parts the warranty company announced in SP customer notes (Squaretrade / Allstate). Adds Need-PO rows for new parts and overlays tracking numbers onto existing ones."
-                    }
-                  >
-                    {syncingNotesParts ? "Syncing…" : "Sync Parts from Notes"}
-                  </button>
-                  <button 
-                    type="button"
-                    onClick={openTruckStockBatch}
-                    disabled={partsEditDisabled}
-                    className={`rounded border px-3 py-1.5 text-xs font-semibold transition ${
-                      partsEditDisabled
-                        ? "border-white/10 bg-slate-800 text-slate-500 cursor-not-allowed"
-                        : "border-emerald-400/40 bg-emerald-600/20 text-emerald-200 hover:bg-emerald-600/30"
-                    }`}
-                    title={partsEditDisabled ? "Locked: Parts / Claims / Manager roles only" : "Fulfill Need PO parts from in-house Truck Stock"}
-                  >
-                    Truck Stock
-                  </button>
-                  <button
-                    type="button"
-                    onClick={submitAllPOs}
-                    disabled={partsEditDisabled || !canOrderParts}
-                    className={`rounded border px-3 py-1.5 text-xs font-semibold transition ${
-                      partsEditDisabled || !canOrderParts
-                        ? "border-white/10 bg-slate-800 text-slate-500 cursor-not-allowed"
-                        : "border-green-400/40 bg-green-600/20 text-green-200 hover:bg-green-600/30"
-                    }`}
-                    title={
-                      partsEditDisabled
-                        ? "Locked: Parts / Claims / Manager roles only"
-                        : !canOrderParts
-                          ? "Only Parts Team Leader, Admin, or Super Admin can submit part orders."
-                          : "Submit POs for parts that need ordering"
-                    }
-                  >
-                    Submit POs
-                  </button>
-                  <button
-                    type="button"
-                    onClick={saveAllRowEdits}
-                    disabled={partsEditDisabled || !canEditParts || rowEditsSaving || dirtyRowCount === 0}
-                    className={`rounded border px-3 py-1.5 text-xs font-semibold transition ${
-                      partsEditDisabled || !canEditParts || dirtyRowCount === 0
-                        ? "border-white/10 bg-slate-800 text-slate-500 cursor-not-allowed"
-                        : "border-blue-400/40 bg-blue-600/30 text-blue-200 hover:bg-blue-600/50"
-                    }`}
-                    title={
-                      partsEditDisabled
-                        ? "Locked: Parts / Claims / Manager roles only"
-                        : !canEditParts
-                        ? "Your role can only order parts, not add or edit them."
-                        : dirtyRowCount === 0
-                        ? "Edit any cell in a part row, then click Update to save"
-                        : `Save changes to ${dirtyRowCount} part row${dirtyRowCount === 1 ? "" : "s"}`
-                    }
-                  >
-                    {rowEditsSaving
-                      ? "Saving…"
-                      : dirtyRowCount > 0
-                      ? `Update (${dirtyRowCount})`
-                      : "Update"}
-                  </button>
-                  {/* Auto-sync indicator removed — Marcone order status
-                      is now manual-refresh only via the per-row Refresh
-                      button. */}
-                </div>
-                )}
-              </div>
-              {partsEditDisabled ? (
-                <div className="mb-3 rounded-md border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-                  This ticket is <span className="font-semibold">{ticket?.status}</span>. Part Transactions are locked.
-                  Only Parts / Claims / Admin / Manager / Branch Manager roles can edit them. Any attempt will alert Naveen, Ian, and Tina.
-                </div>
-              ) : null}
-
-              <div className="overflow-x-auto border border-white/10 rounded-lg">
-                <table className="w-full text-xs pt-compact" style={{ minWidth: "1180px" }}>
-                  {/* Two-row header */}
-                  <thead>
-                    <tr className="bg-slate-800 border-b border-white/10 text-slate-300">
-                      <th className="px-2 py-2 text-left font-semibold w-10" rowSpan={2}>ID</th>
-                      <th className="px-2 py-2 text-left font-semibold">Part No*</th>
-                      <th className="px-2 py-2 text-left font-semibold">Part Dist.*</th>
-                      <th className="px-2 py-2 text-left font-semibold">Part Description</th>
-                      <th className="px-2 py-2 text-left font-semibold">PO No</th>
-                      <th className="px-2 py-2 text-left font-semibold">P/O Date</th>
-                      <th className="px-2 py-2 text-left font-semibold">Invoice No</th>
-                      <th className="px-2 py-2 text-left font-semibold">Invoice Date</th>
-                      <th className="px-2 py-2 text-left font-semibold">Qty*</th>
-                      <th className="px-2 py-2 text-left font-semibold">Part Price</th>
-                      <th className="px-2 py-2 text-left font-semibold">Core Value</th>
-                      <th className="px-2 py-2 text-left font-semibold">Ship Cost</th>
-                      <th className="px-2 py-2 text-left font-semibold">Markup</th>
-                      <th className="px-2 py-2 text-left font-semibold">Claim To</th>
-                    </tr>
-                    <tr className="bg-slate-800/70 border-b border-white/10 text-slate-400">
-                      <th className="px-2 py-2 text-left font-semibold">Part Status*</th>
-                      <th className="px-2 py-2 text-left font-semibold">Note</th>
-                      <th className="px-2 py-2 text-left font-semibold">Visit ID*</th>
-                      <th className="px-2 py-2 text-left font-semibold">Order #</th>
-                      <th className="px-2 py-2 text-left font-semibold">ETA</th>
-                      <th className="px-2 py-2 text-left font-semibold">In Tracking #</th>
-                      <th className="px-2 py-2 text-left font-semibold">RA Date</th>
-                      <th className="px-2 py-2 text-left font-semibold">RA #</th>
-                      <th className="px-2 py-2 text-left font-semibold">Out Tracking #</th>
-                      <th className="px-2 py-2 text-left font-semibold">Credit #</th>
-                      <th className="px-2 py-2 text-left font-semibold">Total (Markup)</th>
-                      <th className="px-2 py-2 text-left font-semibold">Hold</th>
-                      <th className="px-2 py-2 text-left font-semibold">Cx Paid</th>
-                      <th className="px-2 py-2 text-left font-semibold">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-white/5">
-                    {/* ── Add inline row (hidden while editing — the editor
-                          appears in-place at the row being edited so the
-                          page does not jump to the top) ── */}
-                    {editingPartId ? null : renderPartDraftRows()}
-
-                    {/* ── Saved rows — every cell is an editable input. The
-                          user types changes that buffer into rowEdits; the
-                          global Update button (next to Submit POs) flushes
-                          them to Supabase. There is no separate "edit
-                          mode" or Edit button anymore. ── */}
-                    {partRows.length === 0 ? (
-                      <tr>
-                        <td colSpan={15} className="px-4 py-6 text-center text-slate-500">No parts recorded yet</td>
-                      </tr>
-                    ) : (
-                      partRows.map((row, index) => {
-                        const isDirty = !!rowEdits[row.id];
-                        const cellWrap = "px-1 py-1";
-                        const inputCls = "w-full rounded border border-white/10 bg-slate-950/80 px-2 py-1 text-white focus:outline-none focus:border-blue-500 disabled:opacity-50";
-                        const selectCls = inputCls;
-                        const val = <K extends keyof PartTransactionRow>(field: K) => getRowValue(row, field);
-                        const set = <K extends keyof PartTransactionRow>(field: K, v: PartTransactionRow[K]) =>
-                            updateRowField(row.id, field, v);
-                        return (
-                        <React.Fragment key={row.id}>
-                          <tr className={`align-top transition-colors ${isDirty ? "bg-blue-500/10" : "bg-slate-900/30"}`}>
-                            <td className="px-2 py-1.5 text-slate-400 font-semibold w-10" rowSpan={2}>
-                              P{index + 1}
-                              {isDirty ? (
-                                <span className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-blue-400" title="Unsaved changes — click Update to save" />
-                              ) : null}
-                            </td>
-                            <td className={cellWrap}><input value={String(val("partNo") ?? "")} onChange={(e) => set("partNo", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={`w-full rounded border border-white/10 bg-slate-950/80 px-2 py-1 font-semibold focus:outline-none focus:border-blue-500 disabled:opacity-50 ${val("status") ? partStatusTextClass(String(val("status"))) : "text-blue-300"}`} placeholder="Part No*" /></td>
-                            <td className={cellWrap}>
-                              <select value={String(val("partDist") ?? "")} onChange={(e) => set("partDist", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={selectCls}>
-                                <option value="">Dist.*</option>
-                                {String(val("partDist") ?? "").startsWith("In-House (") ? <option value={String(val("partDist"))}>{String(val("partDist"))}</option> : null}
-                                <option>AIG</option>
-                                <option>Electrolux</option>
-                                <option>Encompass</option>
-                                <option>Encompass-Birmingham / Montgomery</option>
-                                <option>GE</option>
-                                <option>LG</option>
-                                <option>Marcone- Birmingham / Montgomery</option>
-                                <option>Marcone-162468</option>
-                                <option>Midea</option>
-                                <option>Miele</option>
-                                <option>NSA</option>
-                                <option>OW</option>
-                                <option>SB</option>
-                                <option>Sharp</option>
-                                <option>SP</option>
-                                <option>Squaretrade</option>
-                                <option>SS</option>
-                              </select>
-                            </td>
-                            <td className={cellWrap}><input value={String(val("partDesc") ?? "")} onChange={(e) => set("partDesc", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="Description" /></td>
-                            <td className={cellWrap}><input value={String(val("poNo") ?? "")} onChange={(e) => set("poNo", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="PO No" /></td>
-                            <td className={cellWrap}><input type="date" value={String(val("poDate") ?? "")} onChange={(e) => set("poDate", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} /></td>
-                            <td className={cellWrap}><input value={String(val("invoiceNo") ?? "")} onChange={(e) => set("invoiceNo", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="Invoice No" /></td>
-                            <td className={cellWrap}><input type="date" value={String(val("invoiceDate") ?? "")} onChange={(e) => set("invoiceDate", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} /></td>
-                            <td className={cellWrap}><input value={String(val("quantity") ?? "")} onChange={(e) => set("quantity", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={`${inputCls} w-16`} placeholder="Qty*" /></td>
-                            <td className={cellWrap}><input value={String(val("partPrice") ?? "")} onChange={(e) => set("partPrice", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="$0.00" /></td>
-                            <td className={cellWrap}><input value={String(val("coreValue") ?? "")} onChange={(e) => set("coreValue", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="$0.00" /></td>
-                            <td className={cellWrap}><input value={String(val("shipCost") ?? "")} onChange={(e) => set("shipCost", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="$0.00" /></td>
-                            <td className={cellWrap}>
-                              <select value={String(val("markup") ?? "0")} onChange={(e) => set("markup", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={selectCls}>
-                                {Array.from({ length: 21 }, (_, i) => i * 5).map((v) => (
-                                  <option key={v} value={String(v)}>{v}%</option>
-                                ))}
-                              </select>
-                            </td>
-                            <td className={cellWrap}><input value={String(val("claimTo") ?? "")} onChange={(e) => set("claimTo", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="Claim To" /></td>
-                          </tr>
-                          <tr className={`align-top border-b border-white/5 ${isDirty ? "bg-blue-500/5" : "bg-slate-900/20"}`}>
-                            <td className={cellWrap}>
-                              <select value={String(val("status") ?? "")} onChange={(e) => set("status", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={`${selectCls} text-blue-300 font-semibold`}>
-                                <option value="">Status*</option>
-                                <option>Back Order</option>
-                                <option>Cancelled</option>
-                                <option>Claimed</option>
-                                <option>CX Home</option>
-                                <option>Cx Received</option>
-                                <option>Defective</option>
-                                <option>Hold for Estimation</option>
-                                <option>Hold for next vist</option>
-                                <option>In Review</option>
-                                <option>Lost</option>
-                                <option>Need PO</option>
-                                <option>Not Used &amp; Stocked</option>
-                                <option>PAID</option>
-                                <option>Part Ready</option>
-                                <option>PNN</option>
-                                <option>PO Made</option>
-                                <option>RA - Defect</option>
-                                <option>RA- DMG</option>
-                                <option>RA - PNN</option>
-                                <option>RA - Qty Discrepancy</option>
-                                <option>SQT Received</option>
-                                <option>Tech Pickup</option>
-                                <option>Transfer to Another Ticket</option>
-                                <option>Used</option>
-                              </select>
-                            </td>
-                            <td className={cellWrap}><input value={String(val("note") ?? "")} onChange={(e) => set("note", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="Note" /></td>
-                            <td className={cellWrap}>
-                              <select value={String(val("visitId") ?? "")} onChange={(e) => set("visitId", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={selectCls}>
-                                <option value="">Visit ID*</option>
-                                {visitLogEntries.map((entry) => (
-                                  <option key={entry.id} value={entry.visitNo}>{entry.visitNo}</option>
-                                ))}
-                                {/* Stale value from before this became a dropdown, or a
-                                    since-deleted visit — keep it selectable so it isn't
-                                    silently blanked out. */}
-                                {String(val("visitId") ?? "") && !visitLogEntries.some((entry) => entry.visitNo === String(val("visitId") ?? "")) && (
-                                  <option value={String(val("visitId") ?? "")}>{String(val("visitId"))} (not found)</option>
-                                )}
-                              </select>
-                            </td>
-                            <td className={cellWrap}><input value={String(val("orderNo") ?? "")} onChange={(e) => set("orderNo", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="Order #" /></td>
-                            <td className={cellWrap}><input type="date" value={String(val("eta") ?? "")} onChange={(e) => set("eta", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} /></td>
-                            <td className={cellWrap}><input value={String(val("inTracking") ?? "")} onChange={(e) => set("inTracking", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="In Track #" /></td>
-                            <td className={cellWrap}><input type="date" value={String(val("raDate") ?? "")} onChange={(e) => set("raDate", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} /></td>
-                            <td className={cellWrap}><input value={String(val("raNo") ?? "")} onChange={(e) => set("raNo", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="RA #" /></td>
-                            <td className={cellWrap}><input value={String(val("outTracking") ?? "")} onChange={(e) => set("outTracking", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="Out Track #" /></td>
-                            <td className={cellWrap}><input value={String(val("creditNo") ?? "")} onChange={(e) => set("creditNo", e.target.value)} disabled={partsEditDisabled || !canEditParts} className={inputCls} placeholder="Credit #" /></td>
-                            <td className="px-2 py-1.5 text-slate-300">{val("totalMarkup") ? `$${val("totalMarkup")}` : "—"}</td>
-                            <td className={cellWrap}>
-                              <input type="checkbox" checked={val("hold") === "Hold"} onChange={(e) => set("hold", e.target.checked ? "Hold" : "No")} disabled={partsEditDisabled || !canEditParts} className="accent-blue-500" />
-                            </td>
-                            <td className={cellWrap}>
-                              <input type="checkbox" checked={val("cxPaid") === "Paid"} onChange={(e) => set("cxPaid", e.target.checked ? "Paid" : "No")} disabled={partsEditDisabled || !canEditParts} className="accent-blue-500" />
-                            </td>
-                            <td className="px-2 py-1.5 whitespace-nowrap">
-                              {row.orderNo && isMarconeDist(row.partDist) ? (
-                                <button
-                                  type="button"
-                                  onClick={() => refreshMarconeOrderStatus(row)}
-                                  disabled={marconeRefreshingId === row.id}
-                                  className="rounded border border-amber-400/40 bg-amber-500/15 px-2 py-1 text-xs font-semibold text-amber-200 hover:bg-amber-500/25 mr-1 disabled:opacity-40"
-                                  title={`Pull ETA / invoice / tracking from Marcone for order ${row.orderNo}`}
-                                >
-                                  {marconeRefreshingId === row.id ? "…" : "Refresh"}
-                                </button>
-                              ) : null}
-                              <button
-                                type="button"
-                                onClick={() => deletePartRow(row.id)}
-                                disabled={partsEditDisabled || !canEditParts}
-                                className={`rounded border px-2 py-1 text-xs font-semibold transition ${
-                                  partsEditDisabled || !canEditParts
-                                    ? "border-white/10 bg-slate-900 text-slate-500 cursor-not-allowed"
-                                    : "border-rose-400/30 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20"
-                                }`}
-                                title={
-                                  partsEditDisabled
-                                    ? "Locked: Parts / Claims / Manager roles only"
-                                    : !canEditParts
-                                      ? "Your role can only order parts, not add or edit them."
-                                      : "Delete part"
-                                }
-                              >
-                                Delete
-                              </button>
-                            </td>
-                          </tr>
-                        </React.Fragment>
-                        );
-                      })
-                    )}
-                  </tbody>
-                  {partRows.length > 0 && (() => {
-                    const totals = partRows.reduce((acc, r) => {
-                      const qty = parseFloat(r.quantity) || 0;
-                      acc.qty += qty;
-                      acc.partPrice += (parseFloat(r.partPrice) || 0) * (qty || 1);
-                      acc.coreValue += parseFloat(r.coreValue) || 0;
-                      acc.shipCost += parseFloat(r.shipCost) || 0;
-                      acc.markup += parseFloat(r.markup) || 0;
-                      return acc;
-                    }, { qty: 0, partPrice: 0, coreValue: 0, shipCost: 0, markup: 0 });
-                    const grand = totals.partPrice + totals.coreValue + totals.shipCost + totals.markup;
-                    const money = (n: number) => `$${n.toFixed(2)}`;
-                    return (
-                      <tfoot>
-                        <tr className="bg-yellow-200 text-slate-900 font-semibold text-[11px]">
-                          <td className="px-2 py-1.5 uppercase tracking-wide" colSpan={8}>Total</td>
-                          <td className="px-2 py-1.5">{totals.qty}</td>
-                          <td className="px-2 py-1.5">{money(totals.partPrice)}</td>
-                          <td className="px-2 py-1.5">{money(totals.coreValue)}</td>
-                          <td className="px-2 py-1.5">{money(totals.shipCost)}</td>
-                          <td className="px-2 py-1.5">{money(totals.markup)}</td>
-                          <td className="px-2 py-1.5 text-right" colSpan={20}>
-                            <span className="mr-2 text-slate-700">Grand Total:</span>
-                            <span className="text-slate-900">{money(grand)}</span>
-                          </td>
-                        </tr>
-                      </tfoot>
-                    );
-                  })()}
-                </table>
-              </div>
-            </div>
             {canSeeClaimTransaction && (
             <div id="section-claim-transaction" className="scroll-mt-28">
               <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
@@ -8345,6 +8399,62 @@ function TicketDetailsPage() {
                       ))
                     )}
                   </div>
+
+                  {/* Deleted parts — same audit trail deletePartRow already
+                      writes on every delete, just surfaced here so a removed
+                      part (and who removed it) doesn't just vanish. */}
+                  {deletedPartAuditEntries.length > 0 && (
+                    <div className="mt-6 border-t border-white/10 pt-4">
+                      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+                        Deleted Parts
+                      </p>
+                      <p className="text-sm text-slate-400 mt-1 mb-3">
+                        {deletedPartAuditEntries.length} deleted part{deletedPartAuditEntries.length === 1 ? '' : 's'}
+                      </p>
+                      <div className="space-y-3">
+                        {deletedPartAuditEntries.map((entry) => {
+                          const expanded = expandedDeletedPartLogId === entry.id;
+                          const partNo = snapshotField(entry.before, "Part No") || "(no part #)";
+                          const partDesc = snapshotField(entry.before, "Part Desc");
+                          return (
+                            <div key={entry.id} className="border border-red-500/20 rounded-lg bg-red-950/10">
+                              <div className="px-4 py-3">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="flex-1">
+                                    <div className="flex items-center gap-2 mb-1">
+                                      <h4 className="text-base font-semibold text-slate-400 line-through decoration-2">{partNo}</h4>
+                                      <span className="rounded border border-red-400/30 bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-300">
+                                        Deleted
+                                      </span>
+                                    </div>
+                                    {partDesc ? <div className="text-sm text-slate-400 mb-1">{partDesc}</div> : null}
+                                    <div className="text-xs text-slate-500">
+                                      Deleted by <span className="text-slate-300">{entry.by}</span> on {new Date(entry.timestamp).toLocaleString()}
+                                    </div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="rounded border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-white/10"
+                                    onClick={() => setExpandedDeletedPartLogId(expanded ? null : entry.id)}
+                                  >
+                                    {expanded ? "Hide Snapshot" : "View Snapshot"}
+                                  </button>
+                                </div>
+                                {expanded && (
+                                  <div className="mt-3 border-t border-white/10 pt-3">
+                                    <div className="text-xs text-slate-400 font-semibold mb-2">
+                                      Full record at time of deletion
+                                    </div>
+                                    {renderVisitSummary(entry.before)}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             ) : null}
@@ -8593,232 +8703,6 @@ function TicketDetailsPage() {
           </div>
         )}
 
-        {activeTab === "compensation" && (
-          <div className="space-y-6">
-            <div className="bg-slate-900/50 border border-white/10 rounded-lg p-6">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-                <div>
-                  <label className="block text-slate-500 font-semibold mb-2">Default Date:</label>
-                  <div className="text-white bg-slate-950/70 border border-white/10 rounded px-3 py-2">05/29/2026</div>
-                </div>
-                <div>
-                  <label className="block text-slate-500 font-semibold mb-2">Schedule Date</label>
-                  <div className="text-white bg-slate-950/70 border border-white/10 rounded px-3 py-2">Today</div>
-                </div>
-                <div className="flex items-end">
-                  <button
-                    onClick={addCompensationRow}
-                    className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-4 py-2 rounded text-sm transition"
-                  >
-                    Add
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div className="overflow-x-auto border border-white/10 rounded-lg">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="bg-blue-900/50 border-b border-blue-500/30">
-                    <th className="px-4 py-3 text-left font-semibold text-blue-300">Compensation Item</th>
-                    <th className="px-4 py-3 text-left font-semibold text-blue-300">Beneficiary</th>
-                    <th className="px-4 py-3 text-left font-semibold text-blue-300">Amount</th>
-                    <th className="px-4 py-3 text-left font-semibold text-blue-300">Rate</th>
-                    <th className="px-4 py-3 text-left font-semibold text-blue-300">Activity Date</th>
-                    <th className="px-4 py-3 text-left font-semibold text-blue-300">Requires Approved Claim / Requires Cx Payment</th>
-                    <th className="px-4 py-3 text-left font-semibold text-blue-300">Comment</th>
-                    <th className="px-4 py-3 text-left font-semibold text-blue-300">Created by</th>
-                    <th className="px-4 py-3 text-left font-semibold text-blue-300">Last Modified by</th>
-                    <th className="px-4 py-3 text-left font-semibold text-blue-300">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {compensationRows.map((row) => (
-                    <tr key={row.id} className="border-b border-white/5 align-top hover:bg-white/5">
-                      <td className="px-4 py-3">
-                        <input
-                          value={row.item}
-                          onChange={(e) => updateCompensationRow(row.id, "item", e.target.value)}
-                          className="w-full bg-slate-900 border border-white/10 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
-                          placeholder="Compensation item"
-                        />
-                      </td>
-                      <td className="px-4 py-3">
-                        <select
-                          value={row.beneficiary}
-                          onChange={(e) => updateCompensationRow(row.id, "beneficiary", e.target.value)}
-                          title="Select technician"
-                          className="w-full bg-slate-900 border border-white/10 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500"
-                        >
-                          <option value="">Select technician</option>
-                          {technicianOptions.map((technician) => (
-                            <option key={technician} value={technician}>
-                              {technician}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
-                      <td className="px-4 py-3">
-                        <input
-                          value={row.amount}
-                          onChange={(e) => updateCompensationRow(row.id, "amount", e.target.value)}
-                          className="w-full bg-slate-900 border border-white/10 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
-                          placeholder="Amount"
-                        />
-                      </td>
-                      <td className="px-4 py-3">
-                        <input
-                          value={row.rate}
-                          onChange={(e) => updateCompensationRow(row.id, "rate", e.target.value)}
-                          className="w-full bg-slate-900 border border-white/10 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
-                          placeholder="Rate"
-                        />
-                      </td>
-                      <td className="px-4 py-3">
-                        <input
-                          value={row.activityDate}
-                          onChange={(e) => updateCompensationRow(row.id, "activityDate", e.target.value)}
-                          className="w-full bg-slate-900 border border-white/10 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
-                          placeholder="Activity date"
-                        />
-                      </td>
-                      <td className="px-4 py-3">
-                        <input
-                          value={row.requiresClaimOrCxPayment}
-                          onChange={(e) => updateCompensationRow(row.id, "requiresClaimOrCxPayment", e.target.value)}
-                          className="w-full bg-slate-900 border border-white/10 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
-                          placeholder="Yes / No"
-                        />
-                      </td>
-                      <td className="px-4 py-3">
-                        <input
-                          value={row.comment}
-                          onChange={(e) => updateCompensationRow(row.id, "comment", e.target.value)}
-                          className="w-full bg-slate-900 border border-white/10 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
-                          placeholder="Comment"
-                        />
-                      </td>
-                      <td className="px-4 py-3 text-slate-300">{row.createdBy}</td>
-                      <td className="px-4 py-3 text-slate-300">{row.lastModifiedBy}</td>
-                      <td className="px-4 py-3 text-slate-300">
-                        <button className="text-blue-400 hover:text-blue-300 font-semibold">Edit</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {activeTab === "billing" && (
-          <div className="space-y-6">
-            <div className="rounded-xl border border-white/15 bg-white/8 p-5 text-white backdrop-blur-md">
-              <div className="text-lg font-semibold text-blue-200">Billing Information</div>
-              <div className="mt-3 rounded-md border border-white/10 bg-slate-900/90 px-3 py-2 text-sm font-semibold text-white">Paid in full</div>
-              <div className="mt-2 text-sm font-semibold text-blue-200/90">0 distinct record found</div>
-              <div className="mt-4 max-w-sm">
-                <label htmlFor="billing-search" className="block text-xs font-semibold uppercase tracking-[0.04em] text-slate-400">search in result</label>
-                <input
-                  id="billing-search"
-                  type="text"
-                  readOnly
-                  value=""
-                  className="mt-2 w-full rounded-md border border-white/15 bg-slate-900/90 px-3 py-2 text-sm text-white focus:outline-none"
-                />
-              </div>
-              <div className="mt-4 overflow-x-auto rounded-lg border border-white/10">
-                <table className="w-full min-w-[1400px] text-left text-sm">
-                  <thead>
-                    <tr className="bg-blue-900/50 text-blue-200">
-                      <th className="px-4 py-3">ID</th>
-                      <th className="px-4 py-3">Visit ID*</th>
-                      <th className="px-4 py-3">Cx Email</th>
-                      <th className="px-4 py-3">Cx Name*</th>
-                      <th className="px-4 py-3">Labor Fee*</th>
-                      <th className="px-4 py-3">Part Fee*</th>
-                      <th className="px-4 py-3">Diag(Trip) Fee*</th>
-                      <th className="px-4 py-3">Others Fee*</th>
-                      <th className="px-4 py-3">Tax Rate*</th>
-                      <th className="px-4 py-3">Tax</th>
-                      <th className="px-4 py-3">Deduction</th>
-                      <th className="px-4 py-3">Total</th>
-                      <th className="px-4 py-3">Payment*</th>
-                      <th className="px-4 py-3">C. Card #</th>
-                      <th className="px-4 py-3">App. Code</th>
-                      <th className="px-4 py-3">Sign</th>
-                      <th className="px-4 py-3">Comment</th>
-                      <th className="px-4 py-3">Tx Date</th>
-                      <th className="px-4 py-3">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-white/10">
-                    <tr className="bg-slate-900/70 text-slate-200">
-                      <td className="px-4 py-3"></td>
-                      <td className="px-4 py-3">V1</td>
-                      <td className="px-4 py-3">jonshaw@lakesidechurch.ws</td>
-                      <td className="px-4 py-3">Jon Shaw</td>
-                      <td className="px-4 py-3">Tax</td>
-                      <td className="px-4 py-3">Tax</td>
-                      <td className="px-4 py-3">Tax</td>
-                      <td className="px-4 py-3">Tax</td>
-                      <td className="px-4 py-3">%</td>
-                      <td className="px-4 py-3">$0.00</td>
-                      <td className="px-4 py-3">0.00</td>
-                      <td className="px-4 py-3"></td>
-                      <td className="px-4 py-3"></td>
-                      <td className="px-4 py-3"></td>
-                      <td className="px-4 py-3"></td>
-                      <td className="px-4 py-3"></td>
-                      <td className="px-4 py-3"></td>
-                      <td className="px-4 py-3">05/14/2026</td>
-                      <td className="px-4 py-3 text-blue-300 font-semibold">Add</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            <div className="rounded-xl border border-white/15 bg-white/8 p-5 text-white backdrop-blur-md">
-              <div className="text-lg font-semibold text-blue-200">Estimations</div>
-              <div className="mt-4 overflow-x-auto rounded-lg border border-white/10">
-                <table className="w-full min-w-[1100px] text-left text-sm">
-                  <thead>
-                    <tr className="bg-blue-900/50 text-blue-200">
-                      <th className="px-4 py-3">ID</th>
-                      <th className="px-4 py-3">Estimated</th>
-                      <th className="px-4 py-3">Type</th>
-                      <th className="px-4 py-3">Labor Fee</th>
-                      <th className="px-4 py-3">Part Fee</th>
-                      <th className="px-4 py-3">Diagnose Fee</th>
-                      <th className="px-4 py-3">Others Fee</th>
-                      <th className="px-4 py-3">Tax Rate (%)</th>
-                      <th className="px-4 py-3">Tax Fee</th>
-                      <th className="px-4 py-3">Deduction</th>
-                      <th className="px-4 py-3">Refund</th>
-                      <th className="px-4 py-3">Total</th>
-                      <th className="px-4 py-3">Confirmed</th>
-                      <th className="px-4 py-3">Created by</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-white/10">
-                    <tr className="bg-slate-900/70 text-slate-200">
-                      <td className="px-4 py-3" colSpan={14}></td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button className="rounded-md border border-white/15 bg-slate-900/90 px-4 py-2 text-sm font-semibold text-white transition hover:border-slate-200/40">
-                  Close
-                </button>
-                <button className="rounded-md border border-white/15 bg-slate-900/90 px-4 py-2 text-sm font-semibold text-white transition hover:border-slate-200/40">
-                  List
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
         </div>
       </main>
 

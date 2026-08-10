@@ -42,7 +42,19 @@ interface NewUserFormData {
   selectedOffDays: number[];
 }
 
+// Display order only (a work week reads naturally Monday-first). The actual
+// stored/compared value for each day is NOT its position in this array —
+// off_days is interpreted everywhere else in the app (AttendanceMonitoringPage,
+// AccountingDashboard, ReportHRDaily, ReportAttendanceMonitoring, payslips,
+// timecards.ts) via JS's native Date.getDay(): 0=Sunday..6=Saturday. See
+// DAYS_OF_WEEK_INDEX below, which maps each display position to that real
+// index — storing raw 0..6 by display position here would silently shift
+// everyone's off days by one relative to every other reader (e.g. "Saturday
+// and Sunday" would get saved as {5,6} and then misread elsewhere as
+// "Friday and Saturday").
 const DAYS_OF_WEEK = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const DAYS_OF_WEEK_INDEX = [1, 2, 3, 4, 5, 6, 0];
+const DAY_NAME_BY_INDEX = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 // Branch/office locations (used by Assigned Branch + Branch Access dropdowns)
 const LOCATIONS = [
@@ -650,7 +662,7 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
     requiredCheckOut: "17:00",
     workingHours: "",
     mealMinutes: "",
-    selectedOffDays: [5, 6], // Saturday and Sunday by default
+    selectedOffDays: [0, 6], // Sunday and Saturday by default
   });
 
   // Load users from Supabase on mount (RLS scopes to the caller's company).
@@ -1012,7 +1024,7 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
         requiredCheckOut: "17:00",
         workingHours: "",
         mealMinutes: "",
-        selectedOffDays: [5, 6],
+        selectedOffDays: [0, 6],
       });
       setShowAddUserModal(false);
     } catch (error: any) {
@@ -1429,7 +1441,9 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
               <div className="pt-4 border-t border-white/10">
                 <h3 className="text-sm font-semibold text-slate-300 mb-4">Days Off</h3>
                 <div className="grid grid-cols-7 gap-2 mb-4">
-                  {DAYS_OF_WEEK.map((dayName, dayNum) => (
+                  {DAYS_OF_WEEK.map((dayName, i) => {
+                    const dayNum = DAYS_OF_WEEK_INDEX[i];
+                    return (
                     <button
                       key={dayNum}
                       type="button"
@@ -1443,16 +1457,17 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
                       <span className="text-xs truncate">{dayName.slice(0, 3)}</span>
                       <span className="text-xs mt-1 opacity-75">{newUserForm.selectedOffDays.includes(dayNum) ? "OFF" : "WORK"}</span>
                     </button>
-                  ))}
+                    );
+                  })}
                 </div>
                 {newUserForm.selectedOffDays.length > 0 && (
-                  <p className="text-xs text-blue-300">Selected: {newUserForm.selectedOffDays.map((d) => DAYS_OF_WEEK[d]).join(", ")}</p>
+                  <p className="text-xs text-blue-300">Selected: {newUserForm.selectedOffDays.map((d) => DAY_NAME_BY_INDEX[d]).join(", ")}</p>
                 )}
               </div>
 
               <div className="text-xs text-slate-400 pt-4 border-t border-white/10">
                 <p className="mb-2"><span className="font-semibold">Note:</span> Fields marked with * are required.</p>
-                <p className="mb-2">• User will be created with company ID: <span className="text-blue-300 font-mono">{auth.companyId || "N/A"}</span></p>
+                <p className="mb-2">• User will be created with company ID: <span className="text-blue-300 font-mono">{auth.companyLoginAlias || auth.companyId || "N/A"}</span></p>
                 <p className="mb-2">• Default password: <span className="text-blue-300 font-mono">Welcome2024!</span> (user should change on first login)</p>
                 <p>• Username will be auto-generated from display name (FirstName.LastName format)</p>
               </div>

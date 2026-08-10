@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, Fragment } from "react";
+import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import { Link } from "@tanstack/react-router";
 import { usePersistedTab } from "@/lib/usePersistedTab";
 import {
@@ -17,6 +17,12 @@ import {
   Download,
   Mail,
   Send,
+  Wrench,
+  MapPin,
+  Trash2,
+  Activity,
+  X,
+  Ban,
 } from "lucide-react";
 import {
   BarChart,
@@ -31,20 +37,41 @@ import * as XLSX from "xlsx";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 import { supabase } from "@/lib/supabase/client";
 import { EmployeePayrollDetailModal } from "@/components/EmployeePayrollDetailModal";
+import { getRepairStatuses, type RepairStatus } from "@/lib/supabase/repairStatuses";
 import { TicketColumnFilter } from "@/components/TicketColumnFilter";
 import { getRoleDepartmentBreakdown, normalizeRole } from "@/lib/roleLabels";
 import { calcWorkedHours, getMyProfileSchedule, resolveScheduledNetHours, getAttendanceForRange } from "@/lib/supabase/timecards";
+import { payGraceMinutesFor, applyGraceToCheckIn, roundCheckOutToSchedule } from "@/lib/attendanceGrace";
 import { updatePayrollLineItemExtra, updatePayrollLineItemPaid } from "@/lib/supabase/payslips";
-import { getEmployeeInfoByProfileIds, type EmployeeInfo } from "@/lib/supabase/users";
+import { getEmployeeInfoByProfileIds, getCompanyUsers, type EmployeeInfo } from "@/lib/supabase/users";
+import { resolveTeamLeadOrManager } from "@/lib/notifyRouting";
 import { createNotification } from "@/lib/supabase/notifications";
 import { getCompanyPtoRequests, type PtoRequestRow } from "@/lib/supabase/pto";
-import { getTechRepairRates, getTechCompletedRepairCounts, DEFAULT_REPAIR_TYPE, type TechRepairRate, type TechRepairCount } from "@/lib/supabase/techPayroll";
+import {
+  getTechRepairRates,
+  getTechCompletedRepairCounts,
+  getTechAssignedCounts,
+  getTechSecondCounts,
+  getTechManualPayItems,
+  upsertTechManualPayItem,
+  deleteTechManualPayItem,
+  getTechCategoryOverrides,
+  upsertTechCategoryOverride,
+  techRateFor as techRateForRates,
+  type TechRepairRate,
+  type TechRepairCount,
+  type TechManualPayItem,
+  type TechCategoryOverride,
+} from "@/lib/supabase/techPayroll";
+import { TechActivityReportModal } from "@/components/TechActivityReportModal";
+import { getMileageEntries, addMileageEntry, deleteMileageEntry, syncMileageFromTickets, setMileageEntryPayrollExcluded, type MileageEntry } from "@/lib/supabase/mileage";
 import { perCutoffSalary } from "@/lib/supabase/salary";
 import { useAuth } from "@/lib/auth";
 import { getGmailConnectionStatus, disconnectGmail, sendPayslipEmail, type GmailConnectionStatus, type GmailRegion } from "@/lib/supabase/gmailConnection";
 import { auth as firebaseAuth } from "@/lib/firebase/config";
+import { listTicketPhotos, type TicketPhoto } from "@/lib/firebase/storage";
 import { captureHtmlToPdfBlob, blobToBase64 } from "@/lib/pdfCapture";
-import { renderPayslipBodyHtml, PAYSLIP_STYLES, type PayslipDailyRow, type EmployeePayslipData } from "@/lib/payslipTemplate";
+import { renderPayslipBodyHtml, PAYSLIP_STYLES, formatClockTime, offDaysInRange, ptoDaysInRange, type PayslipDailyRow, type EmployeePayslipData } from "@/lib/payslipTemplate";
 import { ActivityLogPanel } from "@/components/ActivityLogPanel";
 import { logModuleActivity } from "@/lib/supabase/moduleActivityLog";
 
@@ -59,7 +86,7 @@ const EXCHANGE_RATE = 57; // 1 USD = 57 PHP
 const REGULAR_HOURS_PER_DAY = 8;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-interface SupabaseEmployee {
+export interface SupabaseEmployee {
   id: string;
   full_name: string;
   department: string | null;
@@ -71,7 +98,9 @@ interface SupabaseEmployee {
   display_name?: string;
   username?: string;
   role?: string;
+  extraRoles?: string[] | null;
   assigned_branch?: string;
+  email?: string;
   offDays?: number[];
   requiredCheckIn?: string;
   requiredCheckOut?: string;
@@ -90,6 +119,7 @@ interface SalaryEntry {
   compensation_type: "hourly" | "fixed";
   hourly_rate: number;
   annual_salary: number | null;
+  created_at: string;
 }
 
 interface TimecardEntry {
@@ -138,7 +168,7 @@ interface PayrollAuditLogRow {
   created_at: string;
 }
 
-interface EmployeePayrollRow {
+export interface EmployeePayrollRow {
   employee: SupabaseEmployee;
   compensationType: "hourly" | "fixed";
   /** Only meaningful when compensationType is "hourly" — 0 for fixed-salary employees. */
@@ -154,6 +184,24 @@ interface EmployeePayrollRow {
   grossPayUSD: number;
   /** Tech Payroll only — completed repair tickets in the period. 0 for Office/fixed-salary rows. */
   ticketsCompleted: number;
+  /** Tech Payroll only — visits assigned in the period regardless of outcome. 0 for Office/fixed-salary rows. */
+  ticketsAssigned: number;
+  /** Tech Payroll only — dollar amount for these specific repair-type categories (already included in grossPay, broken out for their own columns). */
+  techCategoryPay: { twoManJob: number; backTub: number; sealedSystem: number; sealedSystemR600: number };
+  /** Tech Payroll only — completed (redo-excluded) count per repair_type, every configured category, for the Tech Activity Report modal's full breakdown. */
+  techCategoryCounts: Record<string, number>;
+  /** Distinct days this employee clocked in during the period — Avg. Comp.'s denominator. */
+  workingDays: number;
+  /** Tech Payroll only — completed visits this period where this employee was the assisting (2nd) technician. */
+  twoTechCount: number;
+  /**
+   * Tech Payroll only — Finance's manually entered LDT/Mileage/Training
+   * values and their computed dollar amounts (already included in
+   * grossPay). owIncentivePct is carried through only so edits to the
+   * other three fields can round-trip it unchanged on save — it's not
+   * applied into grossPay here, only on the Tech Activity Report modal.
+   */
+  techManual: { ldtCount: number; ldtPay: number; mileage: number; mileagePay: number; trainingValue: number; trainingPay: number; owIncentivePct: number };
 }
 
 interface MonthlyBarData {
@@ -188,6 +236,11 @@ function rollBackToWeekday(d: Date): Date {
 // period and skipped on the employee's own off days or on any date they
 // already have a real punch for (a real punch always wins over a PTO
 // request that happens to overlap it).
+//
+// Late clock-ins get a per-region grace period applied to the check-in used
+// for PAID hours (not the raw punch — see attendanceGrace.ts): PH 5 min, US
+// office 15 min, Technicians none (commission-based). Clock-out is never
+// grace-adjusted — only lateness at the start of a shift is forgiven.
 function computeHoursMap(
   entries: TimecardEntry[],
   employees: SupabaseEmployee[],
@@ -197,15 +250,26 @@ function computeHoursMap(
 ): Map<string, { regular: number; overtime: number }> {
   const hoursMap = new Map<string, { regular: number; overtime: number }>();
   const punchedDates = new Map<string, Set<string>>();
+  const employeeById = new Map(employees.map((e) => [e.id, e]));
   for (const tc of entries) {
     const key = tc.profile_id || tc.employee_id;
     if (!key || !tc.check_in || !tc.check_out) continue;
     const dates = punchedDates.get(key) ?? new Set<string>();
     dates.add(tc.work_date);
     punchedDates.set(key, dates);
+    const emp = employeeById.get(key);
+    const graceMinutes = emp
+      ? payGraceMinutesFor(emp.country, normalizeRole(emp.role) === "TECHNICIAN")
+      : 0;
+    const paidCheckIn = emp?.requiredCheckIn
+      ? applyGraceToCheckIn(tc.check_in, emp.requiredCheckIn, graceMinutes)
+      : tc.check_in;
+    const paidCheckOut = emp?.requiredCheckOut
+      ? roundCheckOutToSchedule(tc.check_out, emp.requiredCheckOut)
+      : tc.check_out;
     const hours = calcWorkedHours({
-      checkIn: tc.check_in,
-      checkOut: tc.check_out,
+      checkIn: paidCheckIn,
+      checkOut: paidCheckOut,
       mealStart: tc.meal_start || "",
       mealEnd: tc.meal_end || "",
       notes: "",
@@ -217,7 +281,6 @@ function computeHoursMap(
   }
 
   if (!periodStart || !periodEnd) return hoursMap;
-  const employeeById = new Map(employees.map((e) => [e.id, e]));
   for (const pto of ptoRequests) {
     if (pto.status !== "approved" || pto.ptoType === "unpaid") continue;
     const emp = employeeById.get(pto.profileId);
@@ -346,7 +409,23 @@ function periodBounds(lastPeriodEnd: string | null): { start: string; end: strin
 // but every amount is converted (see EXCHANGE_RATE) before it reaches this
 // formatter so nothing in the UI shows ₱.
 function fmt(amount: number) {
-  return `$${amount.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+  return `$${amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+// Per-status color for the Mileage tab's Status column — sourced from the
+// Admin > Repair Statuses module's own admin-configured rows (real
+// Supabase-backed config, repairStatuses.ts) instead of a separate
+// hardcoded copy. Colors there are hex strings from a color-picker input
+// (e.g. "#800080"), already valid CSS `color` values as-is. Matching is
+// case-insensitive/trimmed against each row's description field (the same
+// text as tickets.status, e.g. "CL-Claimed"). `rows` is fetched once into
+// component state (see repairStatusRows) rather than read synchronously
+// here, since the real source is a Supabase table, not localStorage.
+function mileageStatusStyle(status: string, rows: RepairStatus[]): { color: string; fontWeight?: number } {
+  const key = (status || "").trim().toLowerCase();
+  const row = rows.find((r) => r.description.trim().toLowerCase() === key);
+  if (!row?.color) return { color: "#93c5fd" }; // default: same blue TicketList falls back to
+  return { color: row.color, fontWeight: row.fontBold ? 700 : undefined };
 }
 
 // Older payroll_line_items rows may have been recorded with currency: "PHP"
@@ -370,12 +449,12 @@ function parseGmailRegionParam(value: string | null): GmailRegion {
 
 // ─── Component ───────────────────────────────────────────────────────────────
 export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) {
-  const { uid, role, displayName, email } = useAuth();
+  const { uid, role, displayName, email, companyId } = useAuth();
   const canConnectGmail = String(role || "").toUpperCase() === "ADMIN" || String(role || "").toUpperCase() === "SUPERADMIN";
   const [myProfileId, setMyProfileId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = usePersistedTab<"overview" | "payroll" | "reports">(
+  const [activeTab, setActiveTab] = usePersistedTab<"overview" | "payroll" | "techPayroll" | "mileage" | "reports">(
     "ahs:accounting-dashboard-active-tab",
-    ["overview", "payroll", "reports"],
+    ["overview", "payroll", "techPayroll", "mileage", "reports"],
     "overview",
   );
   // Overview KPI cards default to the live current-period preview, but can
@@ -383,8 +462,15 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   const [selectedRunId, setSelectedRunId] = useState<string>("current");
   const [selectedCurrency, setSelectedCurrency] = useState<"USD" | "PHP">("USD");
   // Under US Payroll only — technicians are paid per completed repair ticket
-  // (Tech Payroll) instead of hourly (Office Payroll, the pre-existing view).
-  const [payrollView, setPayrollView] = useState<"office" | "tech">("office");
+  // (Tech Payroll) instead of hourly (Office Payroll). Driven by which tab is
+  // active rather than its own toggle, now that Tech Payroll is a full tab.
+  const payrollView: "office" | "tech" = activeTab === "techPayroll" ? "tech" : "office";
+  // Tech Payroll only exists under US, regardless of whatever the Payroll
+  // tab's own US/PH toggle was last left on — every currency-scoped
+  // computation below reads this instead of selectedCurrency directly, so
+  // switching to Tech Payroll doesn't require (or wait on) mutating that
+  // toggle's state, and switching back to Payroll leaves it untouched.
+  const effectiveCurrency: "USD" | "PHP" = activeTab === "techPayroll" ? "USD" : selectedCurrency;
   // Funnel-style column filters (Ticket List convention) — empty set = no filter.
   const [departmentFilter, setDepartmentFilter] = useState<Set<string>>(new Set());
   const [roleFilter, setRoleFilter] = useState<Set<string>>(new Set());
@@ -406,6 +492,14 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   const [ptoRequests, setPtoRequests] = useState<PtoRequestRow[]>([]);
   const [techRepairRates, setTechRepairRates] = useState<TechRepairRate[]>([]);
   const [techRepairCounts, setTechRepairCounts] = useState<TechRepairCount[]>([]);
+  // Assigned (not just completed) visit counts, and Finance's manually
+  // entered LDT/Mileage/Training values — both for the same genStart/genEnd
+  // period as techRepairCounts above. See the effect below.
+  const [techAssignedCounts, setTechAssignedCounts] = useState<Map<string, number>>(new Map());
+  const [techSecondCounts, setTechSecondCounts] = useState<Map<string, number>>(new Map());
+  const [techManualPayItems, setTechManualPayItems] = useState<TechManualPayItem[]>([]);
+  const [techCategoryOverrides, setTechCategoryOverrides] = useState<TechCategoryOverride[]>([]);
+  const [mileageEntries, setMileageEntries] = useState<MileageEntry[]>([]);
 
   // UI state
   const [loading, setLoading] = useState(true);
@@ -413,6 +507,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   const [generating, setGenerating] = useState(false);
   const [showAuditLog, setShowAuditLog] = useState(false);
   const [detailEmployee, setDetailEmployee] = useState<SupabaseEmployee | null>(null);
+  const [activityEmployeeId, setActivityEmployeeId] = useState<string | null>(null);
   // One connection per region (US/PH each send payslips from their own
   // connected Gmail account) — keyed the same way as the currency toggle.
   const [gmailStatusByRegion, setGmailStatusByRegion] = useState<Record<GmailRegion, GmailConnectionStatus | null>>({ US: null, PH: null });
@@ -421,7 +516,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   const [sendingPayslipId, setSendingPayslipId] = useState<string | null>(null);
   // The Payroll table's currency toggle already reads as "which region" —
   // reuse it directly rather than a second, easy-to-desync piece of state.
-  const activeGmailRegion: GmailRegion = selectedCurrency === "USD" ? "US" : "PH";
+  const activeGmailRegion: GmailRegion = effectiveCurrency === "USD" ? "US" : "PH";
   const gmailStatus = gmailStatusByRegion[activeGmailRegion];
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
   const [runLineItems, setRunLineItems] = useState<Record<string, PayrollLineItem[]>>({});
@@ -430,6 +525,56 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   // expanded run view — read straight from profiles.employee_info (the same
   // JSON blob the Employee Information tab edits), not duplicated anywhere.
   const [employeeInfoByProfileId, setEmployeeInfoByProfileId] = useState<Map<string, EmployeeInfo>>(new Map());
+
+  // ── Mileage tab: manual log form state ──────────────────────────────────
+  const [mileageForm, setMileageForm] = useState({
+    workDate: new Date().toISOString().slice(0, 10),
+    profileId: "",
+    address: "",
+    contactNumber: "",
+    email: "",
+    totalMileage: "",
+    googleMapLink: "",
+  });
+  const [savingMileageEntry, setSavingMileageEntry] = useState(false);
+  const [deletingMileageEntryId, setDeletingMileageEntryId] = useState<string | null>(null);
+  const [payrollExcludingId, setPayrollExcludingId] = useState<string | null>(null);
+  const [mileageBranchFilter, setMileageBranchFilter] = useState("");
+  const [mileageNameFilter, setMileageNameFilter] = useState("");
+
+  // Admin > Repair Statuses config — fetched once so the Mileage tab's
+  // Status column can color-code by the same admin-configured colors
+  // instead of a hardcoded map (see mileageStatusStyle above).
+  const [repairStatusRows, setRepairStatusRows] = useState<RepairStatus[]>([]);
+
+  // ── Mileage tab: auto-sync-from-completed-tickets state ─────────────────
+  // No date range — always all-time, matching Overall Status's Tech
+  // Completion Rate table with its date pickers left empty. Every completed
+  // ticket this company has ever logged gets pulled, full stop.
+  const [mileageSyncProfileId, setMileageSyncProfileId] = useState("");
+  const [syncingMileage, setSyncingMileage] = useState(false);
+  const [mileageSyncMessage, setMileageSyncMessage] = useState<string | null>(null);
+  // Tickets whose technician text didn't match ANY technician — even after
+  // trim/lowercase, so a real name mismatch (not just a role issue) shows
+  // up as something fixable instead of just silently not syncing. Starts
+  // collapsed to a one-line summary (mileageUnmatchedExpanded) since this
+  // re-populates on every sync — including the automatic one on tab open —
+  // and would otherwise take over the page every single time.
+  const [mileageUnmatched, setMileageUnmatched] = useState<{ name: string; count: number }[]>([]);
+  const [mileageUnmatchedExpanded, setMileageUnmatchedExpanded] = useState(false);
+  // Clicking a technician's name in the mileage table pops a per-technician
+  // breakdown modal — same "click a name to see the ticket-by-ticket detail"
+  // convention as Overall Status's Tech Completion Rate table.
+  const [mileageTechDetailId, setMileageTechDetailId] = useState<string | null>(null);
+
+  // Photos column — deliberately NOT pre-fetched for every row (the table
+  // has no pagination and can hold hundreds of entries, so eagerly listing
+  // every ticket's Storage folder on tab load doesn't scale). The cell is
+  // just a plain "Photos" link; clicking it opens the modal below, which
+  // fetches that ONE ticket's photos on demand.
+  const [mileagePhotoModalEntry, setMileagePhotoModalEntry] = useState<MileageEntry | null>(null);
+  const [mileagePhotoModalPhotos, setMileagePhotoModalPhotos] = useState<TicketPhoto[]>([]);
+  const [mileagePhotoModalLoading, setMileagePhotoModalLoading] = useState(false);
 
   // Payroll generation period — Finance picks this via the date inputs on
   // the Payroll tab. Seeded once (see fetchData) from the auto "day after
@@ -451,15 +596,22 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
         auditRes,
         ptoRes,
         techRatesRes,
+        mileageRes,
+        repairStatusRes,
       ] = await Promise.all([
-        supabase.from("profiles").select("id,display_name,username,role,assigned_branch,off_days,required_check_in,required_check_out,payroll_excluded").neq("role", "SUPERSUPERADMIN"),
-        supabase.from("salary_entries").select("profile_id,effective_date,compensation_type,hourly_rate,annual_salary").not("profile_id", "is", null).order("effective_date", { ascending: false }),
+        supabase.from("profiles").select("id,display_name,username,role,extra_roles,assigned_branch,email,off_days,required_check_in,required_check_out,payroll_excluded").neq("role", "SUPERSUPERADMIN"),
+        supabase.from("salary_entries").select("profile_id,effective_date,compensation_type,hourly_rate,annual_salary,created_at").not("profile_id", "is", null).order("effective_date", { ascending: false }).order("created_at", { ascending: false }),
         supabase.from("payroll_runs").select("id,period_start,period_end,status,generated_at").order("generated_at", { ascending: false }),
         supabase.from("payroll_line_items").select("payroll_run_id,profile_id,hours_worked,overtime_hours,hourly_rate,regular_pay,overtime_pay,gross_pay,net_pay,currency,extra_pay,notes,paid,paid_at,compensation_type,annual_salary"),
         supabase.from("payroll_audit_log").select("action,employee_name,details,amount,created_at").order("created_at", { ascending: false }).limit(100),
         getCompanyPtoRequests().catch((err) => { console.error("Failed to load PTO requests:", err); return [] as PtoRequestRow[]; }),
         // Best-effort — Tech Payroll just computes $0 for everyone if this fails.
         getTechRepairRates().catch((err) => { console.error("Failed to load tech repair rates:", err); return [] as TechRepairRate[]; }),
+        // Best-effort — Mileage tab just shows empty tables if this fails.
+        getMileageEntries().catch((err) => { console.error("Failed to load mileage entries:", err); return [] as MileageEntry[]; }),
+        // Best-effort — Mileage tab's Status column just falls back to the
+        // default blue color for everyone if this fails.
+        getRepairStatuses().catch((err) => { console.error("Failed to load repair statuses:", err); return [] as RepairStatus[]; }),
       ]);
 
       for (const res of [empRes, salRes, runsRes, lineRes, auditRes]) {
@@ -467,6 +619,8 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
       }
       setPtoRequests(ptoRes);
       setTechRepairRates(techRatesRes);
+      setMileageEntries(mileageRes);
+      setRepairStatusRows(repairStatusRes);
 
       const runs = (runsRes.data ?? []) as PayrollRun[];
 
@@ -503,7 +657,9 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
         display_name: p.display_name,
         username: p.username,
         role: p.role,
+        extraRoles: p.extra_roles ?? null,
         assigned_branch: p.assigned_branch,
+        email: p.email ?? undefined,
         offDays: p.off_days ?? undefined,
         requiredCheckIn: p.required_check_in ?? undefined,
         requiredCheckOut: p.required_check_out ?? undefined,
@@ -531,6 +687,18 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Targeted refresh for TechActivityReportModal's inline rate edits — NOT
+  // fetchData(), which flips `loading` and unmounts/remounts this whole
+  // component (including the open modal) behind a full-page spinner on
+  // every single edit. This just re-reads tech_repair_rates.
+  const refreshTechRepairRates = useCallback(async () => {
+    try {
+      setTechRepairRates(await getTechRepairRates());
+    } catch (err) {
+      console.error("Failed to refresh tech repair rates:", err);
+    }
+  }, []);
 
   useEffect(() => {
     if (!uid) return;
@@ -583,12 +751,91 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
     return () => { cancelled = true; };
   }, [genStart, genEnd]);
 
+  // Tech Payroll's assigned-visit counts (Assigned/Ratio/Avg. Comp. columns)
+  // and Finance's manually entered LDT/Mileage/Training values, same period.
+  useEffect(() => {
+    if (!genStart || !genEnd || genStart > genEnd) {
+      setTechAssignedCounts(new Map());
+      return;
+    }
+    let cancelled = false;
+    getTechAssignedCounts(genStart, genEnd)
+      .then((counts) => { if (!cancelled) setTechAssignedCounts(counts); })
+      .catch((err) => {
+        console.error("Failed to load tech assigned counts:", err);
+        if (!cancelled) setTechAssignedCounts(new Map());
+      });
+    return () => { cancelled = true; };
+  }, [genStart, genEnd]);
+
+  useEffect(() => {
+    if (!genStart || !genEnd || genStart > genEnd) {
+      setTechManualPayItems([]);
+      return;
+    }
+    let cancelled = false;
+    getTechManualPayItems(genStart, genEnd)
+      .then((items) => { if (!cancelled) setTechManualPayItems(items); })
+      .catch((err) => {
+        console.error("Failed to load tech manual pay items:", err);
+        if (!cancelled) setTechManualPayItems([]);
+      });
+    return () => { cancelled = true; };
+  }, [genStart, genEnd]);
+
+  // "Two Tech" auto-count (visits.second_technician) — folds into Total Net
+  // the same deterministic, rate-table-driven way LDT/Mileage/Training do.
+  useEffect(() => {
+    if (!genStart || !genEnd || genStart > genEnd) {
+      setTechSecondCounts(new Map());
+      return;
+    }
+    let cancelled = false;
+    getTechSecondCounts(genStart, genEnd)
+      .then((counts) => { if (!cancelled) setTechSecondCounts(counts); })
+      .catch((err) => {
+        console.error("Failed to load tech second-technician counts:", err);
+        if (!cancelled) setTechSecondCounts(new Map());
+      });
+    return () => { cancelled = true; };
+  }, [genStart, genEnd]);
+
+  // Finance's manual corrections to auto-counted categories (Tech Activity
+  // Report's editable Value cells) — take precedence over the live count
+  // wherever that category's pay is computed.
+  useEffect(() => {
+    if (!genStart || !genEnd || genStart > genEnd) {
+      setTechCategoryOverrides([]);
+      return;
+    }
+    let cancelled = false;
+    getTechCategoryOverrides(genStart, genEnd)
+      .then((overrides) => { if (!cancelled) setTechCategoryOverrides(overrides); })
+      .catch((err) => {
+        console.error("Failed to load tech category overrides:", err);
+        if (!cancelled) setTechCategoryOverrides([]);
+      });
+    return () => { cancelled = true; };
+  }, [genStart, genEnd]);
+
   // ── Derived data ─────────────────────────────────────────────────────────────
-  // Latest salary entry per employee (salaryEntries is already ordered by
-  // effective_date desc, so the first hit per profile is the current one).
+  // Latest salary entry per employee. salaryEntries is ordered by
+  // effective_date desc then created_at desc, but re-compared explicitly
+  // here rather than just taking the first hit per profile — editing a
+  // day's rate (Attendance table inline edit, or Add Rate Change) always
+  // INSERTS a new row instead of updating one in place, so the same
+  // effective_date can end up with several rows (e.g. corrected twice in
+  // one sitting). Ties on effective_date are broken by created_at (the
+  // most recently entered correction wins) so a stale duplicate can never
+  // outrank a fresh edit — same tie-break as entryEffectiveOn (salary.ts).
   const latestCompMap = new Map<string, SalaryEntry>();
   for (const se of salaryEntries) {
-    if (!latestCompMap.has(se.profile_id)) {
+    const existing = latestCompMap.get(se.profile_id);
+    if (
+      !existing ||
+      se.effective_date > existing.effective_date ||
+      (se.effective_date === existing.effective_date && se.created_at > existing.created_at)
+    ) {
       latestCompMap.set(se.profile_id, se);
     }
   }
@@ -606,32 +853,102 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   // back to that repair_type's "All Branches" rate; otherwise the branch's
   // own "Default Amount" rate; otherwise "Default Amount, All Branches";
   // otherwise $0 (no rate configured yet — see TechPayrollSetup.tsx).
-  const techRateFor = (repairType: string, branch: string): number => {
-    const exact = techRepairRates.find((r) => r.repairType === repairType && r.branch === branch);
-    if (exact) return exact.amount;
-    const anyBranch = techRepairRates.find((r) => r.repairType === repairType && !r.branch);
-    if (anyBranch) return anyBranch.amount;
-    const defaultForBranch = techRepairRates.find((r) => r.repairType === DEFAULT_REPAIR_TYPE && r.branch === branch);
-    if (defaultForBranch) return defaultForBranch.amount;
-    const defaultAny = techRepairRates.find((r) => r.repairType === DEFAULT_REPAIR_TYPE && !r.branch);
-    return defaultAny ? defaultAny.amount : 0;
-  };
+  const techRateFor = (repairType: string, branch: string): number => techRateForRates(techRepairRates, repairType, branch);
+
+  // "Total Working Days" — distinct work_date this employee actually
+  // clocked in on within the picked period. Drives Avg. Comp. (completed
+  // tickets ÷ working days, not raw calendar days — confirmed against the
+  // legacy Tech Activity Report's "Avg. Daily Completion" figure) both here
+  // and on TechActivityReportModal.tsx.
+  const workingDatesByProfile = new Map<string, Set<string>>();
+  for (const tc of timecardEntries) {
+    const profileId = tc.profile_id || tc.employee_id;
+    if (!profileId || !tc.check_in) continue;
+    const dates = workingDatesByProfile.get(profileId) ?? new Set<string>();
+    dates.add(tc.work_date);
+    workingDatesByProfile.set(profileId, dates);
+  }
+  const workingDaysCountByProfile = new Map(
+    Array.from(workingDatesByProfile.entries()).map(([profileId, dates]) => [profileId, dates.size])
+  );
 
   // visits.technician is free text (no FK to profiles) — matched by name,
   // same convention as every other free-text technician match in the app
   // (e.g. resolveTeamLeadOrManager's manager_name match).
   const employeeByName = new Map(employees.map((e) => [e.full_name.trim().toLowerCase(), e]));
-  const techGrossByProfile = new Map<string, { ticketsCompleted: number; grossPay: number }>();
+  const techGrossByProfile = new Map<
+    string,
+    {
+      ticketsCompleted: number; grossPay: number; twoManJob: number; backTub: number; sealedSystem: number; sealedSystemR600: number;
+      /** Completed (redo-excluded) count per repair_type, every configured category — Tech Activity Report's full breakdown. */
+      categoryCounts: Record<string, number>;
+    }
+  >();
   for (const rc of techRepairCounts) {
     const emp = employeeByName.get(rc.technician.trim().toLowerCase());
     if (!emp) continue;
     const rate = techRateFor(rc.repairType, rc.branch || emp.assigned_branch || "");
-    const prev = techGrossByProfile.get(emp.id) ?? { ticketsCompleted: 0, grossPay: 0 };
+    const amount = rate * rc.count;
+    const prev = techGrossByProfile.get(emp.id) ?? {
+      ticketsCompleted: 0, grossPay: 0, twoManJob: 0, backTub: 0, sealedSystem: 0, sealedSystemR600: 0, categoryCounts: {},
+    };
     techGrossByProfile.set(emp.id, {
       ticketsCompleted: prev.ticketsCompleted + rc.count,
-      grossPay: prev.grossPay + rate * rc.count,
+      grossPay: prev.grossPay + amount,
+      twoManJob: prev.twoManJob + (rc.repairType === "2 Man Job" ? amount : 0),
+      backTub: prev.backTub + (rc.repairType === "Back Tub" ? amount : 0),
+      sealedSystem: prev.sealedSystem + (rc.repairType === "Sealed System" ? amount : 0),
+      sealedSystemR600: prev.sealedSystemR600 + (rc.repairType === "Sealed System(R600)" ? amount : 0),
+      categoryCounts: { ...prev.categoryCounts, [rc.repairType]: (prev.categoryCounts[rc.repairType] ?? 0) + rc.count },
     });
   }
+  // Finance's manual category-count corrections replace the live count for
+  // that one category (not add to it) — applied as a second pass so the
+  // delta vs. whatever was already accumulated above gets folded into
+  // grossPay/ticketsCompleted/the 4 named fields correctly.
+  for (const ov of techCategoryOverrides) {
+    if (ov.category === "Two Tech") continue; // applied separately below — not part of techGrossByProfile
+    const emp = employees.find((e) => e.id === ov.profileId);
+    if (!emp) continue;
+    const rate = techRateFor(ov.category, emp.assigned_branch || "");
+    const prev = techGrossByProfile.get(emp.id) ?? {
+      ticketsCompleted: 0, grossPay: 0, twoManJob: 0, backTub: 0, sealedSystem: 0, sealedSystemR600: 0, categoryCounts: {},
+    };
+    const liveCount = prev.categoryCounts[ov.category] ?? 0;
+    const countDelta = ov.count - liveCount;
+    const amountDelta = countDelta * rate;
+    techGrossByProfile.set(emp.id, {
+      ticketsCompleted: prev.ticketsCompleted + countDelta,
+      grossPay: prev.grossPay + amountDelta,
+      twoManJob: prev.twoManJob + (ov.category === "2 Man Job" ? amountDelta : 0),
+      backTub: prev.backTub + (ov.category === "Back Tub" ? amountDelta : 0),
+      sealedSystem: prev.sealedSystem + (ov.category === "Sealed System" ? amountDelta : 0),
+      sealedSystemR600: prev.sealedSystemR600 + (ov.category === "Sealed System(R600)" ? amountDelta : 0),
+      categoryCounts: { ...prev.categoryCounts, [ov.category]: ov.count },
+    });
+  }
+  // "Two Tech" isn't part of techGrossByProfile (no repair_type row backs it),
+  // so its override is looked up separately wherever twoTechCount/twoTechPay
+  // get computed below.
+  const twoTechOverrideByProfile = new Map(
+    techCategoryOverrides.filter((o) => o.category === "Two Tech").map((o) => [o.profileId, o.count])
+  );
+
+  // Finance's manually entered LDT/Mileage/Training values for this period,
+  // times the corresponding rate from TechPayrollSetup (tech_repair_rates
+  // rows using "LDT"/"Mileage"/"Training Paid" as the repair_type value —
+  // same rate lookup as completed-ticket categories, just not per-branch in
+  // practice since these are entered once per technician per period).
+  const techManualByProfile = new Map(
+    techManualPayItems.map((item) => {
+      const emp = employees.find((e) => e.id === item.profileId);
+      const branch = emp?.assigned_branch || "";
+      const ldtPay = item.ldtCount * techRateFor("LDT", branch);
+      const mileagePay = item.mileage * techRateFor("Mileage", branch);
+      const trainingPay = item.trainingValue * techRateFor("Training Paid", branch);
+      return [item.profileId, { ...item, ldtPay, mileagePay, trainingPay }];
+    })
+  );
 
   // Build payroll rows. salary_entries.hourly_rate is always entered as a
   // plain USD figure (the shared "Add Rate Change" form labels it "$/hr"
@@ -656,8 +973,26 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
     const annualSalary = isFixed ? comp?.annual_salary ?? 0 : null;
     const hours = hoursMap.get(emp.id) ?? { regular: 0, overtime: 0 };
     const tech = isTechRole(emp) ? techGrossByProfile.get(emp.id) : undefined;
+    const manual = isTechRole(emp) ? techManualByProfile.get(emp.id) : undefined;
+    const manualTotal = manual ? manual.ldtPay + manual.mileagePay + manual.trainingPay : 0;
+    // "Two Tech" (auto-counted from visits.second_technician) and MCA Bonus
+    // (flat bonus for meeting a minimum completed-ticket threshold) are both
+    // rate-table-driven and deterministic, same as LDT/Mileage/Training, so
+    // they fold into Total Net the same way. Custom program lines and OW
+    // Incentive are ad-hoc/manual-per-open — those live on the Tech Activity
+    // Report modal only and are NOT included here (see TechActivityReportModal.tsx).
+    const techBranch = emp.assigned_branch || "";
+    const twoTechCountForEmp = twoTechOverrideByProfile.get(emp.id) ?? techSecondCounts.get(emp.full_name.trim().toLowerCase()) ?? 0;
+    const twoTechPay = isTechRole(emp) ? twoTechCountForEmp * techRateFor("Two Tech", techBranch) : 0;
+    const mcaThreshold = isTechRole(emp) ? techRateFor("MCA Threshold", techBranch) : 0;
+    const mcaBonus = isTechRole(emp) && mcaThreshold > 0 && (tech?.ticketsCompleted ?? 0) >= mcaThreshold
+      ? techRateFor("MCA Bonus", techBranch)
+      : 0;
+    // Flat per-ticket rate paid on every completed (redo-excluded) ticket,
+    // on top of that ticket's own repair-type rate already in tech.grossPay.
+    const completedTicketsPay = isTechRole(emp) ? (tech?.ticketsCompleted ?? 0) * techRateFor("Completed Tickets", techBranch) : 0;
     const grossPay = tech
-      ? tech.grossPay
+      ? tech.grossPay + manualTotal + twoTechPay + mcaBonus + completedTicketsPay
       : isFixed && annualSalary
         ? perCutoffSalary(annualSalary)
         : hours.regular * hourlyRate + hours.overtime * hourlyRate * 1.5;
@@ -670,6 +1005,25 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
       hoursWorked: hours.regular,
       overtimeHours: hours.overtime,
       ticketsCompleted: tech?.ticketsCompleted ?? 0,
+      ticketsAssigned: isTechRole(emp) ? techAssignedCounts.get(emp.full_name.trim().toLowerCase()) ?? 0 : 0,
+      techCategoryPay: {
+        twoManJob: tech?.twoManJob ?? 0,
+        backTub: tech?.backTub ?? 0,
+        sealedSystem: tech?.sealedSystem ?? 0,
+        sealedSystemR600: tech?.sealedSystemR600 ?? 0,
+      },
+      techCategoryCounts: tech?.categoryCounts ?? {},
+      workingDays: workingDaysCountByProfile.get(emp.id) ?? 0,
+      twoTechCount: isTechRole(emp) ? twoTechCountForEmp : 0,
+      techManual: {
+        ldtCount: manual?.ldtCount ?? 0,
+        ldtPay: manual?.ldtPay ?? 0,
+        mileage: manual?.mileage ?? 0,
+        mileagePay: manual?.mileagePay ?? 0,
+        trainingValue: manual?.trainingValue ?? 0,
+        trainingPay: manual?.trainingPay ?? 0,
+        owIncentivePct: manual?.owIncentivePct ?? 0,
+      },
       dutyHours: computeDutyHours(emp, genStart, genEnd),
       grossPay,
       grossPayUSD: grossPay,
@@ -694,12 +1048,16 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   // by exclusion) is used to scope which existing line items get cleared
   // on a regenerate; nationIncludedPayrollRows is what actually gets
   // (re)inserted.
-  const nationPayrollRows = selectedCurrency === "USD" ? usRows : phRows;
-  const nationIncludedPayrollRows = selectedCurrency === "USD" ? includedUsRows : includedPhRows;
+  const nationPayrollRows = effectiveCurrency === "USD" ? usRows : phRows;
+  const nationIncludedPayrollRows = effectiveCurrency === "USD" ? includedUsRows : includedPhRows;
 
   // grossPayUSD is already plain USD (see payrollRows above) — no conversion here.
   const totalUSPayroll = usRows.reduce((s, r) => s + r.grossPayUSD, 0);
   const totalPHPayroll = phRows.reduce((s, r) => s + r.grossPayUSD, 0);
+  // Scoped versions for the Payroll/Tech Payroll tabs' own summary cards —
+  // totalUSPayroll above stays the combined US figure for the Overview tab.
+  const totalUSOfficePayroll = usOfficeRows.reduce((s, r) => s + r.grossPayUSD, 0);
+  const totalUSTechPayroll = usTechRows.reduce((s, r) => s + r.grossPayUSD, 0);
   const totalPayrollUSD = totalUSPayroll + totalPHPayroll;
   const avgPayPerEmployee =
     payrollRows.length > 0 ? totalPayrollUSD / payrollRows.length : 0;
@@ -815,6 +1173,69 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
     }
   };
 
+  // ── Tech Payroll: manually entered LDT/Mileage/Training values ─────────────────
+  const [savingManualKey, setSavingManualKey] = useState<string | null>(null);
+  const handleManualPayBlur = async (
+    row: EmployeePayrollRow,
+    field: "ldtCount" | "mileage" | "trainingValue" | "owIncentivePct",
+    value: string
+  ) => {
+    const num = Number(value) || 0;
+    if (num === row.techManual[field]) return;
+    const key = `${row.employee.id}:${field}`;
+    setSavingManualKey(key);
+    try {
+      await upsertTechManualPayItem({
+        profileId: row.employee.id,
+        periodStart: genStart,
+        periodEnd: genEnd,
+        ldtCount: field === "ldtCount" ? num : row.techManual.ldtCount,
+        mileage: field === "mileage" ? num : row.techManual.mileage,
+        trainingValue: field === "trainingValue" ? num : row.techManual.trainingValue,
+        owIncentivePct: field === "owIncentivePct" ? num : row.techManual.owIncentivePct,
+      });
+      setTechManualPayItems(await getTechManualPayItems(genStart, genEnd));
+    } catch (err) {
+      alert(`Failed to save: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setSavingManualKey(null);
+    }
+  };
+
+  // Tech Activity Report's editable Value cells (repair-type categories +
+  // Two Tech) — saves a correction to the live auto-counted value. Targeted
+  // refetch only, same reasoning as refreshTechRepairRates: fetchData()
+  // would unmount/remount the whole dashboard (including the open modal)
+  // behind a full-page spinner on every edit.
+  const [savingCategoryOverrideKey, setSavingCategoryOverrideKey] = useState<string | null>(null);
+  const handleCategoryOverrideBlur = async (profileId: string, category: string, value: string) => {
+    const count = Number(value) || 0;
+    const key = `${profileId}:${category}`;
+    setSavingCategoryOverrideKey(key);
+    try {
+      await upsertTechCategoryOverride(profileId, genStart, genEnd, category, count);
+      setTechCategoryOverrides(await getTechCategoryOverrides(genStart, genEnd));
+    } catch (err) {
+      alert(`Failed to save: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setSavingCategoryOverrideKey(null);
+    }
+  };
+
+  const [deletingManualId, setDeletingManualId] = useState<string | null>(null);
+  const handleDeleteManualPay = async (row: EmployeePayrollRow) => {
+    if (!confirm(`Clear ${row.employee.full_name}'s LDT/Mileage/Training entries for this period? This can't be undone.`)) return;
+    setDeletingManualId(row.employee.id);
+    try {
+      await deleteTechManualPayItem(row.employee.id, genStart, genEnd);
+      setTechManualPayItems((prev) => prev.filter((i) => i.profileId !== row.employee.id));
+    } catch (err) {
+      alert(`Failed to clear: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setDeletingManualId(null);
+    }
+  };
+
   // ── Generate Payroll ─────────────────────────────────────────────────────────
   // Finance picks the period via genStart/genEnd (the date inputs on the
   // Payroll tab) rather than an auto-computed range. If the picked dates
@@ -832,8 +1253,14 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
     try {
       // Scoped to whichever nation tab is selected — the other nation's
       // employees (and excluded employees' own missing clock-outs) never
-      // factor into this generate action at all.
-      const nationIncludedIds = new Set(nationIncludedPayrollRows.map((r) => r.employee.id));
+      // factor into this generate action at all. Technicians (Tech Payroll)
+      // are also excluded from this specific check — they're paid per
+      // completed repair ticket, not by clocked hours, so a missing
+      // clock-out on their timecard has no effect on their pay and
+      // shouldn't block generating payroll for anyone.
+      const nationIncludedIds = new Set(
+        nationIncludedPayrollRows.filter((r) => !isTechRole(r.employee)).map((r) => r.employee.id)
+      );
       const nationTimecardEntries = timecardEntries.filter((tc) => nationIncludedIds.has(tc.profile_id || tc.employee_id || ""));
       const missingTimeouts = findMissingTimeouts(nationTimecardEntries, employees);
       if (missingTimeouts.length > 0) {
@@ -916,7 +1343,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
       if (lineErr) throw new Error(lineErr.message);
 
       const nationTotalUSD = nationIncludedPayrollRows.reduce((s, r) => s + r.grossPayUSD, 0);
-      const nationLabel = selectedCurrency === "USD" ? "US" : "PH";
+      const nationLabel = effectiveCurrency === "USD" ? "US" : "PH";
 
       // Insert audit log entry
       await supabase.from("payroll_audit_log").insert({
@@ -1060,7 +1487,15 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
     // daily rows entirely for them (the template already shows "No daily
     // attendance recorded" when dailyRows is empty).
     const dailyRows: PayslipDailyRow[] = row.compensationType === "fixed" ? [] : await (async () => {
-      const attendanceRows = await getAttendanceForRange(row.employee.id, genStart, genEnd, {});
+      const emp = row.employee;
+      const graceMinutes = payGraceMinutesFor(emp.country, normalizeRole(emp.role) === "TECHNICIAN");
+      const attendanceRows = await getAttendanceForRange(emp.id, genStart, genEnd, {
+        requiredCheckIn: emp.requiredCheckIn,
+        requiredCheckOut: emp.requiredCheckOut,
+        workingHours: emp.workingHours,
+        mealMinutes: emp.mealMinutes,
+        graceMinutes,
+      });
       const rate = row.hourlyRateUSD;
       return attendanceRows
         .filter((r) => r.hoursWorked > 0)
@@ -1079,6 +1514,18 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
           };
         });
     })();
+    const counts = dailyRows.length;
+    const totalHours = dailyRows.reduce((s, r) => s + r.hours, 0);
+    const average = counts > 0 ? totalHours / counts : 0;
+    const myPtoRequests = ptoRequests.filter((r) => r.profileId === row.employee.id);
+    const offDays = offDaysInRange(row.employee.offDays ?? [], genStart, genEnd);
+    const ptoUsed = ptoDaysInRange(myPtoRequests, genStart, genEnd, false);
+    const sickLeave = ptoDaysInRange(myPtoRequests, genStart, genEnd, true);
+    const workingHoursLabel =
+      row.employee.requiredCheckIn && row.employee.requiredCheckOut
+        ? `${formatClockTime(row.employee.requiredCheckIn)} - ${formatClockTime(row.employee.requiredCheckOut)}`
+        : "—";
+    const breakLabel = row.employee.mealMinutes ? `${row.employee.mealMinutes} mins Break` : "—";
     const payslipData: EmployeePayslipData = {
       name: row.employee.full_name,
       department: row.employee.department || "",
@@ -1090,6 +1537,27 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
       // payroll_line_items row, which has its own stored net_pay) — gross
       // and net are the same until a real run tracks that separately.
       netPay: row.grossPayUSD,
+      email: row.employee.email || "—",
+      hireDate: employeeInfoByProfileId.get(row.employee.id)?.hireDate || "—",
+      workingHoursLabel,
+      breakLabel,
+      hourlyRate: row.hourlyRateUSD,
+      compensationType: row.compensationType,
+      annualSalary: row.annualSalary,
+      counts,
+      totalHours,
+      average,
+      offDays,
+      ptoUsed,
+      sickLeave,
+      totalDays: offDays + ptoUsed,
+      // Same reason as netPay above — Extra/Notes are entered on a saved
+      // payroll_line_items row (migration 0111) after a run is finalized;
+      // this live-preview row has neither yet.
+      extraPay: 0,
+      notes: "",
+      // Same US/PH split already derived onto SupabaseEmployee.country.
+      isUS: row.employee.country !== "PH",
     };
     const pdfBlob = await captureHtmlToPdfBlob(renderPayslipBodyHtml(payslipData), PAYSLIP_STYLES);
     return blobToBase64(pdfBlob);
@@ -1221,13 +1689,14 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   }
 
   // ── Render helpers ───────────────────────────────────────────────────────────
-  // selectedCurrency is really a "which team" filter (US vs PH employees) —
+  // effectiveCurrency is really a "which team" filter (US vs PH employees) —
   // every amount is always shown in USD regardless of which team is active.
-  const displayRows = selectedCurrency === "USD" ? (payrollView === "tech" ? usTechRows : usOfficeRows) : phRows;
-  const isTechView = selectedCurrency === "USD" && payrollView === "tech";
-  // checkbox, Name, Department, Role, Gross Pay, Payslip (6) + Branch (US
-  // only) + either Tickets Completed (Tech) or Reg/Duty/OT Hours + Rate (Office/PH).
-  const payrollColCount = 6 + (selectedCurrency === "USD" ? 1 : 0) + (isTechView ? 1 : 4);
+  const displayRows = effectiveCurrency === "USD" ? (payrollView === "tech" ? usTechRows : usOfficeRows) : phRows;
+  const isTechView = effectiveCurrency === "USD" && payrollView === "tech";
+  // Office/PH table only (the Tech table below is a fully separate layout
+  // with its own hardcoded colSpans): checkbox, Name, Department, Role,
+  // Gross Pay, Payslip (6) + Branch (US only) + Reg/Duty/OT Hours + Rate (4).
+  const payrollColCount = 6 + (effectiveCurrency === "USD" ? 1 : 0) + 4;
 
   // Excel-autofilter convention (matches TicketColumnFilter/TicketList): a
   // column's own option list reflects every OTHER active filter, so opening
@@ -1284,6 +1753,283 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
         rows: [...rows].sort((a, b) => a.employee.full_name.localeCompare(b.employee.full_name)),
       }));
   })();
+
+  // ── Mileage tab ──────────────────────────────────────────────────────────
+  // Anyone with TECHNICIAN or TECHNICIAN_MANAGER as their primary role OR as
+  // a 2nd/3rd (extra_roles) role — a Parts Manager who's also a Technician
+  // (or a Tech Manager who still drives to jobs) should show up here, not
+  // just people whose primary role is plain Technician.
+  const MILEAGE_TECH_ROLES = new Set(["TECHNICIAN", "TECHNICIAN_MANAGER"]);
+  const mileageTechnicians = [...employees]
+    .filter(
+      (e) =>
+        MILEAGE_TECH_ROLES.has(normalizeRole(e.role)) ||
+        (e.extraRoles ?? []).some((r) => MILEAGE_TECH_ROLES.has(normalizeRole(r)))
+    )
+    .sort((a, b) => a.full_name.localeCompare(b.full_name));
+  const employeeNameById = new Map(employees.map((e) => [e.id, e.full_name]));
+  // A synced entry with no matching profile (profileId: null) falls back to
+  // the raw ticket technician_name text — still filterable/displayable/
+  // clickable, just with no real profile behind it. Also doubles as the key
+  // for the detail modal (mileageTechDetailId), since profileId alone can't
+  // identify these rows.
+  const mileageRowName = (entry: MileageEntry) =>
+    (entry.profileId ? employeeNameById.get(entry.profileId) : entry.technicianName) || "—";
+  const mileageRowKey = (entry: MileageEntry) => entry.profileId ?? `name:${entry.technicianName ?? ""}`;
+  // Every distinct name actually present in the log — covers linked
+  // technicians AND unlinked raw ticket names, so the Name filter's
+  // autocomplete suggests someone like "Erick Guzman Juarez" too, not just
+  // profiles. The input itself stays free-text (a <datalist> only offers
+  // suggestions, it never restricts what can be typed).
+  const mileageNameOptions = Array.from(new Set(mileageEntries.map((e) => mileageRowName(e)).filter((n) => n && n !== "—"))).sort((a, b) =>
+    a.localeCompare(b)
+  );
+  const mileageBranchOptions = Array.from(new Set(mileageEntries.map((e) => e.branch))).sort((a, b) => a.localeCompare(b));
+  const mileageEntriesByBranch = (() => {
+    const nameFilter = mileageNameFilter.trim().toLowerCase();
+    const filtered = mileageEntries.filter((entry) => {
+      if (mileageBranchFilter && entry.branch !== mileageBranchFilter) return false;
+      if (nameFilter && !mileageRowName(entry).toLowerCase().includes(nameFilter)) return false;
+      return true;
+    });
+    const byBranch = new Map<string, MileageEntry[]>();
+    for (const entry of filtered) {
+      const list = byBranch.get(entry.branch) ?? [];
+      list.push(entry);
+      byBranch.set(entry.branch, list);
+    }
+    return Array.from(byBranch.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([branch, entries]) => ({
+        branch,
+        entries: [...entries].sort((a, b) => (a.workDate < b.workDate ? 1 : a.workDate > b.workDate ? -1 : 0)),
+      }));
+  })();
+
+  const handleAddMileageEntry = async () => {
+    const technician = employees.find((e) => e.id === mileageForm.profileId);
+    if (!technician || !mileageForm.workDate || !mileageForm.address.trim() || !mileageForm.totalMileage.trim()) return;
+    setSavingMileageEntry(true);
+    try {
+      await addMileageEntry({
+        profileId: technician.id,
+        branch: technician.assigned_branch || "Unassigned",
+        workDate: mileageForm.workDate,
+        address: mileageForm.address.trim(),
+        contactNumber: mileageForm.contactNumber.trim(),
+        email: mileageForm.email.trim(),
+        totalMileage: Number(mileageForm.totalMileage) || 0,
+        googleMapLink: mileageForm.googleMapLink.trim(),
+        createdByName: displayName || email || "Unknown",
+      });
+      setMileageForm({
+        workDate: new Date().toISOString().slice(0, 10),
+        profileId: "",
+        address: "",
+        contactNumber: "",
+        email: "",
+        totalMileage: "",
+        googleMapLink: "",
+      });
+      setMileageEntries(await getMileageEntries());
+    } catch (err) {
+      alert(`Failed to save mileage entry: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setSavingMileageEntry(false);
+    }
+  };
+
+  // Empty mileageSyncProfileId means "All Technicians". Always all-time —
+  // no date range is ever passed to syncMileageFromTickets. One call
+  // covering every target technician at once (that function fetches all
+  // company tickets a single time and matches them by normalized name,
+  // rather than a separate ticket query per technician) — already-synced
+  // tickets are skipped via mileage_entries.ticket_id either way.
+  const handleSyncMileage = async () => {
+    const targets = mileageSyncProfileId
+      ? mileageTechnicians.filter((t) => t.id === mileageSyncProfileId)
+      : mileageTechnicians;
+    if (targets.length === 0) return;
+    setSyncingMileage(true);
+    setMileageSyncMessage(null);
+    setMileageUnmatched([]);
+    try {
+      const result = await syncMileageFromTickets({
+        technicians: targets.map((t) => ({
+          profileId: t.id,
+          fullName: t.full_name,
+          branch: t.assigned_branch || "Unassigned",
+        })),
+      });
+      const parts = [`${result.created} new ${result.created === 1 ? "entry" : "entries"} created`];
+      if (result.skipped > 0) parts.push(`${result.skipped} already synced`);
+      if (result.errors.length > 0) parts.push(`${result.errors.length} skipped (${result.errors[0]}${result.errors.length > 1 ? `, +${result.errors.length - 1} more` : ""})`);
+      if (targets.length > 1) parts.push(`across ${targets.length} technicians`);
+      setMileageSyncMessage(parts.join(" — "));
+      setMileageUnmatched(result.unmatchedTechnicians);
+      if (result.created > 0) setMileageEntries(await getMileageEntries());
+    } catch (err) {
+      setMileageSyncMessage(`Sync failed: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setSyncingMileage(false);
+    }
+  };
+
+  // Auto-runs the sync (all technicians, all-time — no date bound by
+  // default) the first time the Mileage tab is actually opened — so every
+  // assigned ticket's mileage just shows up without anyone having to press
+  // Sync. Only fires once per page load (via the ref) and waits for
+  // mileageTechnicians to actually be populated, rather than running on
+  // every tab switch or racing the initial fetch.
+  const autoSyncedMileageRef = useRef(false);
+  useEffect(() => {
+    if (activeTab !== "mileage" || autoSyncedMileageRef.current || mileageTechnicians.length === 0) return;
+    autoSyncedMileageRef.current = true;
+    void handleSyncMileage();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, mileageTechnicians.length]);
+
+  // Photos modal — fetches on demand, only for the one ticket just clicked,
+  // not for every row up front (the Mileage table has no pagination and can
+  // hold hundreds of entries). Re-firing for the same entry object (e.g.
+  // clicking the same row's link twice) is harmless — listTicketPhotos just
+  // runs again and overwrites with the same result.
+  useEffect(() => {
+    const entry = mileagePhotoModalEntry;
+    if (!entry || !entry.ticketNo || !companyId) return;
+    const ticketNo = entry.ticketNo;
+    let cancelled = false;
+    setMileagePhotoModalLoading(true);
+    setMileagePhotoModalPhotos([]);
+    (async () => {
+      let photos: TicketPhoto[] = [];
+      try {
+        // TicketPhotos.tsx (the ticket detail page's "Attachments" tab and
+        // the Mobile Tech App) both upload under category "service" —
+        // .../tickets/{ticketNo}/service/... — not the bare ticket folder,
+        // so this has to match that same subpath or listAll() finds
+        // nothing (subfolders are prefixes, not items).
+        photos = await listTicketPhotos(companyId, `${ticketNo}/service`);
+      } catch (err) {
+        console.error(`Failed to load photos for ticket ${ticketNo}:`, err);
+      }
+      if (!cancelled) {
+        setMileagePhotoModalPhotos(photos);
+        setMileagePhotoModalLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [mileagePhotoModalEntry, companyId]);
+
+  const handleDeleteMileageEntry = async (entry: MileageEntry) => {
+    if (!window.confirm(`Remove this mileage entry for ${mileageRowName(entry)} on ${entry.workDate}?`)) return;
+    setDeletingMileageEntryId(entry.id);
+    try {
+      await deleteMileageEntry(entry.id);
+      setMileageEntries((prev) => prev.filter((e) => e.id !== entry.id));
+    } catch (err) {
+      alert(`Failed to remove mileage entry: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setDeletingMileageEntryId(null);
+    }
+  };
+
+  // While on hold, a ticket never counts toward the technician's "Completed
+  // Tickets" pay, even if it later becomes completed (see
+  // getTechCompletedRepairCounts in techPayroll.ts) — but it's reversible,
+  // not permanent: taking it off hold (clicking again) is a plain
+  // correction, no confirm dialog, and it counts toward pay again from then
+  // on. Still notifies (see below) so the technician/managers who were told
+  // about the hold also hear when it's lifted.
+  const handleTogglePayrollExclude = async (entry: MileageEntry) => {
+    const excluding = !entry.payrollExcluded;
+    const rowLabel = mileageRowName(entry);
+    if (excluding) {
+      const ok = window.confirm(
+        `Put ${entry.ticketNo ? `ticket ${entry.ticketNo}` : "this ticket"} on hold for ${rowLabel}'s payroll?\n\n` +
+          `While on hold, it won't count toward their pay even if the ticket is later marked completed — you can take it off hold again any time. ` +
+          `${rowLabel}${entry.profileId ? ", their manager, and their senior branch manager" : ""} will be notified.`
+      );
+      if (!ok) return;
+    }
+    const actorName = displayName || email || "Admin";
+    setPayrollExcludingId(entry.id);
+    try {
+      await setMileageEntryPayrollExcluded(entry.id, excluding, myProfileId, actorName);
+      setMileageEntries((prev) =>
+        prev.map((e) =>
+          e.id === entry.id
+            ? { ...e, payrollExcluded: excluding, payrollExcludedAt: excluding ? new Date().toISOString() : null, payrollExcludedByName: excluding ? actorName : null }
+            : e
+        )
+      );
+      void logModuleActivity({
+        module: "accounting",
+        actorName,
+        action: excluding ? "mileage_ticket_payroll_hold" : "mileage_ticket_payroll_unhold",
+        targetType: "ticket",
+        targetId: entry.ticketId ?? undefined,
+        targetLabel: `${entry.ticketNo || "Ticket"} — ${rowLabel}`,
+      });
+      // Notify the technician + their resolved manager + their senior branch
+      // manager on EITHER direction — going on hold or coming off it again —
+      // best-effort, never blocks the toggle itself. Nothing to notify for
+      // an unlinked entry (no real profile behind it). Shown as coming from
+      // "Accounting", not the individual admin who clicked it — this is a
+      // department action, not a personal one.
+      if (entry.profileId) {
+        (async () => {
+          try {
+            const allProfiles = await getCompanyUsers();
+            const targetProfile = allProfiles.find((p) => p.id === entry.profileId);
+            const recipientIds = new Set<string>([entry.profileId!]);
+            if (targetProfile) {
+              const manager = await resolveTeamLeadOrManager(targetProfile, allProfiles);
+              if (manager) recipientIds.add(manager.id);
+
+              const branch = (targetProfile.assigned_branch || entry.branch || "").trim().toLowerCase();
+              if (branch) {
+                const seniorBranchManager = allProfiles.find(
+                  (p) =>
+                    (p.assigned_branch || "").trim().toLowerCase() === branch &&
+                    [p.role, ...(p.extra_roles ?? [])].some((r) => normalizeRole(r) === "SENIOR_BRANCH_MANAGER")
+                );
+                if (seniorBranchManager) recipientIds.add(seniorBranchManager.id);
+              }
+            }
+            const body = excluding
+              ? `🚫 ${entry.ticketNo ? `Ticket ${entry.ticketNo}` : "A ticket"} (${entry.address}) was put on hold for payroll by Accounting.`
+              : `✅ ${entry.ticketNo ? `Ticket ${entry.ticketNo}` : "A ticket"} (${entry.address}) was taken off hold for payroll by Accounting — it counts toward pay again.`;
+            await Promise.all(
+              Array.from(recipientIds).map((id) =>
+                createNotification({
+                  recipientId: id,
+                  senderId: myProfileId,
+                  senderName: "Accounting",
+                  body,
+                  // Ticket List (not Accounting Dashboard, which technicians
+                  // can't open), pre-filtered to this ticket via ?ticketNo=
+                  // (TicketList.tsx reads it on mount) — same deep-link
+                  // convention as Part History's own ?uniqueId=.
+                  linkTo: entry.ticketNo
+                    ? `/m/tickets/ticket-list?ticketNo=${encodeURIComponent(entry.ticketNo)}`
+                    : "/m/tickets/ticket-list",
+                }).catch((err) => console.error("Failed to notify", id, err))
+              )
+            );
+          } catch (err) {
+            console.error("Failed to resolve/notify payroll hold recipients:", err);
+          }
+        })();
+      }
+    } catch (err) {
+      alert(`Failed to update: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setPayrollExcludingId(null);
+    }
+  };
 
   if (loading) {
     return (
@@ -1342,14 +2088,16 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
         <div className="flex gap-2 mb-8 border-b border-white/10 overflow-x-auto">
           {[
             { id: "overview", label: "Overview", Icon: PieChartIcon },
-            { id: "payroll", label: "Payroll", Icon: DollarSign },
+            { id: "payroll", label: "Office Payroll", Icon: DollarSign },
+            { id: "techPayroll", label: "Tech Payroll", Icon: Wrench },
+            { id: "mileage", label: "Mileage", Icon: MapPin },
             { id: "reports", label: "Reports", Icon: FileText },
           ].map((tab) => {
             const Icon = tab.Icon;
             return (
               <button
                 key={tab.id}
-                onClick={() => setActiveTab(tab.id as "overview" | "payroll" | "reports")}
+                onClick={() => setActiveTab(tab.id as "overview" | "payroll" | "techPayroll" | "mileage" | "reports")}
                 className={`px-4 py-2 border-b-2 transition whitespace-nowrap flex items-center gap-2 ${
                   activeTab === tab.id
                     ? "border-blue-500 text-blue-300"
@@ -1443,7 +2191,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
         )}
 
         {/* ── Payroll Tab ──────────────────────────────────────────────────── */}
-        {activeTab === "payroll" && (
+        {(activeTab === "payroll" || activeTab === "techPayroll") && (
           <div className="space-y-6">
             {/* Actions bar */}
             <div className="flex flex-wrap gap-3 items-center">
@@ -1490,56 +2238,33 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                 Audit Log ({auditLog.length})
               </button>
               <ActivityLogPanel module="accounting" title="Accounting Activity Log" />
-              {/* Currency toggle */}
-              <div className="ml-auto flex gap-2">
-                {(["USD", "PHP"] as const).map((cur) => (
-                  <button
-                    key={cur}
-                    onClick={() => {
-                      setSelectedCurrency(cur);
-                      setDepartmentFilter(new Set());
-                      setRoleFilter(new Set());
-                      setRegHoursFilter(new Set());
-                      setRateFilter(new Set());
-                    }}
-                    className={`px-4 py-2 rounded text-sm font-semibold transition ${
-                      selectedCurrency === cur
-                        ? "bg-blue-600 text-white"
-                        : "bg-slate-700 text-slate-300 hover:bg-slate-600"
-                    }`}
-                  >
-                    {cur === "USD" ? "US Payroll" : "PH Payroll"}
-                  </button>
-                ))}
-              </div>
+              {/* Currency toggle — Office Payroll only; Tech Payroll is
+                  always US (forced by the effect above), so there's no PH
+                  option to toggle to there. */}
+              {activeTab === "payroll" && (
+                <div className="ml-auto flex gap-2">
+                  {(["USD", "PHP"] as const).map((cur) => (
+                    <button
+                      key={cur}
+                      onClick={() => {
+                        setSelectedCurrency(cur);
+                        setDepartmentFilter(new Set());
+                        setRoleFilter(new Set());
+                        setRegHoursFilter(new Set());
+                        setRateFilter(new Set());
+                      }}
+                      className={`px-4 py-2 rounded text-sm font-semibold transition ${
+                        selectedCurrency === cur
+                          ? "bg-blue-600 text-white"
+                          : "bg-slate-700 text-slate-300 hover:bg-slate-600"
+                      }`}
+                    >
+                      {cur === "USD" ? "US Payroll" : "PH Payroll"}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
-
-            {/* Office/Tech sub-toggle — US Payroll only. Technicians are
-                paid per completed repair ticket (Tech Payroll) instead of
-                hourly (Office Payroll, everyone else). */}
-            {selectedCurrency === "USD" && (
-              <div className="flex gap-2">
-                {(["office", "tech"] as const).map((view) => (
-                  <button
-                    key={view}
-                    onClick={() => {
-                      setPayrollView(view);
-                      setDepartmentFilter(new Set());
-                      setRoleFilter(new Set());
-                      setRegHoursFilter(new Set());
-                      setRateFilter(new Set());
-                    }}
-                    className={`px-3 py-1.5 rounded text-xs font-semibold transition ${
-                      payrollView === view
-                        ? "bg-blue-500/30 text-white border border-blue-400/40"
-                        : "bg-slate-800/50 text-slate-400 border border-white/10 hover:text-white"
-                    }`}
-                  >
-                    {view === "office" ? "Office Payroll" : "Tech Payroll"}
-                  </button>
-                ))}
-              </div>
-            )}
 
             {/* Connect Gmail — one connection per region; payslip sends
                 automatically use whichever region the recipient employee
@@ -1585,36 +2310,39 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
               })}
             </div>
 
-            {/* Summary cards */}
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-              <div className="bg-slate-900/50 border border-white/10 rounded-lg p-4">
-                <p className="text-xs text-slate-400 mb-1">Total Payroll (Period)</p>
-                <p className="text-2xl font-bold text-green-300">
-                  {fmt(selectedCurrency === "USD" ? totalUSPayroll : totalPHPayroll)}
-                </p>
-              </div>
-              <div className="bg-slate-900/50 border border-white/10 rounded-lg p-4">
-                <p className="text-xs text-slate-400 mb-1">Employees</p>
-                <p className="text-2xl font-bold text-blue-300">{displayRows.length}</p>
-                <p className="text-xs text-slate-500 mt-1">Active in {selectedCurrency === "USD" ? "US" : "PH"}</p>
-              </div>
-              <div className="bg-slate-900/50 border border-white/10 rounded-lg p-4">
-                <p className="text-xs text-slate-400 mb-1">{isTechView ? "Tickets Completed" : "Overtime Pay"}</p>
-                <p className="text-2xl font-bold text-orange-300">
-                  {isTechView
-                    ? displayRows.reduce((s, r) => s + r.ticketsCompleted, 0)
-                    : fmt(displayRows.reduce((s, r) => s + r.overtimeHours * r.hourlyRateUSD * 1.5, 0))}
-                </p>
-              </div>
-              <div className="bg-slate-900/50 border border-white/10 rounded-lg p-4">
-                <p className="text-xs text-slate-400 mb-1">Avg per Employee</p>
-                <p className="text-2xl font-bold text-purple-300">
-                  {fmt(displayRows.length > 0
-                    ? (selectedCurrency === "USD" ? totalUSPayroll : totalPHPayroll) / displayRows.length
-                    : 0)}
-                </p>
-              </div>
-            </div>
+            {/* Summary cards — scoped to whichever tab/view is showing
+                (Office, Tech, or PH), not the combined US total. */}
+            {(() => {
+              const displayTotal =
+                effectiveCurrency === "USD" ? (payrollView === "tech" ? totalUSTechPayroll : totalUSOfficePayroll) : totalPHPayroll;
+              return (
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+                  <div className="bg-slate-900/50 border border-white/10 rounded-lg p-4">
+                    <p className="text-xs text-slate-400 mb-1">Total Payroll (Period)</p>
+                    <p className="text-2xl font-bold text-green-300">{fmt(displayTotal)}</p>
+                  </div>
+                  <div className="bg-slate-900/50 border border-white/10 rounded-lg p-4">
+                    <p className="text-xs text-slate-400 mb-1">Employees</p>
+                    <p className="text-2xl font-bold text-blue-300">{displayRows.length}</p>
+                    <p className="text-xs text-slate-500 mt-1">Active in {effectiveCurrency === "USD" ? "US" : "PH"}</p>
+                  </div>
+                  <div className="bg-slate-900/50 border border-white/10 rounded-lg p-4">
+                    <p className="text-xs text-slate-400 mb-1">{isTechView ? "Tickets Completed" : "Overtime Pay"}</p>
+                    <p className="text-2xl font-bold text-orange-300">
+                      {isTechView
+                        ? displayRows.reduce((s, r) => s + r.ticketsCompleted, 0)
+                        : fmt(displayRows.reduce((s, r) => s + r.overtimeHours * r.hourlyRateUSD * 1.5, 0))}
+                    </p>
+                  </div>
+                  <div className="bg-slate-900/50 border border-white/10 rounded-lg p-4">
+                    <p className="text-xs text-slate-400 mb-1">Avg per Employee</p>
+                    <p className="text-2xl font-bold text-purple-300">
+                      {fmt(displayRows.length > 0 ? displayTotal / displayRows.length : 0)}
+                    </p>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Audit Log */}
             {showAuditLog && (
@@ -1660,7 +2388,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
             <div className="bg-slate-900/50 border border-white/10 rounded-lg overflow-x-auto">
               <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between">
                 <span className="text-sm font-semibold">
-                  {selectedCurrency === "USD" ? (payrollView === "tech" ? "Tech" : "Office") : "PH"} Employee Payroll — Current Period
+                  {effectiveCurrency === "USD" ? (payrollView === "tech" ? "Tech" : "Office") : "PH"} Employee Payroll — Current Period
                 </span>
                 <span className="text-xs text-slate-400">{visibleRows.length} employees</span>
               </div>
@@ -1674,111 +2402,70 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                   className="w-full max-w-sm bg-slate-800/50 border border-white/10 rounded-lg p-2 text-white text-sm focus:border-blue-500 focus:outline-none"
                 />
               </div>
-              <table className="w-full text-sm min-w-[700px]">
-                <thead>
-                  <tr className="border-b border-white/10 bg-white/5">
-                    <th className="px-4 py-3 text-center text-xs text-slate-400 uppercase w-10">
-                      <input
-                        type="checkbox"
-                        title="Include/exclude all visible employees from payroll generation"
-                        checked={visibleRows.length > 0 && visibleRows.every((r) => !r.employee.payrollExcluded)}
-                        onChange={() => {
-                          const nextIncluded = !(visibleRows.length > 0 && visibleRows.every((r) => !r.employee.payrollExcluded));
-                          visibleRows.forEach((r) => {
-                            if (r.employee.payrollExcluded === nextIncluded) {
-                              handleTogglePayrollExcluded(r.employee.id, !nextIncluded);
-                            }
-                          });
-                        }}
-                        className="h-4 w-4 accent-blue-600 cursor-pointer"
-                      />
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs text-slate-400 uppercase">
-                      <button
-                        type="button"
-                        onClick={toggleNameSort}
-                        title="Sort by name"
-                        className="flex items-center gap-1 hover:text-white transition"
-                      >
-                        Name
-                        <span className="text-[10px]">{nameSort === "asc" ? "▲" : nameSort === "desc" ? "▼" : "⇅"}</span>
-                      </button>
-                    </th>
-                    {selectedCurrency === "USD" && (
+              {isTechView ? (
+                <table className="w-full text-sm min-w-[1500px]">
+                  <thead>
+                    <tr className="border-b border-white/10 bg-white/5">
+                      <th className="px-4 py-3 text-center text-xs text-slate-400 uppercase w-10">
+                        <input
+                          type="checkbox"
+                          title="Include/exclude all visible technicians from payroll generation"
+                          checked={visibleRows.length > 0 && visibleRows.every((r) => !r.employee.payrollExcluded)}
+                          onChange={() => {
+                            const nextIncluded = !(visibleRows.length > 0 && visibleRows.every((r) => !r.employee.payrollExcluded));
+                            visibleRows.forEach((r) => {
+                              if (r.employee.payrollExcluded === nextIncluded) {
+                                handleTogglePayrollExcluded(r.employee.id, !nextIncluded);
+                              }
+                            });
+                          }}
+                          className="h-4 w-4 accent-blue-600 cursor-pointer"
+                        />
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs text-slate-400 uppercase">
+                        <button
+                          type="button"
+                          onClick={toggleNameSort}
+                          title="Sort by name"
+                          className="flex items-center gap-1 hover:text-white transition"
+                        >
+                          Technician
+                          <span className="text-[10px]">{nameSort === "asc" ? "▲" : nameSort === "desc" ? "▼" : "⇅"}</span>
+                        </button>
+                      </th>
                       <th className="px-4 py-3 text-left text-xs text-slate-400 uppercase">Branch</th>
-                    )}
-                    <th className="px-4 py-3 text-left text-xs text-slate-400 uppercase">
-                      <span className="inline-flex items-center">
-                        Department
-                        <TicketColumnFilter
-                          options={departmentOptions}
-                          selected={departmentFilter}
-                          onChange={setDepartmentFilter}
-                          label="Filter by Department"
-                        />
-                      </span>
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs text-slate-400 uppercase">
-                      <span className="inline-flex items-center">
-                        Role
-                        <TicketColumnFilter
-                          options={roleOptions}
-                          selected={roleFilter}
-                          onChange={setRoleFilter}
-                          label="Filter by Role"
-                        />
-                      </span>
-                    </th>
-                    {isTechView ? (
-                      <th className="px-4 py-3 text-center text-xs text-slate-400 uppercase">Tickets Completed</th>
-                    ) : (
-                      <>
-                        <th className="px-4 py-3 text-center text-xs text-slate-400 uppercase">
-                          <span className="inline-flex items-center justify-center">
-                            Reg. Hours
-                            <TicketColumnFilter
-                              options={regHoursOptions}
-                              selected={regHoursFilter}
-                              onChange={setRegHoursFilter}
-                              label="Filter by Reg. Hours"
-                            />
-                          </span>
-                        </th>
-                        <th className="px-4 py-3 text-center text-xs text-slate-400 uppercase" title="Expected hours based on the employee's set schedule, for comparison against Reg. Hours">Duty Hours</th>
-                        <th className="px-4 py-3 text-center text-xs text-slate-400 uppercase">OT Hours</th>
-                        <th className="px-4 py-3 text-center text-xs text-slate-400 uppercase">
-                          <span className="inline-flex items-center justify-center">
-                            Rate
-                            <TicketColumnFilter
-                              options={rateOptions}
-                              selected={rateFilter}
-                              onChange={setRateFilter}
-                              label="Filter by Rate"
-                            />
-                          </span>
-                        </th>
-                      </>
-                    )}
-                    <th className="px-4 py-3 text-right text-xs text-slate-400 uppercase">Gross Pay</th>
-                    <th className="px-4 py-3 text-right text-xs text-slate-400 uppercase">Payslip</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visibleRows.length === 0 ? (
-                    <tr>
-                      <td colSpan={payrollColCount} className="px-4 py-8 text-center text-slate-500 text-sm">
-                        No {selectedCurrency === "USD" ? (payrollView === "tech" ? "Tech" : "Office") : "PH"} employees found.
-                      </td>
+                      <th className="px-4 py-3 text-center text-xs text-slate-400 uppercase">Assigned</th>
+                      <th className="px-4 py-3 text-center text-xs text-slate-400 uppercase">Completed</th>
+                      <th className="px-4 py-3 text-center text-xs text-slate-400 uppercase" title="Completed ÷ Assigned">Ratio</th>
+                      <th className="px-4 py-3 text-center text-xs text-slate-400 uppercase" title="Completed ÷ days in the selected period">Avg. Comp.</th>
+                      <th className="px-4 py-3 text-right text-xs text-slate-400 uppercase" title="Long Distance Tickets — entered manually, rate set in Tech Payroll Setup">LDT</th>
+                      <th className="px-4 py-3 text-right text-xs text-slate-400 uppercase" title="Entered manually, $/mile rate set in Tech Payroll Setup">Mileage</th>
+                      <th className="px-4 py-3 text-right text-xs text-slate-400 uppercase">TRN Paid</th>
+                      <th className="px-4 py-3 text-right text-xs text-slate-400 uppercase">2 Man Job</th>
+                      <th className="px-4 py-3 text-right text-xs text-slate-400 uppercase">Back Tub</th>
+                      <th className="px-4 py-3 text-right text-xs text-slate-400 uppercase">Sealed System</th>
+                      <th className="px-4 py-3 text-right text-xs text-slate-400 uppercase">Sealed System (R600)</th>
+                      <th className="px-4 py-3 text-right text-xs text-slate-400 uppercase">Total Net</th>
+                      <th className="px-4 py-3 text-center text-xs text-slate-400 uppercase">Action</th>
                     </tr>
-                  ) : (
-                    visibleRowsByDepartment.map((group) => (
-                      <Fragment key={group.department}>
-                        <tr className="bg-white/[0.03]">
-                          <td colSpan={payrollColCount} className="px-4 py-2 text-xs font-bold text-blue-300 uppercase tracking-wide">
-                            {group.department} <span className="text-slate-500 font-normal normal-case">({group.rows.length})</span>
-                          </td>
-                        </tr>
-                        {group.rows.map((row) => (
+                  </thead>
+                  <tbody>
+                    {visibleRows.length === 0 ? (
+                      <tr>
+                        <td colSpan={16} className="px-4 py-8 text-center text-slate-500 text-sm">
+                          No Tech employees found.
+                        </td>
+                      </tr>
+                    ) : (
+                      visibleRows.map((row) => {
+                        const ratioPct = row.ticketsAssigned > 0 ? (row.ticketsCompleted / row.ticketsAssigned) * 100 : 0;
+                        // Completed ÷ actual days worked (not raw calendar days) — matches
+                        // the legacy Tech Activity Report's "Avg. Daily Completion" figure.
+                        const avgComp = row.ticketsCompleted / Math.max(1, row.workingDays);
+                        const savingLdt = savingManualKey === `${row.employee.id}:ldtCount`;
+                        const savingMileage = savingManualKey === `${row.employee.id}:mileage`;
+                        const savingTraining = savingManualKey === `${row.employee.id}:trainingValue`;
+                        return (
                           <tr
                             key={row.employee.id}
                             className={`border-b border-white/5 hover:bg-white/5 ${row.employee.payrollExcluded ? "opacity-50" : ""}`}
@@ -1795,84 +2482,648 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                             <td className="px-4 py-3 font-medium">
                               <button
                                 type="button"
-                                onClick={() => setDetailEmployee(row.employee)}
+                                onClick={() => setActivityEmployeeId(row.employee.id)}
                                 title={`assigned_branch: ${row.employee.assigned_branch || "(blank)"} · profile id: ${row.employee.id}`}
                                 className="text-blue-400 hover:text-blue-300 hover:underline"
                               >
                                 {row.employee.full_name}
                               </button>
                             </td>
-                            {selectedCurrency === "USD" && (
-                              <td className="px-4 py-3 text-slate-300">
-                                {row.employee.assigned_branch || "—"}
-                              </td>
-                            )}
-                            <td className="px-4 py-3 text-slate-300">
-                              {row.employee.department || "—"}
-                            </td>
-                            <td className="px-4 py-3 text-slate-300">
-                              {row.employee.roleLabel || "—"}
-                            </td>
-                            {isTechView ? (
-                              <td className="px-4 py-3 text-center text-slate-300">
-                                {row.ticketsCompleted}
-                              </td>
-                            ) : (
-                              <>
-                                <td className="px-4 py-3 text-center text-slate-300">
-                                  {row.hoursWorked.toFixed(1)}
-                                </td>
-                                <td
-                                  className={`px-4 py-3 text-center ${row.hoursWorked < row.dutyHours ? "text-amber-300" : "text-slate-300"}`}
-                                  title="Expected hours based on the employee's set schedule"
-                                >
-                                  {row.dutyHours.toFixed(1)}
-                                </td>
-                                <td className="px-4 py-3 text-center text-orange-300">
-                                  {row.overtimeHours.toFixed(1)}
-                                </td>
-                                <td className="px-4 py-3 text-center text-slate-300" title={row.compensationType === "fixed" && row.annualSalary ? `$${perCutoffSalary(row.annualSalary).toFixed(2)}/cutoff` : undefined}>
-                                  {rateLabel(row)}
-                                </td>
-                              </>
-                            )}
-                            <td className="px-4 py-3 text-right font-semibold text-green-300">
-                              {fmt(row.grossPayUSD)}
+                            <td className="px-4 py-3 text-slate-300">{row.employee.assigned_branch || "—"}</td>
+                            <td className="px-4 py-3 text-center text-slate-300">{row.ticketsAssigned}</td>
+                            <td className="px-4 py-3 text-center text-slate-300">{row.ticketsCompleted}</td>
+                            <td className="px-4 py-3 text-center text-slate-300">{row.ticketsAssigned > 0 ? `${ratioPct.toFixed(0)}%` : "—"}</td>
+                            <td className="px-4 py-3 text-center text-slate-300">{avgComp.toFixed(1)}</td>
+                            <td className="px-4 py-3 text-right">
+                              <input
+                                type="number"
+                                min={0}
+                                defaultValue={row.techManual.ldtCount || ""}
+                                disabled={savingLdt}
+                                onBlur={(e) => handleManualPayBlur(row, "ldtCount", e.target.value)}
+                                placeholder="0"
+                                className="w-16 bg-slate-800/50 border border-white/10 rounded px-1.5 py-1 text-right text-xs text-white disabled:opacity-50 focus:border-blue-500 focus:outline-none"
+                              />
+                              <div className="text-[10px] text-slate-500 mt-0.5">{savingLdt ? "Saving…" : fmt(row.techManual.ldtPay)}</div>
                             </td>
                             <td className="px-4 py-3 text-right">
+                              <input
+                                type="number"
+                                min={0}
+                                defaultValue={row.techManual.mileage || ""}
+                                disabled={savingMileage}
+                                onBlur={(e) => handleManualPayBlur(row, "mileage", e.target.value)}
+                                placeholder="0"
+                                className="w-16 bg-slate-800/50 border border-white/10 rounded px-1.5 py-1 text-right text-xs text-white disabled:opacity-50 focus:border-blue-500 focus:outline-none"
+                              />
+                              <div className="text-[10px] text-slate-500 mt-0.5">{savingMileage ? "Saving…" : fmt(row.techManual.mileagePay)}</div>
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <input
+                                type="number"
+                                min={0}
+                                defaultValue={row.techManual.trainingValue || ""}
+                                disabled={savingTraining}
+                                onBlur={(e) => handleManualPayBlur(row, "trainingValue", e.target.value)}
+                                placeholder="0"
+                                className="w-16 bg-slate-800/50 border border-white/10 rounded px-1.5 py-1 text-right text-xs text-white disabled:opacity-50 focus:border-blue-500 focus:outline-none"
+                              />
+                              <div className="text-[10px] text-slate-500 mt-0.5">{savingTraining ? "Saving…" : fmt(row.techManual.trainingPay)}</div>
+                            </td>
+                            <td className="px-4 py-3 text-right text-slate-300">{fmt(row.techCategoryPay.twoManJob)}</td>
+                            <td className="px-4 py-3 text-right text-slate-300">{fmt(row.techCategoryPay.backTub)}</td>
+                            <td className="px-4 py-3 text-right text-slate-300">{fmt(row.techCategoryPay.sealedSystem)}</td>
+                            <td className="px-4 py-3 text-right text-slate-300">{fmt(row.techCategoryPay.sealedSystemR600)}</td>
+                            <td className="px-4 py-3 text-right font-semibold text-green-300">{fmt(row.grossPayUSD)}</td>
+                            <td className="px-4 py-3">
+                              <div className="flex items-center justify-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setActivityEmployeeId(row.employee.id)}
+                                  title="Check activity"
+                                  className="p-1.5 rounded text-blue-400 hover:text-blue-300 hover:bg-white/10 transition"
+                                >
+                                  <Activity className="h-3.5 w-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleSendPayslip(row)}
+                                  disabled={sendingPayslipId === row.employee.id || !gmailStatus?.connected}
+                                  title={gmailStatus?.connected ? "Send a test payslip email to this technician" : "Connect Gmail above first"}
+                                  className="p-1.5 rounded text-emerald-400 hover:text-emerald-300 hover:bg-white/10 disabled:opacity-40 transition"
+                                >
+                                  {sendingPayslipId === row.employee.id ? (
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  ) : (
+                                    <Send className="h-3.5 w-3.5" />
+                                  )}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteManualPay(row)}
+                                  disabled={deletingManualId === row.employee.id}
+                                  title="Clear LDT/Mileage/Training entries for this period"
+                                  className="p-1.5 rounded text-red-400 hover:text-red-300 hover:bg-white/10 disabled:opacity-40 transition"
+                                >
+                                  {deletingManualId === row.employee.id ? (
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  ) : (
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  )}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                  {visibleRows.length > 0 && (
+                    <tfoot>
+                      <tr className="border-t border-white/20 bg-white/5">
+                        <td colSpan={14} className="px-4 py-3 text-sm font-semibold text-slate-300">
+                          Total
+                        </td>
+                        <td className="px-4 py-3 text-right font-bold text-green-300">
+                          {fmt(visibleTotalUSD)}
+                        </td>
+                        <td />
+                      </tr>
+                    </tfoot>
+                  )}
+                </table>
+              ) : (
+                <table className="w-full text-sm min-w-[700px]">
+                  <thead>
+                    <tr className="border-b border-white/10 bg-white/5">
+                      <th className="px-4 py-3 text-center text-xs text-slate-400 uppercase w-10">
+                        <input
+                          type="checkbox"
+                          title="Include/exclude all visible employees from payroll generation"
+                          checked={visibleRows.length > 0 && visibleRows.every((r) => !r.employee.payrollExcluded)}
+                          onChange={() => {
+                            const nextIncluded = !(visibleRows.length > 0 && visibleRows.every((r) => !r.employee.payrollExcluded));
+                            visibleRows.forEach((r) => {
+                              if (r.employee.payrollExcluded === nextIncluded) {
+                                handleTogglePayrollExcluded(r.employee.id, !nextIncluded);
+                              }
+                            });
+                          }}
+                          className="h-4 w-4 accent-blue-600 cursor-pointer"
+                        />
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs text-slate-400 uppercase">
+                        <button
+                          type="button"
+                          onClick={toggleNameSort}
+                          title="Sort by name"
+                          className="flex items-center gap-1 hover:text-white transition"
+                        >
+                          Name
+                          <span className="text-[10px]">{nameSort === "asc" ? "▲" : nameSort === "desc" ? "▼" : "⇅"}</span>
+                        </button>
+                      </th>
+                      {effectiveCurrency === "USD" && (
+                        <th className="px-4 py-3 text-left text-xs text-slate-400 uppercase">Branch</th>
+                      )}
+                      <th className="px-4 py-3 text-left text-xs text-slate-400 uppercase">
+                        <span className="inline-flex items-center">
+                          Department
+                          <TicketColumnFilter
+                            options={departmentOptions}
+                            selected={departmentFilter}
+                            onChange={setDepartmentFilter}
+                            label="Filter by Department"
+                          />
+                        </span>
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs text-slate-400 uppercase">
+                        <span className="inline-flex items-center">
+                          Role
+                          <TicketColumnFilter
+                            options={roleOptions}
+                            selected={roleFilter}
+                            onChange={setRoleFilter}
+                            label="Filter by Role"
+                          />
+                        </span>
+                      </th>
+                      <th className="px-4 py-3 text-center text-xs text-slate-400 uppercase">
+                        <span className="inline-flex items-center justify-center">
+                          Reg. Hours
+                          <TicketColumnFilter
+                            options={regHoursOptions}
+                            selected={regHoursFilter}
+                            onChange={setRegHoursFilter}
+                            label="Filter by Reg. Hours"
+                          />
+                        </span>
+                      </th>
+                      <th className="px-4 py-3 text-center text-xs text-slate-400 uppercase" title="Expected hours based on the employee's set schedule, for comparison against Reg. Hours">Duty Hours</th>
+                      <th className="px-4 py-3 text-center text-xs text-slate-400 uppercase">OT Hours</th>
+                      <th className="px-4 py-3 text-center text-xs text-slate-400 uppercase">
+                        <span className="inline-flex items-center justify-center">
+                          Rate
+                          <TicketColumnFilter
+                            options={rateOptions}
+                            selected={rateFilter}
+                            onChange={setRateFilter}
+                            label="Filter by Rate"
+                          />
+                        </span>
+                      </th>
+                      <th className="px-4 py-3 text-right text-xs text-slate-400 uppercase">Gross Pay</th>
+                      <th className="px-4 py-3 text-right text-xs text-slate-400 uppercase">Payslip</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleRows.length === 0 ? (
+                      <tr>
+                        <td colSpan={payrollColCount} className="px-4 py-8 text-center text-slate-500 text-sm">
+                          No {effectiveCurrency === "USD" ? "Office" : "PH"} employees found.
+                        </td>
+                      </tr>
+                    ) : (
+                      visibleRowsByDepartment.map((group) => (
+                        <Fragment key={group.department}>
+                          <tr className="bg-white/[0.03]">
+                            <td colSpan={payrollColCount} className="px-4 py-2 text-xs font-bold text-blue-300 uppercase tracking-wide">
+                              {group.department} <span className="text-slate-500 font-normal normal-case">({group.rows.length})</span>
+                            </td>
+                          </tr>
+                          {group.rows.map((row) => (
+                            <tr
+                              key={row.employee.id}
+                              className={`border-b border-white/5 hover:bg-white/5 ${row.employee.payrollExcluded ? "opacity-50" : ""}`}
+                            >
+                              <td className="px-4 py-3 text-center">
+                                <input
+                                  type="checkbox"
+                                  title="Include in payroll generation"
+                                  checked={!row.employee.payrollExcluded}
+                                  onChange={(e) => handleTogglePayrollExcluded(row.employee.id, !e.target.checked)}
+                                  className="h-4 w-4 accent-blue-600 cursor-pointer"
+                                />
+                              </td>
+                              <td className="px-4 py-3 font-medium">
+                                <button
+                                  type="button"
+                                  onClick={() => setDetailEmployee(row.employee)}
+                                  title={`assigned_branch: ${row.employee.assigned_branch || "(blank)"} · profile id: ${row.employee.id}`}
+                                  className="text-blue-400 hover:text-blue-300 hover:underline"
+                                >
+                                  {row.employee.full_name}
+                                </button>
+                              </td>
+                              {effectiveCurrency === "USD" && (
+                                <td className="px-4 py-3 text-slate-300">
+                                  {row.employee.assigned_branch || "—"}
+                                </td>
+                              )}
+                              <td className="px-4 py-3 text-slate-300">
+                                {row.employee.department || "—"}
+                              </td>
+                              <td className="px-4 py-3 text-slate-300">
+                                {row.employee.roleLabel || "—"}
+                              </td>
+                              <td className="px-4 py-3 text-center text-slate-300">
+                                {row.hoursWorked.toFixed(1)}
+                              </td>
+                              <td
+                                className={`px-4 py-3 text-center ${row.hoursWorked < row.dutyHours ? "text-amber-300" : "text-slate-300"}`}
+                                title="Expected hours based on the employee's set schedule"
+                              >
+                                {row.dutyHours.toFixed(1)}
+                              </td>
+                              <td className="px-4 py-3 text-center text-orange-300">
+                                {row.overtimeHours.toFixed(1)}
+                              </td>
+                              <td className="px-4 py-3 text-center text-slate-300" title={row.compensationType === "fixed" && row.annualSalary ? `$${perCutoffSalary(row.annualSalary).toFixed(2)}/cutoff` : undefined}>
+                                {rateLabel(row)}
+                              </td>
+                              <td className="px-4 py-3 text-right font-semibold text-green-300">
+                                {fmt(row.grossPayUSD)}
+                              </td>
+                              <td className="px-4 py-3 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => handleSendPayslip(row)}
+                                  disabled={sendingPayslipId === row.employee.id || !gmailStatus?.connected}
+                                  title={gmailStatus?.connected ? "Send a test payslip email to this employee" : "Connect Gmail above first"}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-white rounded text-xs font-medium transition"
+                                >
+                                  <Send className="h-3 w-3" />
+                                  {sendingPayslipId === row.employee.id ? "Sending…" : "Send"}
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </Fragment>
+                      ))
+                    )}
+                  </tbody>
+                  {visibleRows.length > 0 && (
+                    <tfoot>
+                      <tr className="border-t border-white/20 bg-white/5">
+                        <td colSpan={payrollColCount - 3} className="px-4 py-3 text-sm font-semibold text-slate-300">
+                          Total
+                        </td>
+                        <td className="px-4 py-3 text-right font-bold text-green-300">
+                          {fmt(visibleTotalUSD)}
+                        </td>
+                        <td />
+                        <td />
+                      </tr>
+                    </tfoot>
+                  )}
+                </table>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── Mileage Tab ──────────────────────────────────────────────────── */}
+        {activeTab === "mileage" && (
+          <div className="space-y-6">
+            <h2 className="text-lg font-bold text-white">Total Mileage</h2>
+
+            {/* Entry form */}
+            <div className="bg-slate-900/50 border border-white/10 rounded-lg p-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <label className="space-y-1.5 text-sm text-slate-200">
+                  <span className="block text-xs uppercase tracking-[0.08em] text-slate-400">Date</span>
+                  <input
+                    type="date"
+                    value={mileageForm.workDate}
+                    onChange={(e) => setMileageForm((f) => ({ ...f, workDate: e.target.value }))}
+                    className="glass-input w-full text-sm px-2 py-1.5"
+                  />
+                </label>
+                <label className="space-y-1.5 text-sm text-slate-200">
+                  <span className="block text-xs uppercase tracking-[0.08em] text-slate-400">Technician</span>
+                  <select
+                    value={mileageForm.profileId}
+                    onChange={(e) => setMileageForm((f) => ({ ...f, profileId: e.target.value }))}
+                    className="glass-input w-full text-sm px-2 py-1.5"
+                  >
+                    <option value="">Select technician…</option>
+                    {mileageTechnicians.map((t) => (
+                      <option key={t.id} value={t.id}>{t.full_name} — {t.assigned_branch || "Unassigned"}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="space-y-1.5 text-sm text-slate-200">
+                  <span className="block text-xs uppercase tracking-[0.08em] text-slate-400">Address</span>
+                  <input
+                    type="text"
+                    value={mileageForm.address}
+                    onChange={(e) => setMileageForm((f) => ({ ...f, address: e.target.value }))}
+                    placeholder="Customer/site address"
+                    className="glass-input w-full text-sm px-2 py-1.5"
+                  />
+                </label>
+                <label className="space-y-1.5 text-sm text-slate-200">
+                  <span className="block text-xs uppercase tracking-[0.08em] text-slate-400">Contact Number</span>
+                  <input
+                    type="text"
+                    value={mileageForm.contactNumber}
+                    onChange={(e) => setMileageForm((f) => ({ ...f, contactNumber: e.target.value }))}
+                    placeholder="Contact number"
+                    className="glass-input w-full text-sm px-2 py-1.5"
+                  />
+                </label>
+                <label className="space-y-1.5 text-sm text-slate-200">
+                  <span className="block text-xs uppercase tracking-[0.08em] text-slate-400">Email</span>
+                  <input
+                    type="email"
+                    value={mileageForm.email}
+                    onChange={(e) => setMileageForm((f) => ({ ...f, email: e.target.value }))}
+                    placeholder="Contact email"
+                    className="glass-input w-full text-sm px-2 py-1.5"
+                  />
+                </label>
+                <label className="space-y-1.5 text-sm text-slate-200">
+                  <span className="block text-xs uppercase tracking-[0.08em] text-slate-400">Total Mileage</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={0.1}
+                    value={mileageForm.totalMileage}
+                    onChange={(e) => setMileageForm((f) => ({ ...f, totalMileage: e.target.value }))}
+                    placeholder="0.0"
+                    className="glass-input w-full text-sm px-2 py-1.5"
+                  />
+                </label>
+                <label className="space-y-1.5 text-sm text-slate-200 sm:col-span-2">
+                  <span className="block text-xs uppercase tracking-[0.08em] text-slate-400">Google Map Link</span>
+                  <input
+                    type="text"
+                    value={mileageForm.googleMapLink}
+                    onChange={(e) => setMileageForm((f) => ({ ...f, googleMapLink: e.target.value }))}
+                    placeholder="https://maps.app.goo.gl/…"
+                    className="glass-input w-full text-sm px-2 py-1.5"
+                  />
+                </label>
+              </div>
+              <div className="mt-4 flex justify-end">
+                <button
+                  onClick={handleAddMileageEntry}
+                  disabled={savingMileageEntry || !mileageForm.profileId || !mileageForm.address.trim() || !mileageForm.totalMileage.trim()}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white rounded-lg text-sm font-semibold transition flex items-center gap-2"
+                >
+                  {savingMileageEntry && <Loader2 className="h-4 w-4 animate-spin" />}
+                  Add Entry
+                </button>
+              </div>
+            </div>
+
+            {/* Auto-sync from tickets */}
+            <div className="bg-slate-900/50 border border-white/10 rounded-lg p-4">
+              <p className="text-sm font-semibold text-white mb-1">Sync from Tickets</p>
+              <p className="text-xs text-slate-400 mb-3">
+                Runs automatically for all technicians (including anyone with Technician as a 2nd or 3rd role), pulling every ticket ever assigned to them for this company — any status, not just completed, no date range, always all-time — as soon as you open this tab. One mileage entry per ticket, using the same office-to-customer distance calculator as the ticket map. Already-synced tickets are always skipped, so it's safe to re-run.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+                <label className="space-y-1.5 text-sm text-slate-200">
+                  <span className="block text-xs uppercase tracking-[0.08em] text-slate-400">Technician</span>
+                  <select
+                    value={mileageSyncProfileId}
+                    onChange={(e) => setMileageSyncProfileId(e.target.value)}
+                    className="glass-input w-full text-sm px-2 py-1.5"
+                  >
+                    <option value="">All Technicians ({mileageTechnicians.length})</option>
+                    {mileageTechnicians.map((t) => (
+                      <option key={t.id} value={t.id}>{t.full_name} — {t.assigned_branch || "Unassigned"}</option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  onClick={handleSyncMileage}
+                  disabled={syncingMileage || mileageTechnicians.length === 0}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white rounded-lg text-sm font-semibold transition flex items-center justify-center gap-2"
+                >
+                  {syncingMileage && <Loader2 className="h-4 w-4 animate-spin" />}
+                  {mileageSyncProfileId ? "Sync" : "Sync All"}
+                </button>
+              </div>
+              {mileageSyncMessage && (
+                <p className="mt-3 text-xs text-slate-300">{mileageSyncMessage}</p>
+              )}
+              {mileageUnmatched.length > 0 && (
+                <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+                  <button
+                    type="button"
+                    onClick={() => setMileageUnmatchedExpanded((v) => !v)}
+                    className="w-full flex items-center justify-between gap-2 text-left"
+                  >
+                    <span className="text-xs font-semibold text-amber-300">
+                      {mileageUnmatched.length} technician name{mileageUnmatched.length === 1 ? "" : "s"} on synced tickets don't match any technician's profile
+                    </span>
+                    {mileageUnmatchedExpanded ? <ChevronDown className="h-3.5 w-3.5 text-amber-300 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 text-amber-300 shrink-0" />}
+                  </button>
+                  {mileageUnmatchedExpanded && (
+                    <>
+                      <p className="mt-1.5 text-xs text-amber-200/90">
+                        Still synced below under their raw ticket name, just not linked to a real account:
+                      </p>
+                      <ul className="mt-1.5 text-xs text-amber-200/90 space-y-0.5">
+                        {mileageUnmatched.map((u) => (
+                          <li key={u.name}>
+                            "{u.name}" — {u.count} ticket{u.count === 1 ? "" : "s"}
+                          </li>
+                        ))}
+                      </ul>
+                      <p className="mt-1.5 text-[11px] text-amber-200/70">
+                        To link these to a real account instead, update that person's Display Name in User Management to match exactly what's on the ticket, or check they have Technician (or Tech Manager) set as a role — new entries after that will sync under their profile.
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Filters */}
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="space-y-1.5 text-sm text-slate-200">
+                <span className="block text-xs uppercase tracking-[0.08em] text-slate-400">Branch</span>
+                <select
+                  value={mileageBranchFilter}
+                  onChange={(e) => setMileageBranchFilter(e.target.value)}
+                  className="glass-input text-sm px-2 py-1.5 w-56"
+                >
+                  <option value="">All Branches</option>
+                  {mileageBranchOptions.map((b) => (
+                    <option key={b} value={b}>{b}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="space-y-1.5 text-sm text-slate-200">
+                <span className="block text-xs uppercase tracking-[0.08em] text-slate-400">Name</span>
+                <input
+                  type="text"
+                  list="mileage-name-suggestions"
+                  value={mileageNameFilter}
+                  onChange={(e) => setMileageNameFilter(e.target.value)}
+                  placeholder="Search technician name…"
+                  className="glass-input text-sm px-2 py-1.5 w-56"
+                />
+                <datalist id="mileage-name-suggestions">
+                  {mileageNameOptions.map((name) => (
+                    <option key={name} value={name} />
+                  ))}
+                </datalist>
+              </label>
+              {(mileageBranchFilter || mileageNameFilter) && (
+                <button
+                  onClick={() => { setMileageBranchFilter(""); setMileageNameFilter(""); }}
+                  className="text-xs text-blue-400 hover:text-blue-300 mb-1.5"
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
+
+            {/* Per-branch tables */}
+            {mileageEntriesByBranch.length === 0 ? (
+              <div className="bg-slate-900/50 border border-white/10 rounded-lg p-8 text-center text-slate-400 text-sm">
+                {mileageEntries.length === 0 ? "No mileage entries logged yet." : "No entries match the current filters."}
+              </div>
+            ) : (
+              mileageEntriesByBranch.map(({ branch, entries }) => (
+                <div key={branch} className="bg-slate-900/50 border border-white/10 rounded-lg overflow-hidden">
+                  <div className="px-4 py-3 border-b border-white/10 flex items-center gap-2">
+                    <MapPin className="h-4 w-4 text-blue-400" />
+                    <h3 className="text-sm font-semibold text-white">{branch}</h3>
+                    <span className="text-xs text-slate-400">({entries.length} {entries.length === 1 ? "entry" : "entries"})</span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="bg-slate-700/80">
+                          <th className="px-3 py-3 text-xs font-semibold text-slate-200 text-left">Date</th>
+                          <th className="px-3 py-3 text-xs font-semibold text-slate-200 text-left">Technician</th>
+                          <th className="px-3 py-3 text-xs font-semibold text-slate-200 text-left">Ticket #</th>
+                          <th className="px-3 py-3 text-xs font-semibold text-slate-200 text-left">Status</th>
+                          <th className="px-3 py-3 text-xs font-semibold text-slate-200 text-left">Photos</th>
+                          <th className="px-3 py-3 text-xs font-semibold text-slate-200 text-left">Address</th>
+                          <th className="px-3 py-3 text-xs font-semibold text-slate-200 text-left">Contact Number</th>
+                          <th className="px-3 py-3 text-xs font-semibold text-slate-200 text-left">Email</th>
+                          <th className="px-3 py-3 text-xs font-semibold text-slate-200 text-left">Total Mileage</th>
+                          <th className="px-3 py-3 text-xs font-semibold text-slate-200 text-left">Google Map Link</th>
+                          <th className="px-3 py-3 text-xs font-semibold text-slate-200 text-left">Payroll</th>
+                          <th className="px-3 py-3 text-xs font-semibold text-slate-200 text-left">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {entries.map((entry) => (
+                          <tr key={entry.id} className="border-b border-white/5 hover:bg-white/5">
+                            <td className="px-3 py-2.5 text-slate-300">
+                              <div className="flex items-center gap-2">
+                                {entry.workDate}
+                                <span
+                                  title={entry.source === "auto" ? "Auto-synced from a ticket" : "Manually entered"}
+                                  className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold uppercase tracking-wide ${
+                                    entry.source === "auto" ? "bg-blue-500/20 text-blue-300" : "bg-slate-500/20 text-slate-400"
+                                  }`}
+                                >
+                                  {entry.source === "auto" ? "Auto" : "Manual"}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="px-3 py-2.5 text-slate-300">
                               <button
                                 type="button"
-                                onClick={() => handleSendPayslip(row)}
-                                disabled={sendingPayslipId === row.employee.id || !gmailStatus?.connected}
-                                title={gmailStatus?.connected ? "Send a test payslip email to this employee" : "Connect Gmail above first"}
-                                className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-white rounded text-xs font-medium transition"
+                                onClick={() => setMileageTechDetailId(mileageRowKey(entry))}
+                                className="text-blue-400 hover:text-blue-300 hover:underline text-left inline-flex items-center gap-1"
+                                title="See this person's tickets"
                               >
-                                <Send className="h-3 w-3" />
-                                {sendingPayslipId === row.employee.id ? "Sending…" : "Send"}
+                                {mileageRowName(entry)}
+                                {!entry.profileId && (
+                                  <span className="text-[9px] px-1 py-0.5 rounded-full font-semibold uppercase tracking-wide bg-amber-500/20 text-amber-300" title="No matching profile — this name comes straight from the ticket">
+                                    unlinked
+                                  </span>
+                                )}
                               </button>
+                            </td>
+                            <td className="px-3 py-2.5 text-slate-300">
+                              {entry.ticketNo ? (
+                                <Link to="/ticket/$ticketNo" params={{ ticketNo: entry.ticketNo }} className="font-mono text-blue-400 hover:text-blue-300 hover:underline">
+                                  {entry.ticketNo}
+                                </Link>
+                              ) : (
+                                <span className="text-slate-500">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5" style={entry.ticketStatus ? mileageStatusStyle(entry.ticketStatus, repairStatusRows) : { color: "#64748b" }}>{entry.ticketStatus || "—"}</td>
+                            <td className="px-3 py-2.5">
+                              {!entry.ticketNo ? (
+                                <span className="text-slate-500">—</span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => setMileagePhotoModalEntry(entry)}
+                                  title="View photo previews"
+                                  className="text-blue-400 hover:text-blue-300 hover:underline text-left"
+                                >
+                                  Photos
+                                </button>
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5 text-slate-300">{entry.address}</td>
+                            <td className="px-3 py-2.5 text-slate-300">{entry.contactNumber || "—"}</td>
+                            <td className="px-3 py-2.5 text-slate-300">{entry.email || "—"}</td>
+                            <td className="px-3 py-2.5 text-slate-300">{entry.totalMileage}</td>
+                            <td className="px-3 py-2.5">
+                              {entry.googleMapLink ? (
+                                <a href={entry.googleMapLink} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 underline">
+                                  Map link
+                                </a>
+                              ) : (
+                                <span className="text-slate-500">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5">
+                              {entry.payrollExcluded ? (
+                                <span
+                                  className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold uppercase tracking-wide bg-red-500/20 text-red-300"
+                                  title={`Put on hold by ${entry.payrollExcludedByName || "someone"}${entry.payrollExcludedAt ? ` on ${new Date(entry.payrollExcludedAt).toLocaleDateString()}` : ""}`}
+                                >
+                                  On Hold
+                                </span>
+                              ) : (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold uppercase tracking-wide bg-emerald-500/20 text-emerald-300">
+                                  Included
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5">
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => handleTogglePayrollExclude(entry)}
+                                  disabled={payrollExcludingId === entry.id}
+                                  title={entry.payrollExcluded ? "Take this ticket off hold" : "Put this ticket on hold for payroll"}
+                                  className={`disabled:opacity-40 ${entry.payrollExcluded ? "text-amber-400 hover:text-amber-300" : "text-slate-400 hover:text-red-300"}`}
+                                >
+                                  {payrollExcludingId === entry.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Ban className="h-3.5 w-3.5" />}
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteMileageEntry(entry)}
+                                  disabled={deletingMileageEntryId === entry.id}
+                                  title="Delete this mileage entry"
+                                  className="text-red-400 hover:text-red-300 disabled:opacity-40"
+                                >
+                                  {deletingMileageEntryId === entry.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         ))}
-                      </Fragment>
-                    ))
-                  )}
-                </tbody>
-                {visibleRows.length > 0 && (
-                  <tfoot>
-                    <tr className="border-t border-white/20 bg-white/5">
-                      <td colSpan={payrollColCount - 3} className="px-4 py-3 text-sm font-semibold text-slate-300">
-                        Total
-                      </td>
-                      <td className="px-4 py-3 text-right font-bold text-green-300">
-                        {fmt(visibleTotalUSD)}
-                      </td>
-                      <td />
-                      <td />
-                    </tr>
-                  </tfoot>
-                )}
-              </table>
-            </div>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         )}
 
@@ -1920,9 +3171,8 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                     </tr>
                   ) : (
                     payrollRuns.map((run) => (
-                      <>
+                      <Fragment key={run.id}>
                         <tr
-                          key={run.id}
                           className="border-b border-white/5 hover:bg-white/5 cursor-pointer"
                           onClick={() => toggleRun(run.id)}
                         >
@@ -2094,7 +3344,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                             </td>
                           </tr>
                         )}
-                      </>
+                      </Fragment>
                     ))
                   )}
                 </tbody>
@@ -2115,9 +3365,194 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
           workingHours={detailEmployee.workingHours}
           mealMinutes={detailEmployee.mealMinutes}
           offDays={detailEmployee.offDays}
+          graceMinutes={payGraceMinutesFor(detailEmployee.country, normalizeRole(detailEmployee.role) === "TECHNICIAN")}
+          initialStart={genStart || undefined}
+          initialEnd={genEnd || undefined}
           onClose={() => setDetailEmployee(null)}
           onRateChanged={fetchData}
         />
+      )}
+
+      {activityEmployeeId && (() => {
+        const activityRow = visibleRows.find((r) => r.employee.id === activityEmployeeId);
+        if (!activityRow) return null;
+        return (
+          <TechActivityReportModal
+            row={activityRow}
+            periodStart={genStart}
+            periodEnd={genEnd}
+            techRepairRates={techRepairRates}
+            onRatesChanged={refreshTechRepairRates}
+            onManualPayBlur={handleManualPayBlur}
+            savingManualKey={savingManualKey}
+            onCategoryOverrideBlur={handleCategoryOverrideBlur}
+            savingCategoryOverrideKey={savingCategoryOverrideKey}
+            onClose={() => setActivityEmployeeId(null)}
+          />
+        );
+      })()}
+
+      {mileageTechDetailId && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setMileageTechDetailId(null)}
+        >
+          <div
+            className="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-xl border border-white/10 bg-slate-900 p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {(() => {
+              const techEntries = mileageEntries
+                .filter((e) => mileageRowKey(e) === mileageTechDetailId)
+                .sort((a, b) => b.workDate.localeCompare(a.workDate));
+              const totalMiles = techEntries.reduce((s, e) => s + e.totalMileage, 0);
+              const detailName = techEntries[0] ? mileageRowName(techEntries[0]) : "Technician";
+              return (
+                <>
+                  <div className="mb-4 flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                        {detailName}
+                        {techEntries[0] && !techEntries[0].profileId && (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded-full font-semibold uppercase tracking-wide bg-amber-500/20 text-amber-300">
+                            unlinked
+                          </span>
+                        )}
+                      </h3>
+                      <p className="text-xs text-slate-400">
+                        {techEntries.length} ticket{techEntries.length === 1 ? "" : "s"} with logged mileage, {totalMiles.toFixed(1)} mi total
+                      </p>
+                    </div>
+                    <button
+                      className="rounded-md border border-white/15 bg-slate-800/70 p-1.5 text-slate-300 hover:bg-slate-700"
+                      onClick={() => setMileageTechDetailId(null)}
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+
+                  {techEntries.length === 0 ? (
+                    <p className="text-xs text-slate-500 py-1">No mileage entries yet.</p>
+                  ) : (
+                    <div className="overflow-hidden rounded-lg border border-white/10">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="bg-white/5 border-b border-white/10">
+                            <th className="px-2 py-1.5 text-left font-semibold text-slate-400">Date</th>
+                            <th className="px-2 py-1.5 text-left font-semibold text-slate-400">Ticket #</th>
+                            <th className="px-2 py-1.5 text-left font-semibold text-slate-400">Status</th>
+                            <th className="px-2 py-1.5 text-left font-semibold text-slate-400">Branch</th>
+                            <th className="px-2 py-1.5 text-left font-semibold text-slate-400">Address</th>
+                            <th className="px-2 py-1.5 text-right font-semibold text-slate-400">Mileage</th>
+                            <th className="px-2 py-1.5 text-left font-semibold text-slate-400">Source</th>
+                            <th className="px-2 py-1.5 text-left font-semibold text-slate-400">Map</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {techEntries.map((entry) => (
+                            <tr key={entry.id} className="border-b border-white/5 hover:bg-white/5">
+                              <td className="px-2 py-1.5 text-slate-300 whitespace-nowrap">{entry.workDate}</td>
+                              <td className="px-2 py-1.5">
+                                {entry.ticketNo ? (
+                                  <Link to="/ticket/$ticketNo" params={{ ticketNo: entry.ticketNo }} className="font-mono text-blue-400 hover:text-blue-300 hover:underline">
+                                    {entry.ticketNo}
+                                  </Link>
+                                ) : (
+                                  <span className="text-slate-500">—</span>
+                                )}
+                              </td>
+                              <td className="px-2 py-1.5" style={entry.ticketStatus ? mileageStatusStyle(entry.ticketStatus, repairStatusRows) : { color: "#64748b" }}>{entry.ticketStatus || "—"}</td>
+                              <td className="px-2 py-1.5 text-slate-300">{entry.branch}</td>
+                              <td className="px-2 py-1.5 text-slate-300">{entry.address}</td>
+                              <td className="px-2 py-1.5 text-right text-slate-300">{entry.totalMileage}</td>
+                              <td className="px-2 py-1.5">
+                                <span
+                                  className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold uppercase tracking-wide ${
+                                    entry.source === "auto" ? "bg-blue-500/20 text-blue-300" : "bg-slate-500/20 text-slate-400"
+                                  }`}
+                                >
+                                  {entry.source === "auto" ? "Auto" : "Manual"}
+                                </span>
+                              </td>
+                              <td className="px-2 py-1.5">
+                                {entry.googleMapLink ? (
+                                  <a href={entry.googleMapLink} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 underline">
+                                    Map link
+                                  </a>
+                                ) : (
+                                  <span className="text-slate-500">—</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {mileagePhotoModalEntry && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setMileagePhotoModalEntry(null)}
+        >
+          <div
+            className="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-xl border border-white/10 bg-slate-900 p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {(() => {
+              const entry = mileagePhotoModalEntry;
+              const photos = mileagePhotoModalPhotos;
+              return (
+                <>
+                  <div className="mb-4 flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-lg font-semibold text-white">
+                        {entry.ticketNo ? `Ticket ${entry.ticketNo}` : "Photos"}
+                      </h3>
+                      <p className="text-xs text-slate-400">
+                        {mileageRowName(entry)}
+                        {!mileagePhotoModalLoading && ` · ${photos.length} photo${photos.length === 1 ? "" : "s"}`}
+                      </p>
+                    </div>
+                    <button
+                      className="rounded-md border border-white/15 bg-slate-800/70 p-1.5 text-slate-300 hover:bg-slate-700"
+                      onClick={() => setMileagePhotoModalEntry(null)}
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+
+                  {mileagePhotoModalLoading ? (
+                    <p className="text-xs text-slate-500 py-1">Loading photos…</p>
+                  ) : photos.length === 0 ? (
+                    <p className="text-xs text-slate-500 py-1">No photos uploaded for this ticket.</p>
+                  ) : (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                      {photos.map((photo) => (
+                        <a
+                          key={photo.fullPath}
+                          href={photo.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title={photo.uploadedBy ? `Uploaded by ${photo.uploadedBy}` : undefined}
+                          className="block overflow-hidden rounded-lg border border-white/10 bg-black/20 hover:border-blue-400/50 transition"
+                        >
+                          <img src={photo.url} alt="" className="h-32 w-full object-cover" loading="lazy" />
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+          </div>
+        </div>
       )}
     </div>
   );

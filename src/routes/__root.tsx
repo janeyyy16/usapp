@@ -17,6 +17,7 @@ import { PasswordChangeReminder } from "@/components/PasswordChangeReminder";
 import { TicketSearchFab } from "@/components/TicketSearchFab";
 import { ModuleNavigator } from "@/components/ModuleNavigator";
 import { SystemDataInitializer } from "@/components/SystemDataInitializer";
+import { SessionKickedOutBanner } from "@/components/SessionKickedOutBanner";
 
 import appCss from "../styles.css?url";
 
@@ -134,7 +135,7 @@ function RootComponent() {
   const { queryClient } = Route.useRouteContext();
   const location = useLocation();
   const isLandingPage = location.pathname === "/landing" || location.pathname === "/announcements";
-  const isSuperAdminPage = location.pathname === "/superadmin";
+  const isSuperAdminPage = location.pathname === "/superadmin" || location.pathname.startsWith("/superadmin/company/");
   const isMobilePage = location.pathname === "/mobile";
   // Public custom-form fill page — no AHS account, so none of the
   // authenticated chrome below (announcement banner, ticket search, module
@@ -151,6 +152,7 @@ function RootComponent() {
         <AuthProvider>
           <SuperSuperAdminGuard />
           <SystemDataInitializer />
+          <SessionKickedOutBanner />
           <MustChangePasswordGate hideChrome={hideChrome} />
           {!hideChrome && <AnnouncementBanner />}
           {!hideChrome && <PasswordChangeReminder />}

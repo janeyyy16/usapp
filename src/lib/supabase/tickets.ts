@@ -657,6 +657,7 @@ function rowToVisit(row: any): UIVisit {
     by: row.created_by ?? "",
     scheduleDate: row.schedule_date ?? "",
     technician: row.technician ?? "",
+    secondTechnician: row.second_technician ?? "",
     timeSlot: row.time_slot ?? "",
     activity: row.activity ?? "",
     actionType: row.action_type ?? "",
@@ -679,7 +680,7 @@ function rowToVisit(row: any): UIVisit {
 }
 
 /** Resolve a ticket's internal UUID from its ticket number (company-scoped). */
-async function getTicketId(ticketNo: string): Promise<string | null> {
+export async function getTicketId(ticketNo: string): Promise<string | null> {
   const { data, error } = await supabase
     .from("tickets")
     .select("id")
@@ -898,6 +899,39 @@ export async function getLatestVisitTechnicianByTicketIds(
 }
 
 /**
+ * Bulk-fetch the latest Visit Log Triage Note for a set of tickets — used
+ * by the Ticket List's Triage Notes column. Same shape/rationale as
+ * `getLatestVisitTechnicianByTicketIds` right above: one query for the
+ * whole visible page instead of one per ticket, newest-first so the most
+ * recent visit's note wins. Returns a `Map<ticket_id, triageNote>` for
+ * tickets that have at least one visit with a non-empty triage note.
+ */
+export async function getLatestVisitTriageNoteByTicketIds(
+  ticketIds: string[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const uniq = Array.from(new Set(ticketIds.filter(Boolean)));
+  if (uniq.length === 0) return out;
+  const { data, error } = await supabase
+    .from("visits")
+    .select("ticket_id, triage_note, created_at")
+    .in("ticket_id", uniq)
+    .not("triage_note", "is", null)
+    .order("created_at", { ascending: false });
+  if (error) {
+    console.error("getLatestVisitTriageNoteByTicketIds error:", error.message);
+    return out;
+  }
+  for (const row of data ?? []) {
+    const tid = (row as any).ticket_id as string | null;
+    const note = String((row as any).triage_note ?? "").trim();
+    if (!tid || !note) continue;
+    if (!out.has(tid)) out.set(tid, note);
+  }
+  return out;
+}
+
+/**
  * Bulk-fetch full visit rows (not a derived summary) for a set of tickets,
  * keyed by ticket_id. Used by exports/reports that need the complete
  * Visit Log detail for many tickets at once — a single `.in()` query
@@ -981,6 +1015,7 @@ export async function addTicketVisit(ticketNo: string, visit: Partial<UIVisit>):
       ticket_id: ticketId,
       visit_no: visit.visitNo ?? null,
       technician: visit.technician ?? null,
+      second_technician: visit.secondTechnician ?? null,
       schedule_date: visit.scheduleDate || null,
       time_slot: visit.timeSlot ?? null,
       activity: visit.activity ?? null,
@@ -1013,6 +1048,7 @@ export async function updateTicketVisit(visitId: string, visit: Partial<UIVisit>
     .from("visits")
     .update({
       technician: visit.technician ?? null,
+      second_technician: visit.secondTechnician ?? null,
       schedule_date: visit.scheduleDate || null,
       time_slot: visit.timeSlot ?? null,
       activity: visit.activity ?? null,
@@ -1085,6 +1121,10 @@ export interface UIPartRow {
   cxPaid: string;
   createdBy: string;
   lastModifiedBy: string;
+  /** The distributor's own reference/account number for this order — see migration 0134. */
+  distributorNo: string;
+  /** Claim job code for this individual part line, distinct from a ticket's own job code (ticket_claim_details.jobCode). */
+  jobCode: string;
 }
 
 const numOrNull = (v: unknown) => {
@@ -1128,6 +1168,8 @@ function rowToPart(row: any): UIPartRow {
     cxPaid: row.cx_paid ? "Y" : "",
     createdBy: row.created_by ?? "",
     lastModifiedBy: row.last_modified_by ?? "",
+    distributorNo: row.distributor_no ?? "",
+    jobCode: row.job_code ?? "",
   };
 }
 
@@ -1159,6 +1201,8 @@ function partToColumns(part: Partial<UIPartRow>) {
     credit_no: part.creditNo ?? null,
     hold: part.hold === "Y" || part.hold === "Yes",
     cx_paid: part.cxPaid === "Y" || part.cxPaid === "Yes",
+    distributor_no: part.distributorNo ?? null,
+    job_code: part.jobCode ?? null,
   };
 }
 

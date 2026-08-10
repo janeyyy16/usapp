@@ -21,7 +21,7 @@ export const DASHBOARD_ROLE_GATES: Record<string, string[]> = {
   // View access matches expense-tracking (SUPERADMIN always bypasses per
   // hasDashboardAccess) — write access (scheduling/editing a trip) is
   // further restricted inside FlashTechCalendarPage.tsx itself and by the
-  // flash_tech_trips RLS policies (migration 0124) to just those three.
+  // flash_tech_trips RLS policies (migration 0126) to just those three.
   "flash-tech-calendar": ["ADMIN", "FINANCE"],
   // CSR_AGENT/CSR_TEAM_LEADER are allowed in here too even though the org-wide
   // overview is meant for CSR_MANAGER/Admin/BizOps — CSRDashboard.tsx itself

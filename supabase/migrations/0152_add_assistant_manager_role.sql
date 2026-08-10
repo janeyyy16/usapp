@@ -1,5 +1,5 @@
 -- =====================================================================
--- 0130_add_assistant_manager_role.sql
+-- 0152_add_assistant_manager_role.sql
 --
 -- Adds ASSISTANT_MANAGER to the profiles.role check constraint (see
 -- roleLabels.ts/ROLE_LABELS) — without this, assigning it as anyone's

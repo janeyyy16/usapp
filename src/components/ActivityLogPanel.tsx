@@ -14,6 +14,14 @@ import {
  * page's own (DASHBOARD_ROLE_GATES / ADMIN_MODULE_ROLES in
  * m.$module.$submodule.tsx), not this component's: whoever can see the
  * page can see its log and no one else can.
+ *
+ * The modal is portaled to document.body — some callers (e.g.
+ * AdminUserManagementPage.tsx) render this button inside a
+ * `backdrop-blur-*` panel, and `backdrop-filter` on an ancestor creates a
+ * new containing block for `position: fixed` descendants, same as
+ * `transform`/`filter`/`perspective`. Without the portal the "fixed"
+ * overlay gets trapped inside that panel's box instead of covering the
+ * real viewport.
  */
 export function ActivityLogPanel({ module, title = "Activity Log" }: { module: ActivityLogModule; title?: string }) {
   const [open, setOpen] = useState(false);

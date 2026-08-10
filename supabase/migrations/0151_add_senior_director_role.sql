@@ -1,5 +1,5 @@
 -- =====================================================================
--- 0129_add_senior_director_role.sql
+-- 0151_add_senior_director_role.sql
 --
 -- Adds SENIOR_DIRECTOR to the profiles.role check constraint (see
 -- roleLabels.ts/ROLE_LABELS) — without this, assigning it as anyone's
