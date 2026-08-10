@@ -553,7 +553,10 @@ function UserDetailsPage() {
             const v = (r || "").toUpperCase();
             return v === "ADMIN" || v === "SUPERADMIN" || v.includes("MANAGER");
           };
-          const eligible = all.filter((u) => [u.role, ...(u.extra_roles ?? [])].some(isManagerish));
+          // Deactivated accounts shouldn't be selectable as anyone's Direct
+          // Manager going forward — getCompanyUsers() returns them regardless
+          // of status, so this needs its own explicit is_active check.
+          const eligible = all.filter((u) => u.is_active && [u.role, ...(u.extra_roles ?? [])].some(isManagerish));
           setManagerCandidates(
             Array.from(new Set(eligible.map((u) => u.display_name || u.email).filter(Boolean))).sort((a, b) => a.localeCompare(b))
           );

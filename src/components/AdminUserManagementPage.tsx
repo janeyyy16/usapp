@@ -794,7 +794,10 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
   // matched against real profiles by display name — see resolveTeamLeadOrManager
   // in src/lib/notifyRouting.ts), so the option value is the display name.
   const managerCandidates = useMemo(() => {
-    const eligible = users.filter((u) => ["ADMIN", "SUPERADMIN"].includes((u.type || "").toUpperCase()) || (u.type || "").toUpperCase().includes("MANAGER"));
+    // Deactivated accounts shouldn't be selectable as anyone's manager going forward.
+    const eligible = users.filter(
+      (u) => u.isActive !== false && (["ADMIN", "SUPERADMIN"].includes((u.type || "").toUpperCase()) || (u.type || "").toUpperCase().includes("MANAGER"))
+    );
     return Array.from(new Set(eligible.map((u) => u.userName).filter(Boolean))).sort((a, b) => a.localeCompare(b));
   }, [users]);
 
