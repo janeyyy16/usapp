@@ -1476,14 +1476,6 @@ const adminMod: ModuleDef = {
       seed: () => ({}),
     },
     {
-      slug: "role-management",
-      title: "Role Management",
-      description: "Bulk-grant secondary roles across every user via a checkbox grid — stacks additional role-based access on top of each person's primary role without changing it.",
-      custom: "role-management" as any,
-      fields: [],
-      seed: () => ({}),
-    },
-    {
       slug: "accessibility-management",
       title: "Accessibility Management",
       description: "Pick a role and see (and edit) exactly which modules and submodules it can open — a live access matrix, not just a reference.",
