@@ -26,7 +26,6 @@ import { LayoutGrid } from "lucide-react";
 import { MODULES, type ModuleDef } from "@/lib/modules";
 import { useAuth } from "@/lib/auth";
 import { isModuleAllowed, isSubmoduleAllowed } from "@/lib/roleLabels";
-import { useRoleModuleAccessOverrides, resolveModuleAccessOverride } from "@/lib/supabase/roleModuleAccess";
 
 // Header's inner container in AppHeader: `max-w-[1400px] mx-auto px-6`.
 // We mirror those constants here so the floating navigator's right edge
@@ -91,11 +90,6 @@ export function ModuleNavigator() {
   const [activeModule, setActiveModule] = useState<ModuleDef | null>(null);
   const closeTimer = useRef<number | null>(null);
   const { right: rightPx, top: topPx } = useHeaderMetrics();
-  // Cosmetic only (not the security boundary — m.$module.$submodule.tsx's
-  // route gate is), so unlike there this never blocks render: while still
-  // loading this just falls back to today's isModuleAllowed/isSubmoduleAllowed
-  // filtering, then re-renders once the (session-cached) fetch resolves.
-  const overrides = useRoleModuleAccessOverrides() ?? [];
 
   useEffect(() => setMounted(true), []);
 
@@ -116,16 +110,7 @@ export function ModuleNavigator() {
   // see and click into Parts/Claims/Report/Admin from here even though
   // they'd be blocked on arrival. Filtering the strip itself, not just the
   // destination page, keeps what's hoverable in sync with what's allowed.
-  // A module-level role_module_access override (granted/denied as a whole)
-  // takes precedence; a submodule-only override doesn't by itself surface
-  // the parent module tile here (a minor discoverability gap, not a
-  // security one — the submodule link itself is still correctly filtered
-  // below wherever the module IS otherwise visible).
-  const visibleModules = MODULES.filter((m) => {
-    const override = resolveModuleAccessOverride(overrides, role, extraRoles, m.slug, "");
-    if (override !== undefined) return override;
-    return isModuleAllowed(role, m.slug, extraRoles);
-  });
+  const visibleModules = MODULES.filter((m) => isModuleAllowed(role, m.slug, extraRoles));
 
   const cancelClose = () => {
     if (closeTimer.current !== null) {
@@ -165,12 +150,9 @@ export function ModuleNavigator() {
               // another page's button (e.g. Flash Tech Calendar via Expense
               // Tracking) stays out of this quick-nav dropdown too — plus the
               // CSR allow-list, same as the module filter above.
-              const visibleSubmodules = m.submodules.filter((s) => {
-                if (s.hiddenFromGrid) return false;
-                const override = resolveModuleAccessOverride(overrides, role, extraRoles, m.slug, s.slug);
-                if (override !== undefined) return override;
-                return isSubmoduleAllowed(role, m.slug, s.slug, extraRoles);
-              });
+              const visibleSubmodules = m.submodules.filter(
+                (s) => !s.hiddenFromGrid && isSubmoduleAllowed(role, m.slug, s.slug, extraRoles)
+              );
               return (
                 <div
                   key={m.slug}

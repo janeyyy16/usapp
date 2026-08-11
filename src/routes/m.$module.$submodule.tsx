@@ -54,7 +54,6 @@ import { RepairStatusesPage } from "@/components/RepairStatusesPage";
 import { DataMigrationPage } from "@/components/DataMigrationPage";
 import { LoginSecurityPage } from "@/components/LoginSecurityPage";
 import { AccessibilityManagementPage } from "@/components/AccessibilityManagementPage";
-import { RoleManagementPage } from "@/components/RoleManagementPage";
 import { FlashTechCalendarPage } from "@/components/FlashTechCalendarPage";
 // Richer parts components pulled from the upstream usapp repo. Where they
 // overlap with the existing *Page wrappers above we prefer the upstream
@@ -76,12 +75,20 @@ import { AddBranchPage } from "@/components/AddBranchPage";
 import { canAccessUserManagement, getUserManagementRecord, canAccessAdminModule } from "@/lib/user-management";
 import { isSubmoduleAllowed, isCompanySuperAdminRole, isCsrRestrictedRole } from "@/lib/roleLabels";
 import { CompanySettingsPage } from "@/components/CompanySettingsPage";
-import { getDashboardRoleGate, hasDashboardAccess, ADMIN_MODULE_ROLES, USER_MANAGEMENT_ROLES, ALL_ROLES_ADMIN_SUBMODULES } from "@/lib/dashboardAccess";
-import { useRoleModuleAccessOverrides, resolveModuleAccessOverride } from "@/lib/supabase/roleModuleAccess";
+import { getDashboardRoleGate, hasDashboardAccess } from "@/lib/dashboardAccess";
+import { getModuleRoleGate } from "@/lib/moduleAccess";
+
+// Roles allowed into the admin module overall, and into User Management
+// specifically. Checked via hasDashboardAccess so a secondary role
+// (profiles.extra_roles) grants access too, not just the primary role —
+// e.g. a Parts Manager who's also been given Admin as a secondary role.
+const ADMIN_MODULE_ROLES = ["ADMIN", "SUPERADMIN"];
+const USER_MANAGEMENT_ROLES = ["HR", "MANAGER", "ADMIN", "SUPERADMIN"];
 import { getMyRoles } from "@/lib/supabase/users";
 import { ROLE_LABELS } from "@/lib/roleLabels";
 import { useEffect, useState } from "react";
 import { ReportHRDaily } from "@/components/ReportHRDaily";
+import { StaffListPage } from "@/components/StaffListPage";
 import { ReportHR } from "@/components/ReportHR";
 import { ReportCSRDaily } from "@/components/ReportCSRDaily";
 import { ReportClaimsDaily } from "@/components/ReportClaimsDaily";
@@ -156,25 +163,40 @@ function SubModule() {
   // whose PRIMARY role is Admin/SuperAdmin. Only fetch extra_roles when the
   // primary role alone doesn't already pass any of these three gates —
   // avoids an extra query on every ungated page load.
-  const dashboardAllowedRoles = mod.slug === "dashboard" ? getDashboardRoleGate(sub.slug) : null;
-  const roleGrantsQuick = !dashboardAllowedRoles || hasDashboardAccess(dashboardAllowedRoles, role, []);
+  //
+  // Raw override only (no Dashboard hardcoded-default folded in) — whether
+  // an admin has explicitly set this exact (module, submodule)'s allowed
+  // roles via Accessibility Management's Module Access by Role grid. When
+  // one exists it's AUTHORITATIVE and bypasses the CSR-department
+  // restriction below (isSubmoduleAllowed already covers both the
+  // module-level and submodule-level CSR checks in one call) — an admin
+  // who explicitly checked a role's box means it, even for a normally
+  // CSR-restricted role. Without an override, the CSR restriction (and,
+  // for Dashboard, its own hardcoded per-submodule default) still applies
+  // exactly as before this system existed.
+  const explicitModuleOverride = getModuleRoleGate(mod.slug, sub.slug);
+  // moduleAllowedRoles covers every module, not just Dashboard: the
+  // Dashboard module additionally has a hardcoded default per submodule
+  // (getDashboardRoleGate, DASHBOARD_ROLE_GATES) for when there's no
+  // company override; every other module has no hardcoded default, so
+  // null here (no override) means open to every role, same as before this
+  // system existed. This is purely additive on top of the admin-module/
+  // user-management/company-settings gates below — it can only narrow
+  // access further there, never grant access past one of those.
+  const moduleAllowedRoles = mod.slug === "dashboard" ? getDashboardRoleGate(sub.slug) : explicitModuleOverride;
+  const roleGrantsQuick = !moduleAllowedRoles || hasDashboardAccess(moduleAllowedRoles, role, []);
   const adminGrantsQuick = mod.slug !== "admin" || hasDashboardAccess(ADMIN_MODULE_ROLES, role, []);
   const userMgmtGrantsQuick = sub.custom !== "user-management" || hasDashboardAccess(USER_MANAGEMENT_ROLES, role, []);
   // CSR restriction is the mirror case — restricted based on primary role
   // alone (quick, no extraRoles) means a secondary non-CSR role could still
-  // lift it, so that also needs extraRoles resolved before deciding.
-  const csrGrantsQuick = !isCsrRestrictedRole(role);
+  // lift it, so that also needs extraRoles resolved before deciding. An
+  // explicit override settles it immediately regardless of role, same as
+  // the bypass below.
+  const csrGrantsQuick = Boolean(explicitModuleOverride) || !isCsrRestrictedRole(role);
   // company-settings is a RESTRICTION relative to the general admin-module
   // gate (plain ADMIN must NOT get in, only the per-company SUPERADMIN role)
   // so it always needs extraRoles resolved, not just when the quick check fails.
-  // Any role_module_access override anywhere in the company might be keyed
-  // to a SECONDARY role, so once any exist at all, extra_roles must be
-  // resolved even if the primary role alone already settles every hardcoded
-  // gate — otherwise an override tied only to someone's secondary role
-  // would silently never apply.
-  const overrides = useRoleModuleAccessOverrides();
-  const hasAnyOverrides = overrides !== null && overrides.length > 0;
-  const needsExtraRoles = (Boolean(dashboardAllowedRoles) && !roleGrantsQuick) || !adminGrantsQuick || !userMgmtGrantsQuick || !csrGrantsQuick || sub.custom === "company-settings" || hasAnyOverrides;
+  const needsExtraRoles = (Boolean(moduleAllowedRoles) && !roleGrantsQuick) || !adminGrantsQuick || !userMgmtGrantsQuick || !csrGrantsQuick || sub.custom === "company-settings";
   const [extraRoles, setExtraRoles] = useState<string[] | null>(null);
   useEffect(() => {
     if (!needsExtraRoles || !ready || !uid) return;
@@ -192,45 +214,12 @@ function SubModule() {
   // someone who only qualifies (or is only exempted from a restriction) via
   // a secondary role.
   if (needsExtraRoles && extraRoles === null) return null;
-  // Overrides are the real security boundary here (like extra_roles above)
-  // — wait for the one-time-per-session fetch before deciding anything, so
-  // an explicit deny/grant can never be missed by a flash of the old answer.
-  if (overrides === null) return null;
-
-  // An explicit role_module_access override always wins over every
-  // hardcoded gate below — see resolveModuleAccessOverride's doc comment.
-  // `undefined` (no override for this cell) falls through to today's rules,
-  // completely unchanged.
-  const overrideDecision = resolveModuleAccessOverride(overrides, role, extraRoles, mod.slug, sub.slug);
-  if (overrideDecision === false) {
-    return (
-      <>
-        <AppHeader />
-        <main className="flex-1 bg-slate-950 py-6">
-          <div className="max-w-4xl mx-auto px-6">
-            <div className="rounded-xl border border-white/15 bg-white/8 p-6 text-white backdrop-blur-md">
-              <h1 className="text-2xl font-bold">Access restricted</h1>
-              <p className="mt-2 text-sm text-slate-300">
-                Your role doesn't have access to {sub.title}.
-              </p>
-              <p className="mt-2 text-sm text-slate-400">
-                Current sign-in: {email}
-              </p>
-              <p className="mt-1 text-sm text-slate-400">
-                Your role: {role || "No role assigned"}
-              </p>
-            </div>
-          </div>
-        </main>
-        <Footer />
-      </>
-    );
-  }
 
   // CSR Agents/Team Leaders get a narrow allow-list (their own Dashboard
   // tools + Tickets) — this is what actually stops someone from bypassing
-  // the hidden tiles by typing the URL directly.
-  if (overrideDecision !== true && !isSubmoduleAllowed(role, mod.slug, sub.slug, extraRoles)) {
+  // the hidden tiles by typing the URL directly. Skipped entirely when an
+  // admin has explicitly overridden this exact submodule's roles.
+  if (!explicitModuleOverride && !isSubmoduleAllowed(role, mod.slug, sub.slug, extraRoles)) {
     return (
       <>
         <AppHeader />
@@ -259,6 +248,10 @@ function SubModule() {
   // role (extra_roles) of Admin/SuperAdmin both grant access.
   const hasAdminAccess = hasDashboardAccess(ADMIN_MODULE_ROLES, role, extraRoles);
 
+  // Carve-outs: a few admin-module pages are open to everyone since they're
+  // company-wide utilities (e.g. the internal team messenger).
+  const ALL_ROLES_ADMIN_SUBMODULES = new Set(["internal-message-support"]);
+
   // IT Tickets is also reachable from the Admin module (in addition to
   // Dashboard) — reuse the same DASHBOARD_ROLE_GATES allow-list so IT and
   // Senior-tier managers can open this one card without full Admin access;
@@ -266,7 +259,7 @@ function SubModule() {
   // (Senior Managers), and the it_tickets RLS policies enforce it either way.
   const hasItTicketsAccess = sub.custom === "it-tickets" && hasDashboardAccess(getDashboardRoleGate("it-tickets") || [], role, extraRoles);
 
-  if (overrideDecision !== true && mod.slug === "admin" && !hasAdminAccess && !hasItTicketsAccess && !ALL_ROLES_ADMIN_SUBMODULES.has(sub.slug)) {
+  if (mod.slug === "admin" && !hasAdminAccess && !hasItTicketsAccess && !ALL_ROLES_ADMIN_SUBMODULES.has(sub.slug)) {
     return (
       <>
         <AppHeader />
@@ -295,7 +288,7 @@ function SubModule() {
   // secondary-role logic as the admin gate above.
   const hasUserManagementAccess = hasDashboardAccess(USER_MANAGEMENT_ROLES, role, extraRoles);
   
-  if (overrideDecision !== true && sub.custom === "user-management" && !hasUserManagementAccess) {
+  if (sub.custom === "user-management" && !hasUserManagementAccess) {
     return (
       <>
         <AppHeader />
@@ -325,7 +318,7 @@ function SubModule() {
   // as a superset) gets in, NOT a plain ADMIN.
   const hasCompanySettingsAccess = isCompanySuperAdminRole(role, extraRoles);
 
-  if (overrideDecision !== true && sub.custom === "company-settings" && !hasCompanySettingsAccess) {
+  if (sub.custom === "company-settings" && !hasCompanySettingsAccess) {
     return (
       <>
         <AppHeader />
@@ -356,12 +349,12 @@ function SubModule() {
     return <Outlet />;
   }
 
-  // Dashboard-page role gate resolution (extra_roles fetch already awaited
-  // above, alongside the admin/user-management gates).
-  const dashboardAccessOk = !dashboardAllowedRoles || roleGrantsQuick || hasDashboardAccess(dashboardAllowedRoles, role, extraRoles);
+  // Module/submodule role gate resolution (extra_roles fetch already
+  // awaited above, alongside the admin/user-management gates).
+  const moduleAccessOk = !moduleAllowedRoles || roleGrantsQuick || hasDashboardAccess(moduleAllowedRoles, role, extraRoles);
 
-  if (overrideDecision !== true && dashboardAllowedRoles && !dashboardAccessOk) {
-    const allowedLabels = dashboardAllowedRoles.map((r) => ROLE_LABELS[r] || r).join(", ");
+  if (moduleAllowedRoles && !moduleAccessOk) {
+    const allowedLabels = moduleAllowedRoles.map((r) => ROLE_LABELS[r] || r).join(", ");
     return (
       <>
         <AppHeader />
@@ -525,6 +518,8 @@ function SubModule() {
         ? <CSRStatusSummary mod={mod} sub={sub} />
         : (sub as any).custom === "hr-dashboard"
         ? <ReportHRDaily mod={mod} sub={sub} />
+        : sub.custom === "staff-list"
+        ? <StaffListPage mod={mod} sub={sub} />
         : sub.custom === "work-map"
         ? <TicketsMapWorkMap mod={mod} sub={sub} />
         : sub.custom === "part-order"
@@ -541,8 +536,6 @@ function SubModule() {
         ? <DataMigrationPage mod={mod} sub={sub} />
         : (sub as any).custom === "login-security"
         ? <LoginSecurityPage mod={mod} sub={sub} />
-        : (sub as any).custom === "role-management"
-        ? <RoleManagementPage mod={mod} sub={sub} />
         : (sub as any).custom === "accessibility-management"
         ? <AccessibilityManagementPage mod={mod} sub={sub} />
         : (sub as any).custom === "flash-tech-calendar"

@@ -20,6 +20,14 @@ function roleDisplay(role: string | null | undefined): string {
   return ROLE_LABELS[normalizeRole(role)] || role;
 }
 
+/** 0 = Super Admin, 1 = Admin, 2 = everyone else — for sorting the Hierarchy tree's root row so Super Admin always leads, then Admin, per the requested chart order. */
+function topTierRank(record: UserManagementRecord): number {
+  const role = normalizeRole(record.type);
+  if (role === "SUPERADMIN") return 0;
+  if (role === "ADMIN") return 1;
+  return 2;
+}
+
 type ViewMode = "list" | "hierarchy";
 
 interface NewUserFormData {
@@ -397,40 +405,65 @@ const EMPTY_ANCESTORS: ReadonlySet<string> = new Set();
 
 /**
  * One row of the Hierarchy tree, recursing into its own direct reports.
- * A manager gets a filled dot + its children indented under a connecting
+ * A manager gets a chevron + its children indented under a connecting
  * line; a leaf (no reports) just gets a short tick mark — same visual
  * language as a standard file/org-chart tree. `ancestors` guards against a
  * bad manager chain (e.g. two people accidentally set as each other's
  * manager) recursing forever — free-text manager names have no DB
  * constraint stopping that.
+ *
+ * Root-level nodes (isRoot) start COLLAPSED — with up to ~200 people in
+ * one tree, a single huge branch (e.g. everyone under one Super Admin)
+ * would otherwise push every OTHER root far down the page before it even
+ * renders, making them impossible to find without first scrolling past
+ * the whole thing. Non-root nodes still default open, matching this
+ * tree's previous always-expanded behavior once you've opened a root.
  */
 function HierarchyTreeNode({
-  record, childrenByManagerName, moduleSlug, submoduleSlug, ancestors,
+  record, childrenByManagerName, moduleSlug, submoduleSlug, ancestors, isRoot, subtreeSize,
 }: {
   record: UserManagementRecord;
   childrenByManagerName: Map<string, UserManagementRecord[]>;
   moduleSlug: string;
   submoduleSlug: string;
   ancestors: ReadonlySet<string>;
+  isRoot?: boolean;
+  subtreeSize: (userName: string) => number;
 }) {
   const children = ancestors.has(record.userName) ? [] : (childrenByManagerName.get(record.userName) ?? []);
   const hasChildren = children.length > 0;
   const childAncestors = useMemo(() => new Set(ancestors).add(record.userName), [ancestors, record.userName]);
+  const [expanded, setExpanded] = useState(!isRoot);
 
   return (
     <div>
       <div className="flex items-center gap-2.5 py-1.5">
-        <div className="flex h-4 w-4 shrink-0 items-center justify-center">
-          {hasChildren ? <span className="h-2 w-2 rounded-full bg-blue-400" /> : <span className="h-px w-2.5 bg-white/25" />}
-        </div>
+        <button
+          type="button"
+          onClick={() => hasChildren && setExpanded((e) => !e)}
+          disabled={!hasChildren}
+          aria-label={hasChildren ? (expanded ? "Collapse" : "Expand") : undefined}
+          className="flex h-4 w-4 shrink-0 items-center justify-center disabled:cursor-default"
+        >
+          {hasChildren ? (
+            <ChevronDown className={`h-3 w-3 text-blue-400 transition-transform ${expanded ? "rotate-180" : ""}`} />
+          ) : (
+            <span className="h-px w-2.5 bg-white/25" />
+          )}
+        </button>
         <div className="flex items-baseline gap-1.5 min-w-0">
           <UserLink moduleSlug={moduleSlug} submoduleSlug={submoduleSlug} userId={record.loginName}>
             {record.userName}
           </UserLink>
           <span className="text-xs text-slate-400 whitespace-nowrap">({roleDisplay(record.type)})</span>
+          {hasChildren && !expanded && (
+            <span className="text-xs text-slate-500 whitespace-nowrap">
+              — {subtreeSize(record.userName)} {subtreeSize(record.userName) === 1 ? "report" : "reports"} total
+            </span>
+          )}
         </div>
       </div>
-      {hasChildren && (
+      {hasChildren && expanded && (
         <div className="ml-[7px] border-l border-white/15 pl-[17px]">
           {children.map((child) => (
             <HierarchyTreeNode
@@ -440,6 +473,7 @@ function HierarchyTreeNode({
               moduleSlug={moduleSlug}
               submoduleSlug={submoduleSlug}
               ancestors={childAncestors}
+              subtreeSize={subtreeSize}
             />
           ))}
         </div>
@@ -758,7 +792,11 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
   }, [activeForHierarchy]);
 
   // Built straight from manager_name — no synthetic edges. A root here
-  // only ever gets the reports it actually, really has.
+  // only ever gets the reports it actually, really has. A Super Admin/Admin
+  // with a real manager (any role — a Super Admin can genuinely report to
+  // a Manager) nests there exactly like anyone else; role only decides
+  // where the ROOTS themselves sort (see hierarchyRoots), never whether
+  // someone with a real manager gets nested.
   const childrenByManagerName = useMemo(() => {
     const map = new Map<string, UserManagementRecord[]>();
     activeForHierarchy.forEach((record) => {
@@ -785,15 +823,19 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
 
   // Roots (no manager set, or manager isn't a real active user in view) are
   // NEVER nested under each other — that would show a false reporting line
-  // for people who don't actually report to that person. They just sort so
-  // whoever has the biggest real reporting chain underneath them (not role
-  // — an Admin/Super Admin with no reports sorts like anyone else) leads
-  // the list; everyone else still follows, biggest-chain-first, then name.
+  // for people who don't actually report to that person; anyone with a
+  // real manager nests there regardless of their own role (see
+  // childrenByManagerName). Sorted Super Admin first, then Admin, per the
+  // requested chart order; within the same tier (and for everyone else)
+  // whoever has the biggest real reporting chain underneath them leads,
+  // then name.
   const hierarchyRoots = useMemo(
     () =>
       activeForHierarchy
         .filter((record) => !record.manager || !usersByName.has(record.manager))
         .sort((a, b) => {
+          const tierDiff = topTierRank(a) - topTierRank(b);
+          if (tierDiff !== 0) return tierDiff;
           const diff = subtreeSize(b.userName) - subtreeSize(a.userName);
           if (diff !== 0) return diff;
           return a.userName.localeCompare(b.userName);
@@ -1258,6 +1300,8 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
                   moduleSlug={mod.slug}
                   submoduleSlug={sub.slug}
                   ancestors={EMPTY_ANCESTORS}
+                  subtreeSize={subtreeSize}
+                  isRoot
                 />
               ))
             )}
