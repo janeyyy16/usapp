@@ -537,7 +537,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   // One connection per region (US/PH each send payslips from their own
   // connected Gmail account) — keyed the same way as the currency toggle.
   // Deliberately narrower than GmailRegion itself (which also allows
-  // "PARTS" as of migration 0171, for the ticket page's own independent
+  // "PARTS" as of migration 0168, for the ticket page's own independent
   // Parts/Drop-Ship connection) — this Payroll UI only ever manages US/PH.
   const [gmailStatusByRegion, setGmailStatusByRegion] = useState<Record<"US" | "PH", GmailConnectionStatus | null>>({ US: null, PH: null });
   const [connectingGmailRegion, setConnectingGmailRegion] = useState<GmailRegion | null>(null);

@@ -14,6 +14,8 @@ export interface PartCollectionRow {
   techName: string;
   ticketNo: string;
   repairStatus: string;
+  /** The ticket's branch/location — drives the Parts hub's per-branch "Done" digest routing. */
+  location: string;
   partNo: string;
   description: string;
   uniqueId: string;
@@ -30,8 +32,6 @@ export interface PartCollectionRow {
   collected: boolean;
   collectedDate: string;
   scheduleDate: string;
-  /** The ticket's branch/location — drives the Parts hub's per-branch "Done" digest routing. */
-  location: string;
 }
 
 // Suggests a Collect Type from the part's own status, per the rules the
@@ -76,6 +76,7 @@ export async function getPartsForDailyCollection(filters: {
     techName: row.tickets?.technician || "",
     ticketNo: row.tickets?.ticket_no || "",
     repairStatus: row.tickets?.status || "",
+    location: row.tickets?.location || "",
     partNo: row.part_no || "",
     description: row.part_desc || "",
     uniqueId: String(row.id).slice(0, 8),
@@ -92,7 +93,6 @@ export async function getPartsForDailyCollection(filters: {
     collected: row.collected === true,
     collectedDate: row.collected_date || "",
     scheduleDate: row.tickets?.schedule_date || "",
-    location: row.tickets?.location || "",
   }));
 
   return rows.filter((r) => {

@@ -1,5 +1,5 @@
 -- =====================================================================
--- 0165 — Backdated warnings/mistakes: employee_conduct_notes.occurred_at.
+-- 0164 — Backdated warnings/mistakes: employee_conduct_notes.occurred_at.
 --
 -- Lets HR log a warning that happened before this system existed (paper
 -- form, verbal, etc.) with its real historical date, without lying about
@@ -8,7 +8,7 @@
 -- Null for every note entered the normal way (the two stay identical in
 -- practice for those), only set on backfilled historical entries.
 --
--- Run once in the Supabase SQL Editor, after 0164.
+-- Run once in the Supabase SQL Editor, after 0163.
 -- =====================================================================
 
 alter table employee_conduct_notes add column if not exists occurred_at timestamptz;

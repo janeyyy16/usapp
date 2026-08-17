@@ -1,5 +1,5 @@
 -- =====================================================================
--- 0166 — Add 'executive' to hr_signable_documents.recipient_slot.
+-- 0165 — Add 'executive' to hr_signable_documents.recipient_slot.
 --
 -- The new Employee Promotion / Role Change form (ReportHRDaily.tsx,
 -- promotionFormTemplate.ts) routes through 5 signers — Employee, Direct
@@ -8,7 +8,7 @@
 -- Same shared hr_signable_documents table/workflow, just widening the
 -- allowed slot values so 'executive' can be used as a recipient_slot.
 --
--- Run once in the Supabase SQL Editor, after 0165.
+-- Run once in the Supabase SQL Editor, after 0164.
 -- =====================================================================
 
 alter table hr_signable_documents drop constraint if exists hr_signable_documents_recipient_slot_check;

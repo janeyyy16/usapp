@@ -5,10 +5,11 @@ import { ChevronLeft, Printer, Save, CheckCircle, Loader2, Undo2, ScanLine } fro
 import { LOCATIONS } from "@/lib/locations";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 import { useAuth } from "@/lib/auth";
-import { sendNotificationToRole } from "@/lib/firebase/notifications";
 import { getCompanyTechnicians } from "@/lib/supabase/users";
-import { getPartsForDailyCollection, updatePartCollectionRow, suggestCollectType, type PartCollectionRow } from "@/lib/supabase/partDailyCollection";
 import { addPendingDoneItem, removePendingDoneItem } from "@/lib/partsDoneQueue";
+import { getEffectiveNotificationRoles } from "@/lib/supabase/notificationRoleGates";
+import { notifyPartsManagers } from "@/lib/partsNotify";
+import { getPartsForDailyCollection, updatePartCollectionRow, suggestCollectType, type PartCollectionRow } from "@/lib/supabase/partDailyCollection";
 
 const PARTS_DONE_QUEUE_SOURCE = "Part Daily Collection";
 
@@ -26,6 +27,8 @@ function getDefaultCollectionDate() {
   else d.setDate(d.getDate() - 1);
   return d.toISOString().slice(0, 10);
 }
+const COLS=["Technician","Picked Up","Collected","Part No","Description","Unique ID","Core Value","Ticket #","Repair Status","Qty","Used Qty","Restock Qty","Collect Type","Lot #","Comment","Part Status","Action"];
+
 export function PartDailyCollection({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
   const { companyId } = useAuth();
   const [location,setLocation]=useState("");const [locOpen,setLocOpen]=useState(false);
@@ -82,13 +85,14 @@ export function PartDailyCollection({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
         removePendingDoneItem(PARTS_DONE_QUEUE_SOURCE, id);
         return { ...r, collected: false, collectedDate: "" };
       }
-      addPendingDoneItem(PARTS_DONE_QUEUE_SOURCE, id, `${r.partNo || id} (Ticket ${r.ticketNo || "—"})`, r.location);
-      return {
+      const next = {
         ...r,
         collected: true,
         collectedDate: TODAY,
         collectType: r.collectType || suggestCollectType(r.partStatus),
       };
+      addPendingDoneItem(PARTS_DONE_QUEUE_SOURCE, id, `${next.partNo || next.id} (Ticket ${next.ticketNo || "—"})`, next.location);
+      return next;
     }));
   };
 
@@ -110,10 +114,14 @@ export function PartDailyCollection({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
   };
 
   // When collect type is set to "Restock" and saved, fire a notification
-  // to the Parts Manager role that this part is back in stock.
+  // to the Parts Manager role that this part is back in stock. Configurable
+  // via Accessibility Management > Notification Access by Role (trigger
+  // "parts_restock") — defaults to Parts Manager. Per-user opt-outs (same
+  // page's opt-out grid) apply too.
   const notifyRestock = useCallback(async (row: PartCollectionRow) => {
     try {
-      await sendNotificationToRole("Parts Manager", companyId ?? "", {
+      const roles = await getEffectiveNotificationRoles("parts_restock");
+      await notifyPartsManagers(companyId, roles, "parts_restock", {
         kind: "restock_auto",
         title: "Part back in stock",
         body: `Ticket ${row.ticketNo} — part ${row.partNo} marked as Restock by tech ${row.techName || "unknown"}.`,
@@ -161,8 +169,6 @@ export function PartDailyCollection({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
     if(dtOpen&&!dtD.ref.current?.contains(t)&&!dtL.current?.contains(t))setDtOpen(false);
     if(ctOpen&&!ctD.ref.current?.contains(t)&&!ctL.current?.contains(t))setCtOpen(false);
   };document.addEventListener("mousedown",fn);return()=>document.removeEventListener("mousedown",fn);},[locOpen,techOpen,dtOpen,ctOpen]);
-
-  const COLS=["Technician","Picked Up","Collected","Part No","Description","Unique ID","Core Value","Ticket #","Repair Status","Qty","Used Qty","Restock Qty","Collect Type","Lot #","Comment","Part Status","Action"];
 
   return(<div className="min-h-screen flex flex-col"><main className="flex-1 max-w-[1600px] mx-auto w-full px-6 py-8">
     <div className="flex items-center gap-3 mb-6"><Link to="/m/$module" params={{ module: "parts" }} className="btn hover:bg-white/15"><ChevronLeft className="h-4 w-4"/></Link><h1 className="text-2xl font-bold">{sub.title}</h1></div>
