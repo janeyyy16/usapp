@@ -247,7 +247,12 @@ export async function backfillTicketLocations(): Promise<{ scanned: number; upda
     throw new Error(error.message);
   }
 
-  const rows = (data ?? []) as Array<{
+  // Supabase's generated types default the customers join to array
+  // cardinality without an explicit relationship hint, but this is a
+  // genuine one-to-one (tickets.customer_id -> customers.id) — the code
+  // below has always read it as a single object, matching the real
+  // runtime shape.
+  const rows = (data ?? []) as unknown as Array<{
     id: string;
     location: string | null;
     customer: { zip: string | null; city: string | null; state: string | null } | null;

@@ -14,9 +14,15 @@ import type { RFAPart, RFARequest } from '@/types/servicePower';
 interface ServicePowerIntegrationProps {
   ticketNo: string;
   callNumber: string;
+  manufacturerName: string;
 }
 
-export function ServicePowerIntegration({ ticketNo, callNumber }: ServicePowerIntegrationProps) {
+// ClaimStatusSection doesn't need manufacturerName (it only checks status,
+// never submits an RFA) — its own narrower prop type instead of widening
+// ServicePowerIntegrationProps for a field only Authorization Requests use.
+type ClaimStatusSectionProps = Omit<ServicePowerIntegrationProps, "manufacturerName">;
+
+export function ServicePowerIntegration({ ticketNo, callNumber, manufacturerName }: ServicePowerIntegrationProps) {
   const [activeTab, setActiveTab] = useState<'rfa' | 'claim'>('rfa');
 
   return (
@@ -45,7 +51,7 @@ export function ServicePowerIntegration({ ticketNo, callNumber }: ServicePowerIn
       </div>
 
       {activeTab === 'rfa' ? (
-        <AuthorizationRequestSection ticketNo={ticketNo} callNumber={callNumber} />
+        <AuthorizationRequestSection ticketNo={ticketNo} callNumber={callNumber} manufacturerName={manufacturerName} />
       ) : (
         <ClaimStatusSection ticketNo={ticketNo} callNumber={callNumber} />
       )}
@@ -57,7 +63,7 @@ export function ServicePowerIntegration({ ticketNo, callNumber }: ServicePowerIn
 // Authorization Request Section
 // ============================================================================
 
-function AuthorizationRequestSection({ ticketNo, callNumber }: ServicePowerIntegrationProps) {
+function AuthorizationRequestSection({ ticketNo, callNumber, manufacturerName }: ServicePowerIntegrationProps) {
   const [showForm, setShowForm] = useState(false);
   const [rfaStatus, setRfaStatus] = useState<RFARequest | null>(null);
   const [loading, setLoading] = useState(false);
@@ -90,6 +96,7 @@ function AuthorizationRequestSection({ ticketNo, callNumber }: ServicePowerInteg
         </Button>
         <AuthorizationRequestForm
           callNumber={callNumber}
+          manufacturerName={manufacturerName}
           onSuccess={() => {
             setShowForm(false);
             checkStatus();
@@ -222,9 +229,11 @@ function AuthorizationStatusDisplay({ rfa }: { rfa: RFARequest }) {
 
 function AuthorizationRequestForm({
   callNumber,
+  manufacturerName,
   onSuccess
 }: {
   callNumber: string;
+  manufacturerName: string;
   onSuccess: () => void;
 }) {
   const [loading, setLoading] = useState(false);
@@ -252,6 +261,7 @@ function AuthorizationRequestForm({
       
       const response = await client.createRFA({
         callNumber,
+        manufacturerName,
         coreInfo: {
           additionalManRequired: formData.additionalManRequired ? 'Y' : 'N',
           estimatedHoursOnJob: formData.estimatedHours,
@@ -383,7 +393,7 @@ function AuthorizationRequestForm({
 // Claim Status Section
 // ============================================================================
 
-function ClaimStatusSection({ ticketNo, callNumber }: ServicePowerIntegrationProps) {
+function ClaimStatusSection({ ticketNo, callNumber }: ClaimStatusSectionProps) {
   // Implementation would be similar to Authorization section
   // but using claims retrieval API
   return (

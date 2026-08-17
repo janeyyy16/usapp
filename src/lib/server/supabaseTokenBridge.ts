@@ -31,7 +31,7 @@ const GOOGLE_JWK_URL =
   "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
 
 // ---- base64url helpers (no Buffer; Worker-safe) ----
-function b64urlToBytes(input: string): Uint8Array {
+function b64urlToBytes(input: string): Uint8Array<ArrayBuffer> {
   const b64 = input.replace(/-/g, "+").replace(/_/g, "/");
   const pad = b64.length % 4 === 0 ? "" : "=".repeat(4 - (b64.length % 4));
   const bin = atob(b64 + pad);
