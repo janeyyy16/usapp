@@ -149,58 +149,35 @@ export function splitPayPeriod(
     ];
   }
 
-  // Distribute hours across portions
-  const daysPeriod = getDayCount(periodStart, periodEnd);
-  const portions: PayrollPeriodPortion[] = [];
+  // Distribute hours across portions, proportional to each portion's share
+  // of calendar days in the period. periodEnd is itself a worked day, so the
+  // total (and the final portion, which is the only one that actually ends
+  // AT periodEnd) count it inclusively (+1); portions that end AT a salary
+  // change's effective date stay exclusive of it, since that date's hours
+  // belong to the portion AFTER the change, not before.
+  const daysPeriod = getDayCount(periodStart, periodEnd) + 1;
+  const boundaries: { startDate: Date; endDate: Date; rate: number; isLast: boolean }[] = [];
 
-  // Add portion before first salary change
   const firstChange = salaryChanges[0];
-  const daysBeforeChange = getDayCount(periodStart, firstChange.effectiveDate);
-  const hoursBeforeChange = (daysBeforeChange / daysPeriod) * totalHoursWorked;
-  const rateBeforeChange = getEffectiveRate(salaryHistory, periodStart);
-
-  portions.push({
-    periodName: `Before Promotion (${periodStart.toLocaleDateString()} - ${firstChange.effectiveDate.toLocaleDateString()})`,
+  boundaries.push({
     startDate: periodStart,
     endDate: firstChange.effectiveDate,
-    hoursWorked: hoursBeforeChange,
-    hourlyRate: rateBeforeChange,
-    regularPay: calculateRegularPay(hoursBeforeChange, rateBeforeChange),
-    overtimePay: calculateOvertimePay(hoursBeforeChange, rateBeforeChange),
-    totalPay:
-      calculateRegularPay(hoursBeforeChange, rateBeforeChange) +
-      calculateOvertimePay(hoursBeforeChange, rateBeforeChange),
+    rate: getEffectiveRate(salaryHistory, periodStart),
+    isLast: false,
   });
 
-  // Add portion after first salary change (and before any others, or to end)
   let currentChangeIndex = 0;
   let currentChangeDate = firstChange.effectiveDate;
   let currentRate = firstChange.hourlyRate;
 
   while (currentChangeIndex < salaryChanges.length) {
     const nextChangeIndex = currentChangeIndex + 1;
-    const nextChangeDate =
-      nextChangeIndex < salaryChanges.length
-        ? salaryChanges[nextChangeIndex].effectiveDate
-        : periodEnd;
+    const isLast = nextChangeIndex >= salaryChanges.length;
+    const nextChangeDate = isLast ? periodEnd : salaryChanges[nextChangeIndex].effectiveDate;
 
-    const daysInPortion = getDayCount(currentChangeDate, nextChangeDate);
-    const hoursInPortion = (daysInPortion / daysPeriod) * totalHoursWorked;
+    boundaries.push({ startDate: currentChangeDate, endDate: nextChangeDate, rate: currentRate, isLast });
 
-    portions.push({
-      periodName: `After Change (${currentChangeDate.toLocaleDateString()} - ${nextChangeDate.toLocaleDateString()})`,
-      startDate: currentChangeDate,
-      endDate: nextChangeDate,
-      hoursWorked: hoursInPortion,
-      hourlyRate: currentRate,
-      regularPay: calculateRegularPay(hoursInPortion, currentRate),
-      overtimePay: calculateOvertimePay(hoursInPortion, currentRate),
-      totalPay:
-        calculateRegularPay(hoursInPortion, currentRate) +
-        calculateOvertimePay(hoursInPortion, currentRate),
-    });
-
-    if (nextChangeIndex < salaryChanges.length) {
+    if (!isLast) {
       currentRate = salaryChanges[nextChangeIndex].hourlyRate;
       currentChangeDate = nextChangeDate;
       currentChangeIndex = nextChangeIndex;
@@ -209,7 +186,36 @@ export function splitPayPeriod(
     }
   }
 
-  return portions;
+  // Overtime is computed period-wide, not per portion — capping each
+  // portion at the 40hr threshold independently would mean a split period
+  // (where every individual portion is usually well under 40 hours) could
+  // never actually trigger overtime, even when the total hours worked
+  // across the whole period exceeds it. Any hours over the threshold are
+  // paid as a premium on top, at the rate in effect for the most recent
+  // (last) portion.
+  const overtimeHours = Math.max(0, totalHoursWorked - OVERTIME_THRESHOLD);
+
+  return boundaries.map((b) => {
+    const days = getDayCount(b.startDate, b.endDate) + (b.isLast ? 1 : 0);
+    const hoursWorked = (days / daysPeriod) * totalHoursWorked;
+    const regularPay = Number((hoursWorked * b.rate).toFixed(2));
+    const overtimePay = b.isLast && overtimeHours > 0
+      ? Number((overtimeHours * b.rate * OVERTIME_MULTIPLIER).toFixed(2))
+      : 0;
+
+    return {
+      periodName: b.startDate.getTime() === periodStart.getTime()
+        ? `Before Promotion (${b.startDate.toLocaleDateString()} - ${b.endDate.toLocaleDateString()})`
+        : `After Change (${b.startDate.toLocaleDateString()} - ${b.endDate.toLocaleDateString()})`,
+      startDate: b.startDate,
+      endDate: b.endDate,
+      hoursWorked,
+      hourlyRate: b.rate,
+      regularPay,
+      overtimePay,
+      totalPay: regularPay + overtimePay,
+    };
+  });
 }
 
 /**

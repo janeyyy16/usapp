@@ -129,7 +129,7 @@ describe('Payroll Calculations', () => {
 
     it('should round to 2 decimal places', () => {
       const pay = calculateRegularPay(37.33, 7.77);
-      expect(pay).toBe(290.02);
+      expect(pay).toBe(290.05); // 37.33 * 7.77 = 290.0541
     });
   });
 
