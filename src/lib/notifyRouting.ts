@@ -6,7 +6,7 @@
 
 import { getCsrTeamComposition, type CsrTeamComposition } from "@/lib/supabase/csrTeams";
 import type { ProfileRow } from "@/lib/supabase/users";
-import { isAttendanceManagerTierRole } from "@/lib/roleLabels";
+import { isAttendanceManagerTierRole, isAttendanceFullAccessRole } from "@/lib/roleLabels";
 
 const CSR_ROLES = new Set(["CSR", "CSR_AGENT", "CSR_TEAM_LEADER", "CSR_MANAGER"]);
 
@@ -52,13 +52,27 @@ export async function resolveTeamLeadOrManager(
  * profile ids a manager-tier viewer (see isAttendanceManagerTierRole) may
  * see — their own row, anyone whose manager_name resolves to them, and (for
  * CSR Manager/Team Leader) anyone on a CSR team they lead.
+ *
+ * Individual-contributor roles (neither full-access nor manager-tier) are
+ * scoped to just their own row — never null/unrestricted. This page is
+ * normally only reachable by full-access or manager-tier roles (see
+ * DASHBOARD_ROLE_GATES["attendance-monitoring"] in dashboardAccess.ts), but
+ * a company can widen that via Accessibility Management's Module Access by
+ * Role grid to let e.g. a CSR Agent or Technician check their own request
+ * status — falling through to unrestricted here would leak the whole
+ * company's corrections/PTO/history to them instead.
  */
 export function visibleAttendanceProfileIds(
   viewer: ProfileRow,
   allProfiles: ProfileRow[],
   csrComposition: CsrTeamComposition | null
 ): Set<string> | null {
-  if (!isAttendanceManagerTierRole(viewer.role, viewer.extra_roles)) return null;
+  // Full-access roles win even if the same profile ALSO holds a manager-tier
+  // role somewhere (primary or extra) — e.g. a real HR profile with
+  // extra_roles ["MANAGER", "ADMIN"] must still see the whole company, not
+  // just their own direct reports.
+  if (isAttendanceFullAccessRole(viewer.role, viewer.extra_roles)) return null;
+  if (!isAttendanceManagerTierRole(viewer.role, viewer.extra_roles)) return new Set([viewer.id]);
 
   const ids = new Set<string>([viewer.id]);
   const viewerName = (viewer.display_name || "").trim().toLowerCase();

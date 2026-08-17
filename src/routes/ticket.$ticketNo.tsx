@@ -2,11 +2,13 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { AppHeader } from "@/components/Header";
 import { Footer } from "@/components/Footer";
-import { savePartOrder, createPartOrderFromTicket, placeMarconeOrder, isMarconeDist, type MarconeOrderPayload, type ShipToAddress } from "@/lib/supabase/partOrders";
+import { savePartOrder, createPartOrderFromTicket, placeMarconeOrder, isMarconeDist, placeEncompassOrder, isEncompassDist, type MarconeOrderPayload, type ShipToAddress } from "@/lib/supabase/partOrders";
 import { getPartAddresses, getLocations } from "@/lib/supabase/locationManagement";
 import { Copy, Map as MapIcon, CalendarDays, Send, ExternalLink, Pencil, Lock, Smartphone, ClipboardCheck, ChevronDown } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { isFirebaseReady } from "@/lib/firebase/config";
+import { isFirebaseReady, auth as firebaseAuth } from "@/lib/firebase/config";
+import { getGmailConnectionStatus, disconnectGmail, type GmailConnectionStatus, type GmailRegion } from "@/lib/supabase/gmailConnection";
+import { getRecentDropshipRecipients, recordDropshipRecipient, type DropshipRecipient } from "@/lib/supabase/dropshipRecipients";
 import { useIsPhone } from "@/lib/device";
 import { TicketPhotos } from "@/components/TicketPhotos";
 import { MarconePartsOrderModal, type AddressBookEntry, type MarconePartLine } from "@/components/MarconePartsOrderModal";
@@ -691,6 +693,7 @@ const PART_STATUS_TEXT_COLOR: Record<string, string> = {
 
   "Back Order": "text-slate-400",
   "Defective": "text-slate-400",
+  "Dropship": "text-slate-400",
   "Hold for Estimation": "text-slate-400",
   "In Review": "text-slate-400",
   "Not Used & Stocked": "text-slate-400",
@@ -1212,6 +1215,41 @@ function TicketDetailsPage() {
   const [isPartModalOpen, setIsPartModalOpen] = useState(false);
   const [viewingPartEntry, setViewingPartEntry] = useState<PartTransactionRow | null>(null);
   const [isPartListModalOpen, setIsPartListModalOpen] = useState(false);
+  // Per-row "Send" on the Part Transaction table — a free-text drop-ship
+  // request (e.g. "please ship this backordered part to our office")
+  // composed from the row's PO#/Part# plus the ticket branch's address
+  // (defaultShipTo, already computed for the Marcone modal above), edited
+  // and previewed before it actually goes out via the company's connected
+  // Gmail account (see /api/gmail?action=send-dropship-request).
+  // Usually one row, but a checkbox beside each row's Send button lets HR
+  // select several parts on the SAME PO and bulk them into one email
+  // (distributors often want one message listing every backordered part
+  // for a PO rather than a separate email per part).
+  const [dropshipRows, setDropshipRows] = useState<PartTransactionRow[]>([]);
+  const [dropshipSelectedIds, setDropshipSelectedIds] = useState<Set<string>>(new Set());
+  // Recent recipients (company-wide, see migration 0172) — lets HR pick a
+  // distributor they've sent to before instead of retyping it every time.
+  const [dropshipRecent, setDropshipRecent] = useState<DropshipRecipient[]>([]);
+  const [dropshipRecentError, setDropshipRecentError] = useState<string | null>(null);
+  const [dropshipTo, setDropshipTo] = useState("");
+  // CC is a set of confirmed "chips" (Enter/comma/blur commits the text
+  // box's current contents as one) rather than one free-typed string —
+  // avoids ambiguity over what counts as a separator between addresses.
+  const [dropshipCc, setDropshipCc] = useState<string[]>([]);
+  const [dropshipCcInput, setDropshipCcInput] = useState("");
+  const [dropshipSubject, setDropshipSubject] = useState("");
+  const [dropshipBody, setDropshipBody] = useState("");
+  const [dropshipSending, setDropshipSending] = useState(false);
+  const [dropshipError, setDropshipError] = useState<string | null>(null);
+  const [dropshipSent, setDropshipSent] = useState(false);
+  // Gmail connection status shown right in the Part Transaction toolbar —
+  // previously only visible/manageable from the Accounting Dashboard, which
+  // meant whoever needed to use "Send" here had no way to tell (or fix)
+  // whether it would actually work without navigating away first.
+  const [gmailStatus, setGmailStatus] = useState<GmailConnectionStatus | null>(null);
+  const [gmailStatusLoading, setGmailStatusLoading] = useState(false);
+  const [gmailConnecting, setGmailConnecting] = useState(false);
+  const [gmailDisconnecting, setGmailDisconnecting] = useState(false);
   // Which deleted-part audit entry (by entry.id) currently has its full
   // before-deletion snapshot expanded in the Part Transaction Log modal.
   const [expandedDeletedPartLogId, setExpandedDeletedPartLogId] = useState<string | null>(null);
@@ -1254,6 +1292,10 @@ function TicketDetailsPage() {
   // pre-fetched address book. The modal owns its own form state; this only
   // gates open/closed + which parts to seed it with.
   const [marconeModal, setMarconeModal] = useState<{ open: boolean; parts: PartTransactionRow[] }>({ open: false, parts: [] });
+  // Encompass shares the exact same modal component (its UI was never
+  // Marcone-specific) — separate state since the two can each hold
+  // different in-flight selections independently.
+  const [encompassModal, setEncompassModal] = useState<{ open: boolean; parts: PartTransactionRow[] }>({ open: false, parts: [] });
   // Truck Stock batch modal — opens from the new Truck Stock button next
   // to Submit POs. Lets the user fulfill Need PO parts from an in-house
   // branch with one confirmation, instead of placing distributor POs.
@@ -1335,6 +1377,13 @@ function TicketDetailsPage() {
   // Marcone /parts/lookup state for the inline Add row's "Lookup" button.
   const [marconeLookupBusy, setMarconeLookupBusy] = useState(false);
   const [marconeLookupMsg, setMarconeLookupMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  // Which Part No the draft's current partDesc/partPrice/coreValue actually
+  // belong to — either the last part a Lookup was run for, or (when editing
+  // an existing row) that row's own saved part number. Lets handleMarconeLookup
+  // tell "re-checking the same part, don't clobber what's there" apart from
+  // "user typed a different Part No, this stale data is from the last part
+  // and must be replaced" — see handleMarconeLookup's guard below.
+  const lastMarconeFillPartNoRef = React.useRef<string | null>(null);
   // ServicePower status sending
   const [spStatus, setSpStatus] = useState("");
   const [spStatusSending, setSpStatusSending] = useState(false);
@@ -3444,26 +3493,27 @@ function TicketDetailsPage() {
       return;
     }
 
-    // Split: Marcone goes through the review modal; everything else takes
-    // the silent batch path so the user isn't blocked on confirming each
-    // distributor separately.
+    // Split: Marcone and Encompass each go through their own review modal
+    // (same component, different data + submit handler); everything else
+    // takes the silent batch path so the user isn't blocked on confirming
+    // each distributor separately.
     const marconeParts = partsNeedingPO.filter((p) => isMarconeDist(p.partDist));
-    const otherParts = partsNeedingPO.filter((p) => !isMarconeDist(p.partDist));
+    const encompassParts = partsNeedingPO.filter((p) => isEncompassDist(p.partDist));
+    const otherParts = partsNeedingPO.filter((p) => !isMarconeDist(p.partDist) && !isEncompassDist(p.partDist));
 
-    // Kick off non-Marcone silent submission immediately; the modal opening
-    // doesn't need to wait on it. If both sets are non-empty we surface a
-    // combined success message after the modal closes.
+    // Kick off silent submission for everything else immediately; the modal
+    // opening doesn't need to wait on it. If sets are non-empty we surface
+    // a combined success message after the modal(s) close.
     let silentPoNumbers: string[] = [];
     if (otherParts.length > 0) {
       silentPoNumbers = await submitSilentPOs(otherParts);
     }
 
-    if (marconeParts.length > 0) {
-      setMarconeModal({ open: true, parts: marconeParts });
-      return;
-    }
+    if (marconeParts.length > 0) setMarconeModal({ open: true, parts: marconeParts });
+    if (encompassParts.length > 0) setEncompassModal({ open: true, parts: encompassParts });
+    if (marconeParts.length > 0 || encompassParts.length > 0) return;
 
-    // No Marcone parts — show the silent-only result.
+    // No Marcone/Encompass parts — show the silent-only result.
     if (silentPoNumbers.length > 0) {
       alert(`${silentPoNumbers.length} PO(s) created successfully:\n${silentPoNumbers.join('\n')}\n\nView them in Part Order page.`);
     }
@@ -3506,6 +3556,43 @@ function TicketDetailsPage() {
       `Marcone PO ${poNo} placed — ${payload.lineItems.length} part${payload.lineItems.length === 1 ? "" : "s"}.`,
       marconeOrderNo ? `Marcone Order #: ${marconeOrderNo}` : null,
       "ETA, tracking, and invoice # will populate once Marcone ships.",
+    ].filter(Boolean).join("\n");
+    alert(summary);
+  };
+
+  // Handler the Encompass Parts Order modal calls when the user clicks
+  // Place Order. Mirrors handleMarconePlaceOrder exactly — same modal
+  // component, different vendor call underneath.
+  const handleEncompassPlaceOrder = async (payload: MarconeOrderPayload) => {
+    const result = await placeEncompassOrder(payload);
+    const { poNo, encompassOrderNo } = result;
+    for (const line of payload.lineItems) {
+      const after = [
+        `${line.partNumber}`,
+        `Status: PO Made`,
+        `PO #: ${poNo}`,
+        `Ship: ${payload.shipMethod}`,
+        encompassOrderNo ? `Encompass Order: ${encompassOrderNo}` : null,
+      ].filter(Boolean).join(" - ");
+      appendAuditEntry({
+        by: currentEditor,
+        action: "Submitted PO (Encompass Modal)",
+        field: "Part Transaction",
+        before: `${line.partNumber}`,
+        after,
+      });
+    }
+    try {
+      const parts = await sbGetTicketParts(ticketNo);
+      setPartRows(parts as any);
+    } catch (err) {
+      console.warn("Failed to refresh parts after Encompass order:", err);
+    }
+    setEncompassModal({ open: false, parts: [] });
+    const summary = [
+      `Encompass PO ${poNo} placed — ${payload.lineItems.length} part${payload.lineItems.length === 1 ? "" : "s"}.`,
+      encompassOrderNo ? `Encompass Order #: ${encompassOrderNo}` : null,
+      "ETA, tracking, and invoice # will populate once Encompass ships.",
     ].filter(Boolean).join("\n");
     alert(summary);
   };
@@ -4322,15 +4409,17 @@ function TicketDetailsPage() {
   }, [currentUserRole, currentUserExtraRoles, isNaveen, PART_LOCK_BYPASS_ROLES, TRIAGE_PART_ROLES, CSR_ONLY_ROLES]);
 
   // Split of PART_LOCK_BYPASS_ROLES (plus Triage, see TRIAGE_PART_ROLES
-  // above) into two disjoint tiers — everyone who can see the Part
-  // Transaction toolbar (canUsePartToolbar) falls into one of these, but
-  // which specific actions they can actually use depends on which tier
-  // they're in. Team Leaders/Admins procure (Submit POs); the day-to-day
-  // Parts/Claims/Manager tier — plus Triage, who identifies the part during
-  // diagnosis — maintains the part records themselves (add/edit/delete/
-  // Update). Neither tier overlaps the other — a mixed-role user (e.g.
-  // primary ADMIN + extra_roles PARTS_MANAGER) gets the union of both, same
-  // as every other multi-role check in this file.
+  // above) into two tiers — everyone who can see the Part Transaction
+  // toolbar (canUsePartToolbar) falls into one of these, but which specific
+  // actions they can actually use depends on which tier they're in. Team
+  // Leaders/Admins procure (Submit POs); the day-to-day Parts/Claims/
+  // Manager tier — plus Triage, who identifies the part during diagnosis,
+  // plus SUPERADMIN (a real per-company admin in this app, same tier as
+  // ADMIN for in-company operational data) — maintains the part records
+  // themselves (add/edit/delete/Update). SUPERADMIN is deliberately in
+  // both sets (order AND edit), same as any mixed-role user (e.g. primary
+  // ADMIN + extra_roles PARTS_MANAGER) gets the union of both, same as
+  // every other multi-role check in this file.
   const PARTS_ORDER_ONLY_ROLES = useMemo(
     () => new Set(["PARTS_TEAM_LEADER", "ADMIN", "SUPERADMIN"]),
     [],
@@ -4349,6 +4438,7 @@ function TicketDetailsPage() {
       "BIZOPS_SENIOR_MANAGER",
       "TRIAGE_USER",
       "TRIAGE_MANAGER",
+      "SUPERADMIN",
     ]),
     [],
   );
@@ -4405,6 +4495,7 @@ function TicketDetailsPage() {
   const clearPartForm = () => {
     setEditingPartId(null);
     setPartDraft(createEmptyPartDraft());
+    lastMarconeFillPartNoRef.current = null;
   };
 
   // ── Marcone /parts/lookup — autofill Description / List Price / Core / Stock ──
@@ -4415,14 +4506,15 @@ function TicketDetailsPage() {
       setMarconeLookupMsg({ kind: "err", text: "Pick Part Dist. first." });
       return;
     }
-    // Marcone is the only distributor we have an API for right now. Other
-    // distributors (GE, AIG, Encompass, ...) need their own integrations.
-    const distLower = partDist.toLowerCase();
-    const isMarconeDist = distLower.startsWith("marcone");
-    if (!isMarconeDist) {
+    // Marcone and Encompass are the only distributors we have an API for
+    // right now. Other distributors (GE, AIG, ...) need their own
+    // integrations.
+    const isMarcone = isMarconeDist(partDist);
+    const isEncompass = isEncompassDist(partDist);
+    if (!isMarcone && !isEncompass) {
       setMarconeLookupMsg({
         kind: "err",
-        text: `Lookup not available for ${partDist}. Currently wired for Marcone only.`,
+        text: `Lookup not available for ${partDist}. Currently wired for Marcone and Encompass only.`,
       });
       return;
     }
@@ -4433,44 +4525,70 @@ function TicketDetailsPage() {
     setMarconeLookupBusy(true);
     setMarconeLookupMsg(null);
     try {
-      const { marconeLookupPart } = await import("@/lib/marconeApi");
-      // The inline Lookup is for vendor (Marcone) info only now — in-house
+      // The inline Lookup is for vendor info only now — in-house
       // truck-stock fulfilment is handled by the dedicated Truck Stock
       // button next to Submit POs. That separation keeps the Lookup
       // banner short and focused on what the distributor can supply.
-      const result = await marconeLookupPart({
-        partNumber,
-        quantity: Number(partDraft.quantity) || 1,
-      });
+      //
+      // Patch the draft only for fields the user hasn't typed yet; never
+      // overwrite Part No, Visit ID, or the Part Dist. they picked. "Hasn't
+      // typed yet" only holds if the existing value actually belongs to
+      // THIS part number — otherwise it's stale leftover description/price
+      // from whatever part was looked up before the user changed Part No,
+      // and must be replaced rather than preserved.
+      const isRefetchOfSamePart = lastMarconeFillPartNoRef.current === partNumber;
 
-      if (result.notFound) {
+      if (isMarcone) {
+        const { marconeLookupPart } = await import("@/lib/marconeApi");
+        const result = await marconeLookupPart({ partNumber, quantity: Number(partDraft.quantity) || 1 });
+        if (result.notFound) {
+          setMarconeLookupMsg({ kind: "err", text: `Marcone: ${partNumber} not found.` });
+          return;
+        }
+        if (!result.success || !result.data) {
+          setMarconeLookupMsg({ kind: "err", text: `Marcone error: ${result.error || "request failed"}` });
+          return;
+        }
+        const d = result.data;
+        setPartDraft((prev) => ({
+          ...prev,
+          partDesc: (isRefetchOfSamePart && prev.partDesc) || d.description || "",
+          partPrice: (isRefetchOfSamePart && prev.partPrice) || (d.netPrice ?? d.listPrice ?? "").toString(),
+          coreValue: (isRefetchOfSamePart && prev.coreValue) || (d.coreValue ?? "").toString(),
+        }));
+        lastMarconeFillPartNoRef.current = partNumber;
+        const stockLine = d.inStock ? "in stock" : "out of stock";
+        const discLine = d.isDiscontinued ? " · discontinued" : "";
         setMarconeLookupMsg({
-          kind: "err",
-          text: `Marcone: ${partNumber} not found.`,
+          kind: "ok",
+          text: `Found ${d.make || ""} ${d.partNumber || partNumber} · Marcone: ${stockLine}${discLine}.`,
         });
+        return;
+      }
+
+      // isEncompass
+      const { encompassLookupPart } = await import("@/lib/encompassApi");
+      const result = await encompassLookupPart({ partNumber });
+      if (result.notFound) {
+        setMarconeLookupMsg({ kind: "err", text: `Encompass: ${partNumber} not found.` });
         return;
       }
       if (!result.success || !result.data) {
-        setMarconeLookupMsg({
-          kind: "err",
-          text: `Marcone error: ${result.error || "request failed"}`,
-        });
+        setMarconeLookupMsg({ kind: "err", text: `Encompass error: ${result.error || "request failed"}` });
         return;
       }
       const d = result.data;
-      // Patch the draft only for fields the user hasn't typed yet; never
-      // overwrite Part No, Visit ID, or the Part Dist. they picked.
       setPartDraft((prev) => ({
         ...prev,
-        partDesc: prev.partDesc || d.description || "",
-        partPrice: prev.partPrice || (d.netPrice ?? d.listPrice ?? "").toString(),
-        coreValue: prev.coreValue || (d.coreValue ?? "").toString(),
+        partDesc: (isRefetchOfSamePart && prev.partDesc) || d.description || "",
+        partPrice: (isRefetchOfSamePart && prev.partPrice) || (d.partPrice ?? d.listPrice ?? "").toString(),
+        coreValue: (isRefetchOfSamePart && prev.coreValue) || (d.corePrice ?? "").toString(),
       }));
+      lastMarconeFillPartNoRef.current = partNumber;
       const stockLine = d.inStock ? "in stock" : "out of stock";
-      const discLine = d.isDiscontinued ? " · discontinued" : "";
       setMarconeLookupMsg({
         kind: "ok",
-        text: `Found ${d.make || ""} ${d.partNumber || partNumber} · Marcone: ${stockLine}${discLine}.`,
+        text: `Found ${d.mfgName || ""} ${d.partNumber || partNumber} · Encompass: ${stockLine}.`,
       });
     } catch (err) {
       setMarconeLookupMsg({
@@ -4493,6 +4611,18 @@ function TicketDetailsPage() {
   // that called syncMarconeOrderStatus({ silent: true }) on an interval.
   const [marconeRefreshingId, setMarconeRefreshingId] = useState<string | null>(null);
 
+  // Common shape both vendors' order-status responses get normalized into
+  // before the shared patch/promotion/audit logic below (which doesn't
+  // care which vendor the data came from).
+  type OrderStatusInfo = {
+    eta?: string;
+    invoiceNumber?: string;
+    invoiceDate?: string;
+    trackingNumbers?: string;
+    status?: string;
+    orderNumber?: string;
+  };
+
   // Core sync routine. `silent` controls UI feedback. Currently only the
   // manual button calls it (silent: false). Returns true when the row
   // picked up at least one new field.
@@ -4500,23 +4630,47 @@ function TicketDetailsPage() {
     row: PartTransactionRow,
     options: { silent: boolean },
   ): Promise<boolean> => {
-    if (!row.orderNo?.trim() || !isMarconeDist(row.partDist)) return false;
+    const isMarcone = isMarconeDist(row.partDist);
+    const isEncompass = isEncompassDist(row.partDist);
+    if (!row.orderNo?.trim() || (!isMarcone && !isEncompass)) return false;
+    const vendorLabel = isMarcone ? "Marcone" : "Encompass";
 
-    const { marconeOrderStatus } = await import("@/lib/marconeApi");
-    const result = await marconeOrderStatus({ orderNumber: row.orderNo.trim() });
-    if (!result.success || !result.data) {
-      if (!options.silent) {
-        alert(`Marcone order status failed: ${result.error || "no data returned"}`);
-      } else {
-        console.warn(
-          `[marcone auto-sync] ${row.partNo} (${row.orderNo}) failed:`,
-          result.error || "no data",
-        );
+    let info: OrderStatusInfo;
+    if (isMarcone) {
+      const { marconeOrderStatus } = await import("@/lib/marconeApi");
+      const result = await marconeOrderStatus({ orderNumber: row.orderNo.trim() });
+      if (!result.success || !result.data) {
+        if (!options.silent) {
+          alert(`Marcone order status failed: ${result.error || "no data returned"}`);
+        } else {
+          console.warn(`[marcone auto-sync] ${row.partNo} (${row.orderNo}) failed:`, result.error || "no data");
+        }
+        return false;
       }
-      return false;
+      info = result.data;
+    } else {
+      const { encompassOrderStatus } = await import("@/lib/encompassApi");
+      const result = await encompassOrderStatus({ referenceNumber: row.orderNo.trim() });
+      const record = result.records[0];
+      if (!result.success || !record) {
+        if (!options.silent) {
+          alert(`Encompass order status failed: ${result.error || "no data returned"}`);
+        } else {
+          console.warn(`[encompass auto-sync] ${row.partNo} (${row.orderNo}) failed:`, result.error || "no data");
+        }
+        return false;
+      }
+      const part = record.parts.find((p) => p.partNumber === row.partNo) || record.parts[0];
+      info = {
+        eta: part?.eta,
+        invoiceNumber: record.invoiceNumber,
+        invoiceDate: record.invoiceDate,
+        trackingNumbers: (part?.outboundTrackings || []).map((t) => t.trackingNumber).filter(Boolean).join(", ") || undefined,
+        status: part?.status,
+        orderNumber: record.orderNumber,
+      };
     }
 
-    const info = result.data;
     const patch: Record<string, unknown> = {};
     if (info.eta && info.eta !== row.eta) patch.eta = info.eta;
     if (info.invoiceNumber && info.invoiceNumber !== row.invoiceNo) patch.invoice_no = info.invoiceNumber;
@@ -4542,7 +4696,7 @@ function TicketDetailsPage() {
     if (Object.keys(patch).length === 0) {
       if (!options.silent) {
         alert(
-          `Marcone order ${info.orderNumber || row.orderNo} — status: ${info.status || "pending"}. ` +
+          `${vendorLabel} order ${info.orderNumber || row.orderNo} — status: ${info.status || "pending"}. ` +
           "No new ETA, invoice, or tracking yet.",
         );
       }
@@ -4562,8 +4716,8 @@ function TicketDetailsPage() {
     setPartRows((prev) => prev.map((r) => (r.id === row.id ? nextRow : r)));
 
     appendAuditEntry({
-      by: options.silent ? "Auto-sync (Marcone)" : currentEditor,
-      action: options.silent ? "Auto-synced from Marcone" : "Refreshed from Marcone",
+      by: options.silent ? `Auto-sync (${vendorLabel})` : currentEditor,
+      action: options.silent ? `Auto-synced from ${vendorLabel}` : `Refreshed from ${vendorLabel}`,
       field: "Part Transaction",
       before: `${row.partNo} - Status: ${row.status} - ETA: ${row.eta || "—"} - Tracking: ${row.inTracking || "—"} - Invoice: ${row.invoiceNo || "—"}`,
       after: `${row.partNo} - Status: ${nextStatus} - ETA: ${info.eta || row.eta || "—"} - Tracking: ${info.trackingNumbers || row.inTracking || "—"} - Invoice: ${info.invoiceNumber || row.invoiceNo || "—"}`,
@@ -4575,25 +4729,25 @@ function TicketDetailsPage() {
       if (info.invoiceNumber) updates.push(`Invoice #: ${info.invoiceNumber}`);
       if (info.trackingNumbers) updates.push(`Tracking: ${info.trackingNumbers}`);
       if (nextStatus !== row.status) updates.push(`Status: ${nextStatus}`);
-      alert(`Refreshed from Marcone order ${info.orderNumber || row.orderNo}:\n${updates.join("\n")}`);
+      alert(`Refreshed from ${vendorLabel} order ${info.orderNumber || row.orderNo}:\n${updates.join("\n")}`);
     }
     return true;
   };
 
   const refreshMarconeOrderStatus = async (row: PartTransactionRow) => {
     if (!row.orderNo?.trim()) {
-      alert("This part has no Marcone Order # to refresh.");
+      alert("This part has no vendor Order # to refresh.");
       return;
     }
-    if (!isMarconeDist(row.partDist)) {
-      alert("Refresh from Marcone is only available for Marcone parts.");
+    if (!isMarconeDist(row.partDist) && !isEncompassDist(row.partDist)) {
+      alert("Refresh is only available for Marcone or Encompass parts.");
       return;
     }
     setMarconeRefreshingId(row.id);
     try {
       await syncMarconeOrderStatus(row, { silent: false });
     } catch (err) {
-      alert(`Failed to refresh from Marcone: ${err instanceof Error ? err.message : String(err)}`);
+      alert(`Failed to refresh order status: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setMarconeRefreshingId(null);
     }
@@ -4704,6 +4858,10 @@ function TicketDetailsPage() {
       return;
     }
     setEditingPartId(row.id);
+    // The loaded description/price genuinely belong to this row's own Part
+    // No — treat it the same as a prior successful lookup for that part, so
+    // clicking Lookup without changing Part No won't clobber the saved value.
+    lastMarconeFillPartNoRef.current = row.partNo || null;
     setPartDraft({
       partNo: row.partNo || "",
       partDist: row.partDist || "",
@@ -4856,6 +5014,215 @@ function TicketDetailsPage() {
     }
 
     clearPartForm();
+  };
+
+  // Its own independent connection slot (see migration 0171) — deliberately
+  // NOT resolved from the ticket's US/PH branch like Payroll payslips are,
+  // so a drop-ship request never goes out from whichever Payroll mailbox
+  // happens to be connected. An Admin can still connect the same account
+  // to both if they want; nothing forces it to differ.
+  const gmailRegion: GmailRegion = "PARTS";
+  const canConnectGmail = String(currentUserRole || "").toUpperCase() === "ADMIN" || String(currentUserRole || "").toUpperCase() === "SUPERADMIN";
+
+  const loadGmailStatus = useCallback(async () => {
+    setGmailStatusLoading(true);
+    try {
+      setGmailStatus(await getGmailConnectionStatus(gmailRegion));
+    } catch (err) {
+      console.error("Failed to load Gmail connection status:", err);
+    } finally {
+      setGmailStatusLoading(false);
+    }
+  }, [gmailRegion]);
+
+  useEffect(() => {
+    if (!authReady || !ticket) return;
+    void loadGmailStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authReady, !!ticket, gmailRegion]);
+
+  const handleConnectGmailHere = async () => {
+    setGmailConnecting(true);
+    try {
+      const idToken = await firebaseAuth?.currentUser?.getIdToken(false);
+      if (!idToken) { alert("You need to be logged in to connect Gmail."); return; }
+      // A real navigation (not fetch) — Google's consent screen has to run in the top-level window.
+      window.location.href = `/api/gmail?action=connect&region=${gmailRegion}&idToken=${encodeURIComponent(idToken)}`;
+    } finally {
+      setGmailConnecting(false);
+    }
+  };
+
+  const handleDisconnectGmailHere = async () => {
+    if (!confirm(`Disconnect the Parts/Drop-Ship Gmail account? "Send" on part rows won't work until it's reconnected.`)) return;
+    setGmailDisconnecting(true);
+    try {
+      await disconnectGmail(gmailRegion);
+      await loadGmailStatus();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to disconnect Gmail.");
+    } finally {
+      setGmailDisconnecting(false);
+    }
+  };
+
+  const openDropshipModal = (rows: PartTransactionRow[]) => {
+    if (rows.length === 0) return;
+    setDropshipRows(rows);
+    setDropshipTo("");
+    setDropshipCc([]);
+    setDropshipCcInput("");
+    setDropshipError(null);
+    setDropshipSent(false);
+    setDropshipRecent([]);
+    setDropshipRecentError(null);
+    // Pre-fill from the most-recently-used recipient — most POs on the
+    // same ticket go to the same distributor, so this saves retyping on
+    // every single send. Guarded with functional updates so it never
+    // clobbers anything the user already started typing while this was
+    // still in flight; the "Recent" chips below still let them switch to
+    // a different distributor if this one's wrong for this PO.
+    getRecentDropshipRecipients().then((list) => {
+      setDropshipRecent(list);
+      if (list.length > 0) {
+        setDropshipTo((prev) => prev || list[0].toEmail);
+        setDropshipCc((prev) => (prev.length > 0 ? prev : list[0].ccEmails));
+      }
+    }).catch((err) => {
+      setDropshipRecentError(err instanceof Error ? err.message : "Couldn't load recent recipients.");
+    });
+    const primary = rows[0];
+    const isBulk = rows.length > 1;
+    setDropshipSubject(`Drop-Ship Request — PO# ${primary.poNo || "N/A"}`);
+    const addressLines = [
+      defaultShipTo.street1,
+      defaultShipTo.street2,
+      [defaultShipTo.city, defaultShipTo.state, defaultShipTo.zip].filter(Boolean).join(", "),
+    ].filter(Boolean);
+    setDropshipBody(
+      [
+        "Good day,",
+        "",
+        isBulk
+          ? "The following parts for the order below are currently on backorder. Could you please have these parts drop-shipped to our office."
+          : "The part for the order below is currently on backorder. Could you please have this part drop-shipped to our office.",
+        "",
+        "Order Details:",
+        `PO #: ${primary.poNo || "N/A"}`,
+        ...(isBulk
+          ? ["Parts:", "", ...rows.map((r) => `- ${r.partNo || "?"} - ${r.partDesc || "Part"}`)]
+          : [`PART #: ${primary.partNo || "N/A"}`]),
+        "Address:",
+        ...(addressLines.length > 0 ? addressLines : [defaultShipTo.name || "—"]),
+        "",
+        "Thank you,",
+        currentUserName || "",
+      ].join("\n"),
+    );
+  };
+  const closeDropshipModal = () => {
+    setDropshipRows([]);
+  };
+  const toggleDropshipSelect = (id: string) => {
+    setDropshipSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  // Bulk-send only makes sense within one PO — mixing POs into a single
+  // email would misrepresent which parts belong to which order.
+  const openBulkDropshipModal = () => {
+    const rows = partRows.filter((r) => dropshipSelectedIds.has(r.id));
+    if (rows.length === 0) return;
+    const distinctPos = new Set(rows.map((r) => r.poNo || ""));
+    if (distinctPos.size > 1) {
+      alert("Selected parts have different PO #s. Bulk Send only works for parts on the same PO — select parts from one PO at a time.");
+      return;
+    }
+    openDropshipModal(rows);
+  };
+  const CC_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  // Commits whatever's currently typed into the CC box as chip(s) — split
+  // the same lenient way the server does (comma/semicolon/whitespace), so
+  // pasting a whole list at once and pressing Enter once still works.
+  const commitDropshipCcInput = () => {
+    const parts = dropshipCcInput
+      .split(/[,;\s]+/)
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+    if (parts.length === 0) return;
+    const valid = parts.filter((p) => CC_EMAIL_RE.test(p));
+    const invalid = parts.filter((p) => !CC_EMAIL_RE.test(p));
+    if (valid.length > 0) {
+      setDropshipCc((prev) => [...prev, ...valid.filter((p) => !prev.includes(p))]);
+    }
+    setDropshipCcInput(invalid.join(", "));
+    if (invalid.length === 0) setDropshipError(null);
+  };
+  const removeDropshipCc = (email: string) => {
+    setDropshipCc((prev) => prev.filter((e) => e !== email));
+  };
+  const applyDropshipRecent = (entry: DropshipRecipient) => {
+    setDropshipTo(entry.toEmail);
+    setDropshipCc(entry.ccEmails);
+    setDropshipCcInput("");
+  };
+
+  const handleSendDropshipRequest = async () => {
+    if (dropshipRows.length === 0) return;
+    const to = dropshipTo.trim();
+    if (!to) {
+      setDropshipError("Recipient email is required.");
+      return;
+    }
+    // Pick up anything still sitting in the CC box that wasn't committed
+    // with Enter/comma yet, so it isn't silently dropped on send.
+    const pendingCc = dropshipCcInput
+      .split(/[,;\s]+/)
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+    if (pendingCc.some((p) => !CC_EMAIL_RE.test(p))) {
+      setDropshipError(`Invalid CC email address: ${pendingCc.find((p) => !CC_EMAIL_RE.test(p))}`);
+      return;
+    }
+    const ccList = [...dropshipCc, ...pendingCc.filter((p) => !dropshipCc.includes(p))];
+    const cc = ccList.join(", ");
+    setDropshipSending(true);
+    setDropshipError(null);
+    try {
+      const idToken = await firebaseAuth?.currentUser?.getIdToken();
+      if (!idToken) throw new Error("Could not verify your session. Please re-login and try again.");
+      const res = await fetch("/api/gmail?action=send-dropship-request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken, region: gmailRegion, to, cc, subject: dropshipSubject, body: dropshipBody }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to send.");
+      setDropshipCc(ccList);
+      setDropshipCcInput("");
+      setDropshipSent(true);
+      setDropshipSelectedIds(new Set());
+      recordDropshipRecipient(to, ccList).catch((err) => {
+        setDropshipRecentError(
+          `Sent, but couldn't save "${to}" for next time: ${err instanceof Error ? err.message : "unknown error"}`,
+        );
+      });
+      const partsSummary = dropshipRows.map((r) => r.partNo || "?").join(", ");
+      appendAuditEntry({
+        by: currentEditor,
+        action: "Sent drop-ship request",
+        field: "Part Transaction",
+        before: "—",
+        after: `To: ${to}${cc ? ` (cc: ${cc})` : ""} — PO# ${dropshipRows[0].poNo || "N/A"}, Part# ${partsSummary}`,
+      });
+    } catch (err) {
+      setDropshipError(err instanceof Error ? err.message : "Failed to send.");
+    } finally {
+      setDropshipSending(false);
+    }
   };
 
   const deletePartRow = async (rowId: string) => {
@@ -6842,9 +7209,62 @@ function TicketDetailsPage() {
                       ? `Update (${dirtyRowCount})`
                       : "Update"}
                   </button>
+                  {dropshipSelectedIds.size > 0 && (
+                    <button
+                      type="button"
+                      onClick={openBulkDropshipModal}
+                      disabled={partsEditDisabled || !canEditParts}
+                      className={`rounded border px-3 py-1.5 text-xs font-semibold transition ${
+                        partsEditDisabled || !canEditParts
+                          ? "border-white/10 bg-slate-800 text-slate-500 cursor-not-allowed"
+                          : "border-blue-400/40 bg-blue-600/30 text-blue-200 hover:bg-blue-600/50"
+                      }`}
+                      title="Email one drop-ship request listing all selected parts (must be the same PO)"
+                    >
+                      Send Selected ({dropshipSelectedIds.size})
+                    </button>
+                  )}
                   {/* Auto-sync indicator removed — Marcone order status
                       is now manual-refresh only via the per-row Refresh
                       button. */}
+                  {/* Which Gmail account the per-row "Send" (drop-ship
+                      request) button will actually send from — previously
+                      only visible/manageable from the Accounting Dashboard. */}
+                  {gmailStatusLoading ? (
+                    <span className="text-[10px] text-slate-500">Gmail…</span>
+                  ) : gmailStatus?.connected ? (
+                    <span
+                      className="flex items-center gap-1 rounded border border-emerald-400/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold text-emerald-300"
+                      title={`Send emails from: ${gmailStatus.connectedEmail}`}
+                    >
+                      ✓ Gmail: {gmailStatus.connectedEmail}
+                      {canConnectGmail && (
+                        <button
+                          type="button"
+                          onClick={handleDisconnectGmailHere}
+                          disabled={gmailDisconnecting}
+                          className="ml-1 text-emerald-400/70 hover:text-emerald-200 disabled:opacity-50"
+                          title="Disconnect the Parts/Drop-Ship Gmail account"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </span>
+                  ) : canConnectGmail ? (
+                    <button
+                      type="button"
+                      onClick={handleConnectGmailHere}
+                      disabled={gmailConnecting}
+                      className="rounded border border-white/15 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-slate-700 disabled:opacity-50"
+                      title={'Connect the Parts/Drop-Ship Gmail account "Send" will email from'}
+                    >
+                      {gmailConnecting ? "Connecting…" : "Connect Gmail"}
+                    </button>
+                  ) : (
+                    <span className="text-[10px] text-slate-500" title="An Admin needs to connect Gmail before Send will work">
+                      Gmail not connected — ask an Admin
+                    </span>
+                  )}
                 </div>
                 )}
               </div>
@@ -7014,17 +7434,44 @@ function TicketDetailsPage() {
                               <input type="checkbox" checked={val("cxPaid") === "Paid"} onChange={(e) => set("cxPaid", e.target.checked ? "Paid" : "No")} disabled={partsEditDisabled || !canEditParts} className="accent-blue-500" />
                             </td>
                             <td className="px-2 py-1.5 whitespace-nowrap">
-                              {row.orderNo && isMarconeDist(row.partDist) ? (
+                              {row.orderNo && (isMarconeDist(row.partDist) || isEncompassDist(row.partDist)) ? (
                                 <button
                                   type="button"
                                   onClick={() => refreshMarconeOrderStatus(row)}
                                   disabled={marconeRefreshingId === row.id}
                                   className="rounded border border-amber-400/40 bg-amber-500/15 px-2 py-1 text-xs font-semibold text-amber-200 hover:bg-amber-500/25 mr-1 disabled:opacity-40"
-                                  title={`Pull ETA / invoice / tracking from Marcone for order ${row.orderNo}`}
+                                  title={`Pull ETA / invoice / tracking from ${isMarconeDist(row.partDist) ? "Marcone" : "Encompass"} for order ${row.orderNo}`}
                                 >
                                   {marconeRefreshingId === row.id ? "…" : "Refresh"}
                                 </button>
                               ) : null}
+                              <button
+                                type="button"
+                                onClick={() => openDropshipModal([row])}
+                                disabled={partsEditDisabled || !canEditParts}
+                                className={`rounded border px-2 py-1 text-xs font-semibold transition mr-1 ${
+                                  partsEditDisabled || !canEditParts
+                                    ? "border-white/10 bg-slate-900 text-slate-500 cursor-not-allowed"
+                                    : "border-blue-400/30 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20"
+                                }`}
+                                title={
+                                  partsEditDisabled
+                                    ? "Locked: Parts / Claims / Manager roles only"
+                                    : !canEditParts
+                                      ? "Your role can only order parts, not add or edit them."
+                                      : "Email a drop-ship request for this part"
+                                }
+                              >
+                                Send
+                              </button>
+                              <input
+                                type="checkbox"
+                                checked={dropshipSelectedIds.has(row.id)}
+                                onChange={() => toggleDropshipSelect(row.id)}
+                                disabled={partsEditDisabled || !canEditParts}
+                                className="accent-blue-500 mr-1 align-middle"
+                                title="Select for Bulk Send (parts on the same PO)"
+                              />
                               <button
                                 type="button"
                                 onClick={() => deletePartRow(row.id)}
@@ -8843,6 +9290,146 @@ function TicketDetailsPage() {
         </div>
       ) : null}
 
+      {/* Part Transaction row "Send" — a drop-ship request email, previewed
+          and edited here before it actually goes out via the company's
+          connected Gmail account. */}
+      {dropshipRows.length > 0 && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={closeDropshipModal}>
+          <div className="w-full max-w-lg rounded-lg border border-white/10 bg-slate-900 p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="mb-1 text-lg font-bold text-white">Send Drop-Ship Request</h3>
+            <p className="mb-4 text-xs text-slate-400">
+              PO# {dropshipRows[0].poNo || "N/A"}
+              {dropshipRows.length > 1
+                ? ` · ${dropshipRows.length} parts`
+                : ` · Part# ${dropshipRows[0].partNo || "N/A"}`}
+            </p>
+
+            {dropshipSent ? (
+              <>
+                <p className="mb-4 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2.5 text-sm text-emerald-300">
+                  Sent to {dropshipTo}{dropshipCc.length > 0 ? ` (cc: ${dropshipCc.join(", ")})` : ""}.
+                </p>
+                {dropshipRecentError && (
+                  <p className="mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-xs text-amber-300">
+                    {dropshipRecentError}
+                  </p>
+                )}
+                <div className="flex justify-end">
+                  <button type="button" onClick={closeDropshipModal} className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500">
+                    Done
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Recipient</label>
+                    <input
+                      type="email"
+                      value={dropshipTo}
+                      onChange={(e) => setDropshipTo(e.target.value)}
+                      placeholder="distributor@example.com"
+                      className="mt-1 w-full rounded-md border border-white/15 bg-slate-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                    />
+                    {dropshipRecent.length > 0 && (
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10px] text-slate-500">Recent:</span>
+                        {dropshipRecent.map((entry) => (
+                          <button
+                            key={entry.toEmail}
+                            type="button"
+                            onClick={() => applyDropshipRecent(entry)}
+                            className="rounded border border-white/10 bg-white/5 px-2 py-0.5 text-[11px] text-slate-300 hover:border-blue-400/40 hover:text-white"
+                            title={entry.ccEmails.length > 0 ? `CC: ${entry.ccEmails.join(", ")}` : "No CC saved"}
+                          >
+                            {entry.toEmail}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {dropshipRecentError && (
+                      <p className="mt-1 text-[11px] text-amber-400">{dropshipRecentError}</p>
+                    )}
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400">CC (optional)</label>
+                    <div className="mt-1 flex w-full flex-wrap items-center gap-1.5 rounded-md border border-white/15 bg-slate-950 px-2 py-1.5 focus-within:border-blue-500">
+                      {dropshipCc.map((email) => (
+                        <span key={email} className="flex items-center gap-1 rounded bg-white/10 px-2 py-1 text-xs text-white">
+                          {email}
+                          <button
+                            type="button"
+                            onClick={() => removeDropshipCc(email)}
+                            className="text-slate-400 hover:text-white"
+                            aria-label={`Remove ${email}`}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                      <input
+                        type="text"
+                        value={dropshipCcInput}
+                        onChange={(e) => setDropshipCcInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === ",") {
+                            e.preventDefault();
+                            commitDropshipCcInput();
+                          } else if (e.key === "Backspace" && dropshipCcInput === "" && dropshipCc.length > 0) {
+                            removeDropshipCc(dropshipCc[dropshipCc.length - 1]);
+                          }
+                        }}
+                        onBlur={commitDropshipCcInput}
+                        placeholder={dropshipCc.length > 0 ? "Add another..." : "you@company.com"}
+                        className="min-w-[10rem] flex-1 bg-transparent px-1 py-0.5 text-sm text-white focus:outline-none"
+                      />
+                    </div>
+                    <p className="mt-1 text-[11px] text-slate-500">Press Enter after each address to add it.</p>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Subject</label>
+                    <input
+                      type="text"
+                      value={dropshipSubject}
+                      onChange={(e) => setDropshipSubject(e.target.value)}
+                      className="mt-1 w-full rounded-md border border-white/15 bg-slate-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Message (preview — edit before sending)</label>
+                    <textarea
+                      value={dropshipBody}
+                      onChange={(e) => setDropshipBody(e.target.value)}
+                      rows={12}
+                      className="mt-1 w-full rounded-md border border-white/15 bg-slate-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none whitespace-pre-wrap"
+                    />
+                  </div>
+                </div>
+
+                {dropshipError && (
+                  <p className="mt-3 rounded-md border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">{dropshipError}</p>
+                )}
+
+                <div className="mt-5 flex justify-end gap-2">
+                  <button type="button" onClick={closeDropshipModal} className="rounded-md border border-white/15 px-4 py-2 text-sm text-slate-300 hover:bg-white/5">
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSendDropshipRequest}
+                    disabled={dropshipSending || !dropshipTo.trim()}
+                    className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+                  >
+                    {dropshipSending ? "Sending…" : "Send"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Marcone Parts Order modal — opens when Submit POs catches at least
           one Marcone part. Non-Marcone parts already went through the
           silent batch flow before this point. */}
@@ -8863,6 +9450,26 @@ function TicketDetailsPage() {
         onPlaceOrder={handleMarconePlaceOrder}
       />
 
+      {/* Encompass Parts Order modal — same component as Marcone's (its UI
+          was never vendor-specific), opens when Submit POs catches at
+          least one Encompass part. */}
+      <MarconePartsOrderModal
+        open={encompassModal.open}
+        onClose={() => setEncompassModal({ open: false, parts: [] })}
+        parts={encompassModal.parts.map((p): MarconePartLine => ({
+          id: p.id,
+          partNo: p.partNo,
+          partDesc: p.partDesc,
+          partPrice: p.partPrice,
+          coreValue: p.coreValue,
+          quantity: p.quantity,
+        }))}
+        ticketNo={ticketNo}
+        defaultShipTo={defaultShipTo}
+        addressBook={partAddressBook}
+        onPlaceOrder={handleEncompassPlaceOrder}
+      />
+
       {/* Truck Stock batch modal — opens from the Truck Stock button next
           to Submit POs. Fulfils Need PO parts from in-house branches
           instead of placing distributor POs. */}
@@ -8870,6 +9477,7 @@ function TicketDetailsPage() {
         open={truckStockModal.open}
         onClose={() => setTruckStockModal({ open: false, parts: [] })}
         ticketNo={ticketNo}
+        ticketBranch={ticket?.location || ""}
         parts={truckStockModal.parts.map((p) => ({
           id: p.id,
           partNo: p.partNo,

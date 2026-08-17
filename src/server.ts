@@ -5,6 +5,7 @@ import { renderErrorPage } from "./lib/error-page";
 import { handleSupabaseTokenRequest } from "./lib/server/supabaseTokenBridge";
 import { handleServicePowerRequest } from "./lib/server/servicePowerBridge";
 import { handleMarconeRequest } from "./lib/server/marconeBridge";
+import { handleEncompassRequest } from "./lib/server/encompassBridge";
 import { handleJotformRequest } from "./lib/server/jotformBridge";
 import { handleNsaRequest } from "./lib/server/nsaBridge";
 import { handleCustomFormsRequest } from "./lib/server/customFormsBridge";
@@ -17,6 +18,7 @@ import { handleLiveChatStaffRequest } from "./lib/server/liveChatStaffBridge";
 import { handleGmailRequest } from "./lib/server/gmailBridge";
 import { handleAdminPasswordRequest } from "./lib/server/adminPasswordBridge";
 import { handleLoginLockoutRequest } from "./lib/server/loginLockoutBridge";
+import { handlePasswordResetRequest } from "./lib/server/passwordResetRequestBridge";
 import { handleItBypassLoginRequest } from "./lib/server/itBypassLoginBridge";
 
 type ServerEntry = {
@@ -125,6 +127,10 @@ export default {
       const merged = await resolveServerEnv(env);
       return await handleLoginLockoutRequest(request, merged);
     }
+    if (url.pathname === "/api/password-reset-request") {
+      const merged = await resolveServerEnv(env);
+      return await handlePasswordResetRequest(request, merged);
+    }
     if (url.pathname === "/api/servicepower") {
       const merged = await resolveServerEnv(env);
       return await handleServicePowerRequest(request, merged);
@@ -132,6 +138,10 @@ export default {
     if (url.pathname === "/api/marcone") {
       const merged = await resolveServerEnv(env);
       return await handleMarconeRequest(request, merged);
+    }
+    if (url.pathname === "/api/encompass") {
+      const merged = await resolveServerEnv(env);
+      return await handleEncompassRequest(request, merged);
     }
     if (url.pathname === "/api/jotform") {
       const merged = await resolveServerEnv(env);

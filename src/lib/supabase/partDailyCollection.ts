@@ -2,7 +2,7 @@
  * Part Daily Collection — real parts that have already been picked up
  * (picked_up = true) and are now waiting for the Parts Manager to collect
  * them back from the technician (Used/Restock/Defective/etc.), joined to
- * their ticket for location/technician/date filtering. See migration 0166
+ * their ticket for location/technician/date filtering. See migration 0169
  * for the collected/used_qty/restock_qty/collect_type/collect_note/lot_no
  * columns this reads and writes.
  */
@@ -30,6 +30,8 @@ export interface PartCollectionRow {
   collected: boolean;
   collectedDate: string;
   scheduleDate: string;
+  /** The ticket's branch/location — drives the Parts hub's per-branch "Done" digest routing. */
+  location: string;
 }
 
 // Suggests a Collect Type from the part's own status, per the rules the
@@ -90,6 +92,7 @@ export async function getPartsForDailyCollection(filters: {
     collected: row.collected === true,
     collectedDate: row.collected_date || "",
     scheduleDate: row.tickets?.schedule_date || "",
+    location: row.tickets?.location || "",
   }));
 
   return rows.filter((r) => {
