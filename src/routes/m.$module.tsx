@@ -4,7 +4,7 @@ import { AppHeader } from "@/components/Header";
 import { Footer } from "@/components/Footer";
 import { MapProviderToggle } from "@/components/MapProviderToggle";
 import { useAuth } from "@/lib/auth";
-import { getModule, DASHBOARD_GRID_EXCLUDED_SLUGS, type SubModuleDef } from "@/lib/modules";
+import { getModule, DASHBOARD_GRID_EXCLUDED_SLUGS, type ModuleDef, type SubModuleDef } from "@/lib/modules";
 import { getDashboardRoleGate, hasDashboardAccess } from "@/lib/dashboardAccess";
 import { getModuleRoleGate } from "@/lib/moduleAccess";
 import { isModuleAllowed, isSubmoduleAllowed } from "@/lib/roleLabels";
@@ -59,7 +59,12 @@ export const Route = createFileRoute("/m/$module")({
 
 function ModuleIndex() {
   const { ready, email, role, uid, companyId, displayName } = useAuth();
-  const { module: m } = Route.useLoaderData();
+  // Route.useLoaderData() doesn't type-resolve here — see the identical
+  // note in m.$module.$submodule.tsx (parent route with file-based
+  // children; the generated FileRoutesById entry points at the
+  // "WithChildren"-wrapped route, which doesn't forward the loader's
+  // generic). The loader itself already guards with notFound().
+  const { module: m } = Route.useLoaderData() as unknown as { module: ModuleDef };
   const [extraRoles, setExtraRoles] = useState<string[]>([]);
   const isAdmin = [role, ...extraRoles].some((r) => ["ADMIN", "SUPERADMIN"].includes((r || "").toUpperCase()));
 

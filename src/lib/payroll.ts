@@ -1,5 +1,22 @@
 // Payroll Management Utilities
-import type { Employee, PayrollAuditLog } from "@/components/AccountingDashboard";
+
+export interface Employee {
+  id: string;
+  country: "US" | "PH";
+  department: string;
+  totalWages: number;
+}
+
+export interface PayrollAuditLog {
+  id: string;
+  timestamp: string;
+  action: "generate" | "edit" | "delete";
+  employeeId: string;
+  employeeName: string;
+  details: string;
+  userId: string;
+  amount?: number;
+}
 
 const STORAGE_KEYS = {
   EMPLOYEES: "payroll_employees",

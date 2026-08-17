@@ -19,7 +19,7 @@ export interface SubModuleDef {
   // Custom seed generator; receives index
   seed: (i: number) => Record<string, unknown>;
   count?: number;
-  custom?: "part-return" | "part-return-status" | "claims-pipeline" | "work-map" | "part-order" | "part-receive" | "return-pickup" | "repair-statuses" | "ticket-list" | "user-management" | "account-management" | "location-management" | "csr-daily-report" | "call-tracker" | "csr-status-summary" | "csr-team-leader-dashboard" | "reserved-part-list-custom" | "parts-dashboard" | "claims-dashboard" | "staff-list"; // hook for special pages
+  custom?: "part-return" | "part-return-status" | "claims-pipeline" | "work-map" | "part-order" | "part-receive" | "return-pickup" | "repair-statuses" | "ticket-list" | "user-management" | "account-management" | "location-management" | "csr-daily-report" | "call-tracker" | "csr-status-summary" | "csr-team-leader-dashboard" | "reserved-part-list-custom" | "parts-dashboard" | "claims-dashboard" | "staff-list" | "it-tickets" | "company-settings"; // hook for special pages
   /** Still a real, routable submodule (role gates, custom dispatch — everything works) — just excluded from the module's own tile grid because another page links to it directly instead (e.g. Flash Tech Calendar via a button on Expense Tracking). Keeps the tile grid from accumulating every niche page. */
   hiddenFromGrid?: boolean;
 }
@@ -1496,7 +1496,7 @@ const adminMod: ModuleDef = {
       slug: "it-tickets",
       title: "IT Tickets",
       description: "View and manage IT support tickets submitted by employees. IT and Admins can edit/assign/delete; Senior Managers can view.",
-      custom: "it-tickets" as any,
+      custom: "it-tickets",
       fields: [],
       count: 0,
       seed: () => ({}),
@@ -1505,7 +1505,7 @@ const adminMod: ModuleDef = {
       slug: "company-settings",
       title: "Company Settings",
       description: "Edit this company's own record — name, address, subscription plan, login alias. Only available to this company's SuperAdmin.",
-      custom: "company-settings" as any,
+      custom: "company-settings",
       fields: [],
       seed: () => ({}),
     },

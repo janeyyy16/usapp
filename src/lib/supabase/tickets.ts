@@ -216,9 +216,7 @@ function rowToTicket(row: any): Ticket {
     // @ts-expect-error extra field consumed by the Work Planner
     slot: row.time_slot ?? undefined,
     // The internal Supabase ids (handy for updates); not part of the UI type.
-    // @ts-expect-error attach internal ids for service use
     _id: row.id,
-    // @ts-expect-error
     _customerId: row.customer_id,
   };
 }

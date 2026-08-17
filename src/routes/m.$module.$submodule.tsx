@@ -6,7 +6,7 @@ import { RepairForecastPage } from "@/components/RepairForecastPage";
 import { DailyActivityPage } from "@/components/DailyActivityPage";
 import { TriageDashboardPage } from "@/components/TriageDashboardPage";
 import { useAuth } from "@/lib/auth";
-import { getModule, getSubModule } from "@/lib/modules";
+import { getModule, getSubModule, type ModuleDef, type SubModuleDef } from "@/lib/modules";
 import { GenericModulePage } from "@/components/GenericModulePage";
 import { PartReturnStatusPage } from "@/components/PartReturnStatus";
 import { ClaimsPipeline } from "@/components/ClaimsPipeline";
@@ -156,7 +156,16 @@ export const Route = createFileRoute("/m/$module/$submodule")({
 
 function SubModule() {
   const { ready, email, companyId, role, uid } = useAuth();
-  const { mod, sub } = Route.useLoaderData();
+  // Route.useLoaderData() doesn't type-resolve for this route: it's a
+  // parent route with file-based children (_addFileChildren in
+  // routeTree.gen.ts), and the generated FileRoutesById entry points at
+  // the "WithChildren"-wrapped route, which doesn't forward the loader's
+  // generic through ResolveUseLoaderData — confirmed by testing the
+  // freestanding useLoaderData({ from }) form too, which hits the exact
+  // same registration and fails identically. The loader itself is
+  // correct (guards with notFound() before returning), so this just
+  // restates its real, already-guaranteed-non-null shape.
+  const { mod, sub } = Route.useLoaderData() as unknown as { mod: ModuleDef; sub: SubModuleDef };
   const location = useLocation();
 
   // Role gates that also need to honor a secondary role (profiles.
