@@ -118,7 +118,7 @@ export function PayrollCalculationPage({ mod, sub }: { mod: ModuleDef; sub: SubM
       let regularHours = 0;
       let overtimeHours = 0;
       let grossPay = 0;
-      const graceMinutes = payGraceMinutesFor(profileCountry(p), normalizeRole(p.role) === "TECHNICIAN");
+      const graceMinutes = payGraceMinutesFor(profileCountry(p), [p.role, ...(p.extra_roles ?? [])].some((r) => normalizeRole(r) === "TECHNICIAN"));
       for (const day of dayEntries) {
         if (!day.checkIn || !day.checkOut) continue;
         const paidCheckIn = p.required_check_in
@@ -398,7 +398,7 @@ export function PayrollCalculationPage({ mod, sub }: { mod: ModuleDef; sub: SubM
           workingHours={detailProfile.working_hours}
           mealMinutes={detailProfile.meal_minutes}
           offDays={detailProfile.off_days || undefined}
-          graceMinutes={payGraceMinutesFor(profileCountry(detailProfile), normalizeRole(detailProfile.role) === "TECHNICIAN")}
+          graceMinutes={payGraceMinutesFor(profileCountry(detailProfile), [detailProfile.role, ...(detailProfile.extra_roles ?? [])].some((r) => normalizeRole(r) === "TECHNICIAN"))}
           initialStart={startDate || undefined}
           initialEnd={endDate || undefined}
           onClose={() => setDetailProfile(null)}

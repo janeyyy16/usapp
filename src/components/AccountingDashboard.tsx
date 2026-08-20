@@ -629,7 +629,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
         mileageRes,
         repairStatusRes,
       ] = await Promise.all([
-        supabase.from("profiles").select("id,display_name,username,role,extra_roles,assigned_branch,email,off_days,required_check_in,required_check_out,payroll_excluded").neq("role", "SUPERSUPERADMIN"),
+        supabase.from("profiles").select("id,display_name,username,role,extra_roles,assigned_branch,email,off_days,required_check_in,required_check_out,payroll_excluded,is_active").neq("role", "SUPERSUPERADMIN"),
         supabase.from("salary_entries").select("profile_id,effective_date,compensation_type,hourly_rate,annual_salary,created_at").not("profile_id", "is", null).order("effective_date", { ascending: false }).order("created_at", { ascending: false }),
         supabase.from("payroll_runs").select("id,period_start,period_end,status,generated_at").order("generated_at", { ascending: false }),
         supabase.from("payroll_line_items").select("payroll_run_id,profile_id,hours_worked,overtime_hours,hourly_rate,regular_pay,overtime_pay,gross_pay,net_pay,currency,extra_pay,notes,paid,paid_at,compensation_type,annual_salary"),
@@ -687,7 +687,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
         roleLabel,
         country: p.assigned_branch === "Philippines" ? "PH" : "US",
         hourly_rate: null,
-        status: "Active",
+        status: p.is_active === false ? "Inactive" : "Active",
         display_name: p.display_name,
         username: p.username,
         role: p.role,
@@ -879,9 +879,12 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   const hoursMap = computeHoursMap(timecardEntries, employees, ptoRequests, genStart, genEnd);
 
   // Technicians are paid per completed repair ticket (Tech Payroll) instead
-  // of hourly-or-fixed — role === TECHNICIAN only (TECHNICIAN_MANAGER and
-  // everyone else stays on the Office Payroll calculation below).
-  const isTechRole = (emp: SupabaseEmployee) => normalizeRole(emp.role) === "TECHNICIAN";
+  // of hourly-or-fixed — TECHNICIAN only (TECHNICIAN_MANAGER and everyone
+  // else stays on the Office Payroll calculation below). Held either as
+  // primary or secondary role — role/title is for display/hierarchy only,
+  // same convention as MILEAGE_TECH_ROLES below in this same file.
+  const isTechRole = (emp: SupabaseEmployee) =>
+    normalizeRole(emp.role) === "TECHNICIAN" || (emp.extraRoles ?? []).some((r) => normalizeRole(r) === "TECHNICIAN");
 
   // Rate lookup: an exact (repair_type, branch) match wins; otherwise fall
   // back to that repair_type's "All Branches" rate; otherwise the branch's
@@ -1000,7 +1003,12 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   // overtimeHours/hourlyRate/dutyHours stay populated from real
   // punches/schedule (informational, shown for reference) but grossPay is
   // their piece-rate total instead.
-  const payrollRows: EmployeePayrollRow[] = employees.map((emp) => {
+  // Deactivated employees are excluded from the current paysheet (nobody
+  // should be generating/sending a NEW payroll period for a terminated
+  // account) — but `employees` itself stays unfiltered so nameById above
+  // can still resolve a terminated employee's name on historical runs/
+  // audit-log/timecard-correction entries.
+  const payrollRows: EmployeePayrollRow[] = employees.filter((emp) => emp.status !== "Inactive").map((emp) => {
     const comp = latestCompMap.get(emp.id);
     const isFixed = comp?.compensation_type === "fixed";
     const hourlyRate = isFixed ? 0 : comp?.hourly_rate ?? emp.hourly_rate ?? 0;
@@ -1810,8 +1818,9 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   const mileageTechnicians = [...employees]
     .filter(
       (e) =>
-        MILEAGE_TECH_ROLES.has(normalizeRole(e.role)) ||
-        (e.extraRoles ?? []).some((r) => MILEAGE_TECH_ROLES.has(normalizeRole(r)))
+        e.status !== "Inactive" &&
+        (MILEAGE_TECH_ROLES.has(normalizeRole(e.role)) ||
+          (e.extraRoles ?? []).some((r) => MILEAGE_TECH_ROLES.has(normalizeRole(r))))
     )
     .sort((a, b) => a.full_name.localeCompare(b.full_name));
   const employeeNameById = new Map(employees.map((e) => [e.id, e.full_name]));

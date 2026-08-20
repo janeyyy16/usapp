@@ -541,7 +541,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
       // definitively missing (see computeAlerts' nowHHMM=null doc comment).
       const rowNowHHMM = isToday ? (nowByTimezone[branchTz] ?? nowInTimezone(branchTz).hhmm) : null;
       const country = p.assigned_branch === "Philippines" ? "PH" : "US";
-      const graceMinutes = payGraceMinutesFor(country, normalizeRole(p.role) === "TECHNICIAN");
+      const graceMinutes = payGraceMinutesFor(country, [p.role, ...(p.extra_roles ?? [])].some((r) => normalizeRole(r) === "TECHNICIAN"));
       const alerts = computeAlerts(checkIn, checkOut, mealIn, mealOut, p.required_check_in || "", p.required_check_out || "", isOffDay, rowNowHHMM, graceMinutes, p.working_hours);
       const clockedInByName = entry?.clockedInBy ? allProfileById.get(entry.clockedInBy)?.display_name || null : null;
       return {
@@ -711,7 +711,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
         const checkOut = entry?.checkOut || "";
         if (checkIn) present++;
         const monthlyCountry = p.assigned_branch === "Philippines" ? "PH" : "US";
-        const monthlyGraceMinutes = payGraceMinutesFor(monthlyCountry, normalizeRole(p.role) === "TECHNICIAN");
+        const monthlyGraceMinutes = payGraceMinutesFor(monthlyCountry, [p.role, ...(p.extra_roles ?? [])].some((r) => normalizeRole(r) === "TECHNICIAN"));
         const alerts = computeAlerts(checkIn, checkOut, entry?.mealStart || "", entry?.mealEnd || "", p.required_check_in || "", p.required_check_out || "", false, null, monthlyGraceMinutes, p.working_hours);
         if (alerts.some(isPenalizedLateAlert)) late++;
       }
