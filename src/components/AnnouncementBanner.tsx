@@ -12,6 +12,7 @@ import { useEffect, useRef, useState } from "react";
 import { Megaphone, X } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useAuth } from "@/lib/auth";
+import { canManageChannelsRole } from "@/lib/roleLabels";
 import {
   type ChannelRow,
   type MessageRow,
@@ -36,7 +37,7 @@ function formatTimestamp(value: string) {
 }
 
 export function AnnouncementBanner() {
-  const { ready, uid } = useAuth();
+  const { ready, uid, role, extraRoles } = useAuth();
   const navigate = useNavigate();
   const [profileId, setProfileId] = useState<string | null>(null);
   const [channel, setChannel] = useState<ChannelRow | null>(null);
@@ -71,7 +72,7 @@ export function AnnouncementBanner() {
       try {
         const [pid, ch] = await Promise.all([
           getMyProfileId(uid),
-          getAnnouncementsChannel(),
+          getAnnouncementsChannel(canManageChannelsRole(role, extraRoles)),
         ]);
         if (cancelled || !pid) return;
         setProfileId(pid);

@@ -113,9 +113,18 @@ export const DEFAULT_CHANNELS: Array<Omit<ChannelRow, "id" | "created_at" | "is_
 
 /**
  * Return all channels for the caller's company. Creates the default channel
- * set on first call so a brand-new tenant has a working chat UI immediately.
+ * set on first call so a brand-new tenant has a working chat UI immediately
+ * — but only when `canSeed` is true (pass canManageChannelsRole(role,
+ * extraRoles) from the caller's own useAuth()). The seed insert can only
+ * ever pass RLS for Admin/SuperAdmin (can_manage_channels(), migration
+ * 0137); without this guard, a non-admin caller in a company that's never
+ * been seeded yet retried and failed this insert on every single refresh
+ * forever (confirmed live — one real tenant was spamming "new row violates
+ * row-level security policy for table message_channels" into the Postgres
+ * logs roughly once a minute). A non-admin caller here just sees an empty
+ * list until an Admin/SuperAdmin happens to open messaging once.
  */
-export async function listChannels(): Promise<ChannelRow[]> {
+export async function listChannels(canSeed = false): Promise<ChannelRow[]> {
   const { data, error } = await supabase
     .from("message_channels")
     .select(CHANNEL_COLUMNS)
@@ -129,7 +138,7 @@ export async function listChannels(): Promise<ChannelRow[]> {
   // because the caller isn't a member of some private channel — the
   // defaults are always is_private=false, so once seeded they stay visible
   // to everyone and `existing` is never empty again for this company.)
-  if (existing.length === 0) {
+  if (existing.length === 0 && canSeed) {
     const inserts = DEFAULT_CHANNELS.map((c) => ({ ...c }));
     const { data: created, error: insErr } = await supabase
       .from("message_channels")
@@ -395,12 +404,26 @@ export function subscribeToMessages(params: {
 
 /**
  * Resolve (or auto-create) the company's #announcements channel. Used by the
- * announcements page and the header badge counter.
+ * announcements page and the header badge counter — both mounted for every
+ * signed-in user, admin or not.
+ *
+ * `canSeed` (pass canManageChannelsRole(role, extraRoles) from the caller's
+ * own useAuth()) gates BOTH the seed-on-empty-tenant path inside
+ * listChannels() AND this function's own defensive re-create fallback below
+ * — either one attempting an insert for a non-admin caller in a tenant
+ * that's never been seeded fails RLS every time it's called (can_manage_
+ * channels() is Admin/SuperAdmin only), and since this runs on every
+ * mount for every user, that's the single biggest source of the repeated
+ * "new row violates row-level security policy for table message_channels"
+ * spam seen in the Postgres logs. A non-admin caller here just gets a
+ * thrown error (already caught by every current call site) until an
+ * Admin/SuperAdmin happens to open messaging or announcements once.
  */
-export async function getAnnouncementsChannel(): Promise<ChannelRow> {
-  const channels = await listChannels();
+export async function getAnnouncementsChannel(canSeed = false): Promise<ChannelRow> {
+  const channels = await listChannels(canSeed);
   const ann = channels.find((c) => c.slug === "announcements" || c.is_announcement);
   if (ann) return ann;
+  if (!canSeed) throw new Error("No #announcements channel yet — ask an Admin/SuperAdmin to open Team Messenger once.");
   // Defensive fallback — listChannels normally seeds it, but if a tenant
   // somehow lost the row we recreate just this one.
   const { data, error } = await supabase

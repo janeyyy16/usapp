@@ -10,6 +10,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Megaphone, Send } from "lucide-react";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 import { useAuth } from "@/lib/auth";
+import { canManageChannelsRole } from "@/lib/roleLabels";
 import {
   type ChannelRow,
   type MessageRow,
@@ -56,7 +57,7 @@ function formatTimestamp(value: string) {
 }
 
 export function AnnouncementsPage(_: Props) {
-  const { email, ready, uid, displayName, role } = useAuth();
+  const { email, ready, uid, displayName, role, extraRoles } = useAuth();
   const [profileId, setProfileId] = useState<string | null>(null);
   const [channel, setChannel] = useState<ChannelRow | null>(null);
   const [messages, setMessages] = useState<MessageRow[]>([]);
@@ -76,7 +77,7 @@ export function AnnouncementsPage(_: Props) {
       try {
         const [pid, ch] = await Promise.all([
           getMyProfileId(uid),
-          getAnnouncementsChannel(),
+          getAnnouncementsChannel(canManageChannelsRole(role, extraRoles)),
         ]);
         if (cancelled) return;
         setProfileId(pid);

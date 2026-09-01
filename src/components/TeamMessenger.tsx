@@ -17,6 +17,7 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import { useSmartBack } from "@/hooks/useSmartBack";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 import { useAuth } from "@/lib/auth";
+import { canManageChannelsRole } from "@/lib/roleLabels";
 import { hasDashboardAccess } from "@/lib/dashboardAccess";
 import { resolvePresenceStatus, PRESENCE_DOT_CLASS, PRESENCE_LABEL } from "@/lib/presence";
 import { MessageBody } from "@/components/MessageBody";
@@ -149,7 +150,7 @@ export function TeamMessenger({ mod, sub }: Props) {
   useEffect(() => {
     if (!ready || !profileId) return;
     let cancelled = false;
-    Promise.all([listChannels(), getCompanyUsers()])
+    Promise.all([listChannels(canManageChannelsRole(role, extraRoles)), getCompanyUsers()])
       .then(async ([chans, users]) => {
         if (cancelled) return;
         setChannels(chans);

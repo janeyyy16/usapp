@@ -16,6 +16,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useAuth } from "@/lib/auth";
+import { canManageChannelsRole } from "@/lib/roleLabels";
 import {
   type ChannelRow,
   type MessageRow,
@@ -54,7 +55,7 @@ function formatTimestamp(value: string) {
 }
 
 export function AnnouncementsMenu() {
-  const { email, ready, uid, role } = useAuth();
+  const { email, ready, uid, role, extraRoles } = useAuth();
   const navigate = useNavigate();
   const [profileId, setProfileId] = useState<string | null>(null);
   const [channel, setChannel] = useState<ChannelRow | null>(null);
@@ -83,7 +84,7 @@ export function AnnouncementsMenu() {
       try {
         const [pid, ch] = await Promise.all([
           getMyProfileId(uid),
-          getAnnouncementsChannel(),
+          getAnnouncementsChannel(canManageChannelsRole(role, extraRoles)),
         ]);
         if (cancelled) return;
         setProfileId(pid);

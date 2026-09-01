@@ -267,6 +267,20 @@ export function isCompanySuperAdminRole(
   return (extraRoles ?? []).some((r) => normalizeRole(r) === "SUPERADMIN");
 }
 
+const CHANNEL_MANAGER_ROLES = new Set(["ADMIN"]);
+
+/**
+ * Mirrors the SQL can_manage_channels() (migration 0137) — Admin, company
+ * SuperAdmin, or the platform SuperSuperAdmin. listChannels() (messaging.ts)
+ * checks this client-side before ever attempting its "seed default channels
+ * for an empty tenant" insert — that insert can only pass RLS for these
+ * roles, so a non-admin caller in a not-yet-seeded company would otherwise
+ * retry and fail it on every single refresh, forever.
+ */
+export function canManageChannelsRole(role: string | null | undefined, extraRoles?: string[] | null): boolean {
+  return isCompanySuperAdminRole(role, extraRoles) || anyHeldRoleIn(CHANNEL_MANAGER_ROLES, role, extraRoles);
+}
+
 const FINANCE_ROLES = new Set(["FINANCE"]);
 
 /** Holds the FINANCE role, primary or extra — "any held role" pile-up semantics, matching every other role check in this file. */

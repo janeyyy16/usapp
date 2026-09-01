@@ -19,6 +19,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useAuth } from "@/lib/auth";
+import { canManageChannelsRole } from "@/lib/roleLabels";
 import {
   type ChannelRow,
   type MessageRow,
@@ -63,7 +64,8 @@ function initials(name: string) {
 }
 
 export function MessagesMenu() {
-  const { email, ready, uid } = useAuth();
+  const { email, ready, uid, role, extraRoles } = useAuth();
+  const canSeedChannels = canManageChannelsRole(role, extraRoles);
   const navigate = useNavigate();
   const [profileId, setProfileId] = useState<string | null>(null);
   const [previews, setPreviews] = useState<ThreadPreview[]>([]);
@@ -78,7 +80,7 @@ export function MessagesMenu() {
     try {
       // 1. Identity / lookups in parallel.
       const [channels, users, counts, dmRowsRes] = await Promise.all([
-        listChannels(),
+        listChannels(canSeedChannels),
         getCompanyUsers(),
         getUnreadCounts(pid),
         supabase
