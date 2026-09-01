@@ -1166,24 +1166,36 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   // EmployeePayrollDetailModal (which edits timecard_entries directly, not
   // through fetchData's own queries) can also trigger it on demand instead
   // of only reacting to genStart/genEnd changing.
-  const reloadTimecardEntries = useCallback(() => {
+  const reloadTimecardEntries = useCallback(async () => {
     if (!genStart || !genEnd || genStart > genEnd) {
       setTimecardEntries([]);
       return;
     }
-    supabase
-      .from("timecard_entries")
-      .select("profile_id,employee_id,work_date,check_in,check_out,meal_start,meal_end,status")
-      .gte("work_date", genStart)
-      .lte("work_date", genEnd)
-      .then(({ data, error }) => {
-        if (error) {
-          console.error("Failed to load attendance for selected payroll period:", error.message);
-          setTimecardEntries([]);
-        } else {
-          setTimecardEntries((data ?? []) as TimecardEntry[]);
-        }
-      });
+    // Paginated like every other bulk query in this file (see PAGE_SIZE) —
+    // a plain unbounded select() silently truncates at Supabase's default
+    // 1000-row cap. Confirmed live: a 26-day period on this company alone
+    // already has 1,864 matching rows, so a real employee's attendance for
+    // part of the period was silently missing from every hours/pay total
+    // that reads timecardEntries (hoursMap, workingDaysCountByProfile) —
+    // not a rare edge case, just whichever rows happened to fall past 1000.
+    try {
+      const all: TimecardEntry[] = [];
+      for (let from = 0; ; from += PAGE_SIZE) {
+        const { data, error } = await supabase
+          .from("timecard_entries")
+          .select("profile_id,employee_id,work_date,check_in,check_out,meal_start,meal_end,status")
+          .gte("work_date", genStart)
+          .lte("work_date", genEnd)
+          .range(from, from + PAGE_SIZE - 1);
+        if (error) throw error;
+        all.push(...((data ?? []) as TimecardEntry[]));
+        if (!data || data.length < PAGE_SIZE) break;
+      }
+      setTimecardEntries(all);
+    } catch (error) {
+      console.error("Failed to load attendance for selected payroll period:", error instanceof Error ? error.message : error);
+      setTimecardEntries([]);
+    }
   }, [genStart, genEnd]);
 
   useEffect(() => {
@@ -4455,6 +4467,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
         return (
           <TechActivityReportModal
             row={activityRow}
+            hireDate={employeeInfoByProfileId.get(activityRow.employee.id)?.hireDate || null}
             periodStart={genStart}
             periodEnd={genEnd}
             techRepairRates={techRepairRates}

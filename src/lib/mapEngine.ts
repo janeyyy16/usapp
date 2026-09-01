@@ -528,6 +528,18 @@ export const ON_SITE_CHECKIN_ACCURACY_SLACK_CAP_MILES = metersToMiles(250);
  */
 export const ON_SITE_CHECKIN_MANUAL_OVERRIDE_MAX_MILES = 3;
 
+/**
+ * Geofence radius for TechnicianLocationTracker.tsx's auto-proposed Time
+ * Out (arriving back at branch or home) — deliberately its own constant,
+ * not ON_SITE_CHECKIN_RADIUS_MILES, even though it started as a reuse of
+ * that one. A branch office/parking lot and a home address both cover more
+ * ground than a single ticket's front door, and widening the shared
+ * ticket-arrival radius to match would also let a technician tap "I'm
+ * Here" on a job from a mile away, which is a different (and much riskier)
+ * behavior change than what this constant is for.
+ */
+export const CHECKOUT_PROPOSAL_RADIUS_MILES = 1;
+
 export function formatDuration(seconds: number): string {
   const mins = Math.round(seconds / 60);
   if (mins < 60) return `${mins} min`;

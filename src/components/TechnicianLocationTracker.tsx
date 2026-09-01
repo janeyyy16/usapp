@@ -29,7 +29,7 @@ import { getEntryForDate } from "@/lib/supabase/timecards";
 import { hasConfirmedLocationConsent, upsertMyLocationPing, clearMyLocationPing } from "@/lib/supabase/technicianLocationPings";
 import { upsertMyCheckoutProposal } from "@/lib/supabase/technicianCheckoutProposals";
 import { getMyLatestVisitUpdate } from "@/lib/supabase/tickets";
-import { getOfficeCoordinates, geocodeAddress, haversineMiles, ON_SITE_CHECKIN_RADIUS_MILES, type LatLng } from "@/lib/mapEngine";
+import { getOfficeCoordinates, geocodeAddress, haversineMiles, CHECKOUT_PROPOSAL_RADIUS_MILES, type LatLng } from "@/lib/mapEngine";
 import { getCompanyMapProvider } from "@/lib/supabase/companySettings";
 import { setLocationSharingStatus } from "@/lib/locationSharingStatus";
 import { useLiveLocation } from "@/lib/liveLocationContext";
@@ -213,15 +213,16 @@ export function TechnicianLocationTracker() {
         ).catch((err) => console.error("[TechnicianLocationTracker] upsertMyLocationPing failed:", err));
 
         // Auto-propose a Time Out the moment this fix lands back inside
-        // the branch or home geofence — same radius On-Site Check-In
-        // already uses. Once per shift only (proposedCheckoutThisShiftRef);
-        // a SuperAdmin/Finance reviewer approves or the tech's own next
-        // clock-in resets it, so a wrong/early hit isn't permanent.
+        // the branch or home geofence (CHECKOUT_PROPOSAL_RADIUS_MILES — its
+        // own constant, not On-Site Check-In's). Once per shift only
+        // (proposedCheckoutThisShiftRef); a SuperAdmin/Finance reviewer
+        // approves or the tech's own next clock-in resets it, so a
+        // wrong/early hit isn't permanent.
         const coords = branchHomeRef.current;
         if (coords && !proposedCheckoutThisShiftRef.current && (coords.branch || coords.home)) {
           const here: LatLng = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-          const nearBranch = coords.branch ? haversineMiles(here, coords.branch) <= ON_SITE_CHECKIN_RADIUS_MILES : false;
-          const nearHome = coords.home ? haversineMiles(here, coords.home) <= ON_SITE_CHECKIN_RADIUS_MILES : false;
+          const nearBranch = coords.branch ? haversineMiles(here, coords.branch) <= CHECKOUT_PROPOSAL_RADIUS_MILES : false;
+          const nearHome = coords.home ? haversineMiles(here, coords.home) <= CHECKOUT_PROPOSAL_RADIUS_MILES : false;
           if (nearBranch || nearHome) {
             proposedCheckoutThisShiftRef.current = true;
             const at = new Date(now);

@@ -21,6 +21,8 @@ import { getCompanyEmployeeRequests, type EmployeeRequestRow } from "@/lib/supab
 
 interface Props {
   row: EmployeePayrollRow;
+  /** profiles.employee_info.hireDate ("YYYY-MM-DD") — same field HR's Master List edits. Null when never set. */
+  hireDate: string | null;
   periodStart: string;
   periodEnd: string;
   techRepairRates: TechRepairRate[];
@@ -64,6 +66,7 @@ function fmt(amount: number) {
  */
 export function TechActivityReportModal({
   row,
+  hireDate,
   periodStart,
   periodEnd,
   techRepairRates,
@@ -600,6 +603,13 @@ export function TechActivityReportModal({
                     ))}
                   </div>
                 )}
+              </div>
+
+              <div className="bg-slate-800/50 border border-white/10 rounded-lg px-3 py-2.5">
+                <p className="text-[10px] text-slate-400 uppercase tracking-wide mb-1.5">Start Date</p>
+                <p className="text-xs text-slate-300">
+                  {hireDate ? new Date(`${hireDate}T00:00:00`).toLocaleDateString("en-US") : "Not on file"}
+                </p>
               </div>
             </div>
           </div>
