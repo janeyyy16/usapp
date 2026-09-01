@@ -1030,6 +1030,98 @@ async function runBatched<T>(
   }
 }
 
+export interface LatestVisitUpdate {
+  ticketNo: string;
+  updatedAt: string;
+}
+
+/**
+ * This technician's own most recent visit update, across any ticket —
+ * attached to an auto-proposed Time Out (technicianCheckoutProposals.ts)
+ * so a SuperAdmin/Finance reviewer can see what they were last working on
+ * right before the geofence fired. Two queries (visits, then that one
+ * ticket's ticket_no) rather than an embedded select — visits' FK to
+ * tickets is composite (ticket_id, company_id), which Supabase's
+ * relationship inference doesn't reliably resolve.
+ */
+export async function getMyLatestVisitUpdate(profileId: string): Promise<LatestVisitUpdate | null> {
+  const { data, error } = await supabase
+    .from("visits")
+    .select("ticket_id, updated_at")
+    .eq("updated_by", profileId)
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    console.error("getMyLatestVisitUpdate error:", error.message);
+    return null;
+  }
+  if (!data?.ticket_id) return null;
+  const { data: ticket, error: ticketErr } = await supabase
+    .from("tickets")
+    .select("ticket_no")
+    .eq("id", data.ticket_id)
+    .maybeSingle();
+  if (ticketErr || !ticket?.ticket_no) return null;
+  return { ticketNo: ticket.ticket_no, updatedAt: data.updated_at };
+}
+
+/**
+ * Each given technician's own most recent visit update — Attendance
+ * Monitoring's Daily Attendance Tracker shows this next to Check Out for
+ * every technician row, not just ones with a pending checkout proposal.
+ * One bulk visits query (capped, most-recent-first, keeping only the first
+ * — i.e. latest — row per technician) plus one bulk tickets lookup for
+ * just the distinct ticket ids actually needed, rather than two queries
+ * per technician.
+ */
+export async function getLatestVisitUpdatesByProfileIds(profileIds: string[]): Promise<Map<string, LatestVisitUpdate>> {
+  const out = new Map<string, LatestVisitUpdate>();
+  const uniq = Array.from(new Set(profileIds.filter(Boolean)));
+  if (uniq.length === 0) return out;
+
+  const ticketIdByProfile = new Map<string, string>();
+  const updatedAtByProfile = new Map<string, string>();
+  await runBatched(uniq, async (batch) => {
+    const { data, error } = await supabase
+      .from("visits")
+      .select("updated_by, ticket_id, updated_at")
+      .in("updated_by", batch)
+      .not("ticket_id", "is", null)
+      .order("updated_at", { ascending: false });
+    if (error) {
+      console.error("getLatestVisitUpdatesByProfileIds error:", error.message);
+      return;
+    }
+    for (const row of data ?? []) {
+      const pid = (row as any).updated_by as string | null;
+      const tid = (row as any).ticket_id as string | null;
+      if (!pid || !tid || ticketIdByProfile.has(pid)) continue;
+      ticketIdByProfile.set(pid, tid);
+      updatedAtByProfile.set(pid, (row as any).updated_at);
+    }
+  });
+
+  const ticketIds = Array.from(new Set(ticketIdByProfile.values()));
+  if (ticketIds.length === 0) return out;
+  const ticketNoById = new Map<string, string>();
+  await runBatched(ticketIds, async (batch) => {
+    const { data, error } = await supabase.from("tickets").select("id, ticket_no").in("id", batch);
+    if (error) {
+      console.error("getLatestVisitUpdatesByProfileIds ticket lookup error:", error.message);
+      return;
+    }
+    for (const t of data ?? []) ticketNoById.set((t as any).id, (t as any).ticket_no);
+  });
+
+  for (const [pid, tid] of ticketIdByProfile) {
+    const ticketNo = ticketNoById.get(tid);
+    const updatedAt = updatedAtByProfile.get(pid);
+    if (ticketNo && updatedAt) out.set(pid, { ticketNo, updatedAt });
+  }
+  return out;
+}
+
 export async function getLatestVisitTechnicianByTicketIds(
   ticketIds: string[],
 ): Promise<Map<string, string>> {

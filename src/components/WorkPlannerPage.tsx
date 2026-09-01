@@ -287,6 +287,24 @@ export function WorkPlannerPage({ mod, sub }: Props) {
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
   const [selectedMarkerIndex, setSelectedMarkerIndex] = useState(0);
+  // The tickets that actually got a marker plotted (geocoding failures are
+  // skipped), in the same order markers were created — what the pin
+  // navigator's prev/next buttons and "N / M" count actually cycle over.
+  // Kept in a ref (read inside the pan effect below) plus mirrored into
+  // state so the displayed count re-renders when it changes.
+  const plottedTicketsRef = useRef<Array<{ ticket: PlannerTicket; position: { lat: number; lng: number } }>>([]);
+  const [plottedTicketCount, setPlottedTicketCount] = useState(0);
+  // Technicians unchecked in the map legend — their tickets are skipped
+  // when plotting pins/routes on THIS map only (the ticket list panel,
+  // Technicians summary table, etc. are untouched). Empty = everyone shown,
+  // matching every checkbox starting checked.
+  const [hiddenMapTechs, setHiddenMapTechs] = useState<Set<string>>(new Set());
+  // A technician being hidden/shown can move or remove whichever pin the
+  // navigator currently points at — reset to the first pin rather than
+  // leaving it pointed at a now out-of-range (or now-hidden) index.
+  useEffect(() => {
+    setSelectedMarkerIndex(0);
+  }, [hiddenMapTechs]);
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
   const markersRef = useRef<any[]>([]);
@@ -460,6 +478,14 @@ export function WorkPlannerPage({ mod, sub }: Props) {
       return true;
     });
   }, [plannerTickets, plannerDate, location, showRescheduled]);
+
+  // Map-only filter — unchecking a technician in the legend hides their
+  // pins/route from the "Assigned Locations Map" without touching the
+  // ticket list, Technicians summary table, or anything else on this page.
+  const mapVisibleTickets = useMemo(
+    () => (hiddenMapTechs.size === 0 ? visibleTickets : visibleTickets.filter((t) => !hiddenMapTechs.has(t.technician || "Unassigned"))),
+    [visibleTickets, hiddenMapTechs]
+  );
 
   // Roster (assigned_branch match + this branch's default technician) PLUS
   // anyone who actually has a real ticket here today even if their own
@@ -761,7 +787,7 @@ export function WorkPlannerPage({ mod, sub }: Props) {
     // Work Map. Only covers the primary attempt; the fallback chain below
     // (city+state+zip, city+state, zip, location name) still runs live and
     // unchanged for tickets whose primary address is a genuine cache miss.
-    const primaryQueries = visibleTickets
+    const primaryQueries = mapVisibleTickets
       .filter((ticket) => !geocodeCacheRef.current.has(`${ticket.location}:${ticket.ticketNo}`))
       .map((ticket) => ticket.address)
       .filter(Boolean) as string[];
@@ -770,7 +796,7 @@ export function WorkPlannerPage({ mod, sub }: Props) {
       if (cancelled) return;
 
       Promise.all(
-        visibleTickets.map(async (ticket) => {
+        mapVisibleTickets.map(async (ticket) => {
           const cacheKey = `${ticket.location}:${ticket.ticketNo}`;
           if (geocodeCacheRef.current.has(cacheKey)) {
             return { ticket, position: geocodeCacheRef.current.get(cacheKey) };
@@ -831,15 +857,24 @@ export function WorkPlannerPage({ mod, sub }: Props) {
         (a, b) => slotRank((a.ticket as any).slot) - slotRank((b.ticket as any).slot),
       );
 
+      // Only tickets that actually resolved a position get a marker — this
+      // is also what the pin navigator (prev/next buttons) cycles over, so
+      // it must be built as its own array with its own index rather than
+      // skipping mid-loop, or a "skipped" ticket earlier in the list would
+      // throw every later marker's index out of sync with the navigator.
+      orderedResults
+        .filter((r) => !r.position)
+        .forEach(({ ticket }) => console.warn(`No position found for ticket ${ticket.ticketNo}, skipping marker`));
+      const plottedResults = orderedResults.filter(
+        (r): r is { ticket: PlannerTicket; position: { lat: number; lng: number } } => Boolean(r.position),
+      );
+      plottedTicketsRef.current = plottedResults;
+      setPlottedTicketCount(plottedResults.length);
+
       // Group tickets by technician to determine hierarchy numbers
       const ticketsByTech = new Map<string, number>();
 
-      orderedResults.forEach(({ ticket, position }, index) => {
-        if (!position) {
-          console.warn(`No position found for ticket ${ticket.ticketNo}, skipping marker`);
-          return;
-        }
-
+      plottedResults.forEach(({ ticket, position }, index) => {
         // Determine hierarchy number for this technician
         const techName = ticket.technician || "Unassigned";
         const currentCount = ticketsByTech.get(techName) || 0;
@@ -929,7 +964,7 @@ export function WorkPlannerPage({ mod, sub }: Props) {
       } else if (mapProvider === "google" ? !bounds.isEmpty() : bounds.isValid()) {
         fitMapBounds();
       } else {
-        const fallbackLocation = visibleTickets[0]?.location || selectedTechRoster[0] || location;
+        const fallbackLocation = mapVisibleTickets[0]?.location || selectedTechRoster[0] || location;
         geocodeOfficeLocation(fallbackLocation).then((position) => {
           if (cancelled || !activeMap) return;
           if (position) {
@@ -943,7 +978,21 @@ export function WorkPlannerPage({ mod, sub }: Props) {
     });
 
     return () => { cancelled = true; };
-  }, [mapReady, mapProvider, visibleTickets, techHomes, L]);
+  }, [mapReady, mapProvider, mapVisibleTickets, techHomes, L]);
+
+  // Pin navigator (prev/next buttons) — pans the map to whichever plotted
+  // ticket selectedMarkerIndex now points at. Previously nothing consumed
+  // selectedMarkerIndex at all once set, so the buttons updated the "N / M"
+  // counter but the map itself never visibly moved.
+  useEffect(() => {
+    if (!mapReady || !mapProvider) return;
+    const entry = plottedTicketsRef.current[selectedMarkerIndex];
+    if (!entry) return;
+    const activeMap = mapProvider === "google" ? mapRef.current : leafletMapRef.current;
+    if (!activeMap) return;
+    if (mapProvider === "google") activeMap.panTo(entry.position);
+    else (activeMap as Leaflet.Map).panTo([entry.position.lat, entry.position.lng]);
+  }, [selectedMarkerIndex, mapReady, mapProvider]);
 
   // Satellite view is Google-only (plain OSM tiles have no free satellite
   // layer) — this effect is a no-op in Leaflet mode.
@@ -1068,8 +1117,6 @@ export function WorkPlannerPage({ mod, sub }: Props) {
 
     dragSourceRef.current = null;
   };
-
-  const selectedMarker = visibleTickets[selectedMarkerIndex] ?? null;
 
   const currentLocationLabel = location || "Select a location";
 
@@ -1253,9 +1300,29 @@ export function WorkPlannerPage({ mod, sub }: Props) {
               </div>
             )}
             <div className="pin-navigator">
-              <button className="pin-nav-btn" type="button" title="Previous pin" onClick={() => setSelectedMarkerIndex((current) => (visibleTickets.length ? (current - 1 + visibleTickets.length) % visibleTickets.length : 0))}>❮</button>
-              <span className="pin-nav-info">{visibleTickets.length ? `${selectedMarkerIndex + 1} / ${visibleTickets.length}` : "—"}</span>
-              <button className="pin-nav-btn" type="button" title="Next pin" onClick={() => setSelectedMarkerIndex((current) => (visibleTickets.length ? (current + 1) % visibleTickets.length : 0))}>❯</button>
+              <button
+                className="pin-nav-btn"
+                type="button"
+                title="Previous pin"
+                disabled={plottedTicketCount === 0}
+                onClick={() => setSelectedMarkerIndex((current) =>
+                  plottedTicketCount ? (current - 1 + plottedTicketCount) % plottedTicketCount : 0
+                )}
+              >
+                ❮
+              </button>
+              <span className="pin-nav-info">{plottedTicketCount ? `${selectedMarkerIndex + 1} / ${plottedTicketCount}` : "—"}</span>
+              <button
+                className="pin-nav-btn"
+                type="button"
+                title="Next pin"
+                disabled={plottedTicketCount === 0}
+                onClick={() => setSelectedMarkerIndex((current) =>
+                  plottedTicketCount ? (current + 1) % plottedTicketCount : 0
+                )}
+              >
+                ❯
+              </button>
             </div>
             {mapProvider === "leaflet" ? (
               <div ref={leafletContainerRef} className="google-map-canvas" aria-label="Map" />
@@ -1271,10 +1338,23 @@ export function WorkPlannerPage({ mod, sub }: Props) {
             )}
             <div className="legend-for-map" id="mapLegend">
               {selectedTechRoster.slice(0, 5).map((tech, index) => (
-                <div key={tech} className="legend-for-map-item">
-                    <span className={`legend-color-dot tone-tech-${index % 6}`} />
+                <label key={tech} className="legend-for-map-item" style={{ cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={!hiddenMapTechs.has(tech)}
+                    onChange={(e) => {
+                      setHiddenMapTechs((prev) => {
+                        const next = new Set(prev);
+                        if (e.target.checked) next.delete(tech);
+                        else next.add(tech);
+                        return next;
+                      });
+                    }}
+                    style={{ marginRight: 2 }}
+                  />
+                  <span className={`legend-color-dot tone-tech-${index % 6}`} />
                   <span>{tech}</span>
-                </div>
+                </label>
               ))}
             </div>
           </div>

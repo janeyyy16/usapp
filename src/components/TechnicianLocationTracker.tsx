@@ -24,11 +24,16 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth";
-import { getMyProfileId } from "@/lib/supabase/users";
+import { getMyProfileId, getMyFullProfile, getTechnicianContactInfoByIds } from "@/lib/supabase/users";
 import { getEntryForDate } from "@/lib/supabase/timecards";
 import { hasConfirmedLocationConsent, upsertMyLocationPing, clearMyLocationPing } from "@/lib/supabase/technicianLocationPings";
+import { upsertMyCheckoutProposal } from "@/lib/supabase/technicianCheckoutProposals";
+import { getMyLatestVisitUpdate } from "@/lib/supabase/tickets";
+import { getOfficeCoordinates, geocodeAddress, haversineMiles, ON_SITE_CHECKIN_RADIUS_MILES, type LatLng } from "@/lib/mapEngine";
+import { getCompanyMapProvider } from "@/lib/supabase/companySettings";
 import { setLocationSharingStatus } from "@/lib/locationSharingStatus";
 import { useLiveLocation } from "@/lib/liveLocationContext";
+import { TECHNICIAN_PAY_ROLES, normalizeRole } from "@/lib/roleLabels";
 
 // Routine tracing -- "not eligible" fires on every load for every
 // non-technician account (Admin/CSR/HR/SUPERADMIN...), which is the normal,
@@ -48,8 +53,7 @@ function todayKey(): string {
 }
 
 function isTechnicianRole(role: string | null, extraRoles: string[]): boolean {
-  const roles = [role, ...extraRoles].map((r) => (r || "").toUpperCase());
-  return roles.includes("TECHNICIAN") || roles.includes("TECHNICIAN_MANAGER");
+  return [role, ...extraRoles].some((r) => TECHNICIAN_PAY_ROLES.has(normalizeRole(r)));
 }
 
 export function TechnicianLocationTracker() {
@@ -63,6 +67,11 @@ export function TechnicianLocationTracker() {
 
   const watchIdRef = useRef<number | null>(null);
   const lastUploadRef = useRef(0);
+  // Resolved once per shift (branch office coords are a synchronous lookup;
+  // home needs a one-time geocode) so the geofence check on every position
+  // update is a cheap local haversine, not a network call each time.
+  const branchHomeRef = useRef<{ branch: LatLng | null; home: LatLng | null } | null>(null);
+  const proposedCheckoutThisShiftRef = useRef(false);
   const promptHandledThisShiftRef = useRef(false);
   const loadedDateKeyRef = useRef<string>(todayKey());
   const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
@@ -134,6 +143,30 @@ export function TechnicianLocationTracker() {
     };
   }, [armed, profileId]);
 
+  // Resolve this technician's branch + home coordinates once per shift —
+  // feeds the auto-proposed-checkout geofence check inside startWatch's
+  // position callback below, without re-geocoding on every single ping.
+  useEffect(() => {
+    if (!armed || !clockedIn || !profileId || !uid || branchHomeRef.current) return;
+    let cancelled = false;
+    (async () => {
+      const [myProfile, contactInfo, mapProvider] = await Promise.all([
+        getMyFullProfile(uid),
+        getTechnicianContactInfoByIds([profileId]),
+        getCompanyMapProvider(),
+      ]);
+      if (cancelled) return;
+      const branch = myProfile?.assignedBranch ? getOfficeCoordinates(myProfile.assignedBranch) : null;
+      const homeAddress = contactInfo.get(profileId)?.address;
+      const homeHit = homeAddress ? await geocodeAddress(mapProvider, homeAddress) : null;
+      if (cancelled) return;
+      branchHomeRef.current = { branch, home: homeHit ? { lat: homeHit.lat, lng: homeHit.lng } : null };
+    })().catch((err) => console.error("[TechnicianLocationTracker] resolving branch/home coords failed:", err));
+    return () => {
+      cancelled = true;
+    };
+  }, [armed, clockedIn, profileId, uid]);
+
   const stopWatch = () => {
     if (watchIdRef.current !== null) {
       navigator.geolocation.clearWatch(watchIdRef.current);
@@ -178,6 +211,35 @@ export function TechnicianLocationTracker() {
           pos.coords.accuracy ?? null,
           new Date(now).toISOString()
         ).catch((err) => console.error("[TechnicianLocationTracker] upsertMyLocationPing failed:", err));
+
+        // Auto-propose a Time Out the moment this fix lands back inside
+        // the branch or home geofence — same radius On-Site Check-In
+        // already uses. Once per shift only (proposedCheckoutThisShiftRef);
+        // a SuperAdmin/Finance reviewer approves or the tech's own next
+        // clock-in resets it, so a wrong/early hit isn't permanent.
+        const coords = branchHomeRef.current;
+        if (coords && !proposedCheckoutThisShiftRef.current && (coords.branch || coords.home)) {
+          const here: LatLng = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+          const nearBranch = coords.branch ? haversineMiles(here, coords.branch) <= ON_SITE_CHECKIN_RADIUS_MILES : false;
+          const nearHome = coords.home ? haversineMiles(here, coords.home) <= ON_SITE_CHECKIN_RADIUS_MILES : false;
+          if (nearBranch || nearHome) {
+            proposedCheckoutThisShiftRef.current = true;
+            const at = new Date(now);
+            const proposedCheckOut = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}:${String(at.getSeconds()).padStart(2, "0")}`;
+            getMyLatestVisitUpdate(profileId)
+              .then((lastVisit) =>
+                upsertMyCheckoutProposal({
+                  profileId,
+                  workDate: todayKey(),
+                  proposedCheckOut,
+                  source: nearBranch ? "branch" : "home",
+                  lastTicketNo: lastVisit?.ticketNo ?? null,
+                  lastTicketUpdatedAt: lastVisit?.updatedAt ?? null,
+                })
+              )
+              .catch((err) => console.error("[TechnicianLocationTracker] upsertMyCheckoutProposal failed:", err));
+          }
+        }
       },
       (err) => {
         // Permission denied or unavailable — best-effort feature, never
@@ -245,6 +307,8 @@ export function TechnicianLocationTracker() {
     if (!armed) return;
     if (!clockedIn) {
       promptHandledThisShiftRef.current = false;
+      branchHomeRef.current = null;
+      proposedCheckoutThisShiftRef.current = false;
       setShowPrompt(false);
       stopWatch();
       if (profileId) clearMyLocationPing(profileId).catch(() => {});

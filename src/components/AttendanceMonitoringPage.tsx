@@ -7,7 +7,8 @@ import { useAuth } from "@/lib/auth";
 import { usePersistedTab } from "@/lib/usePersistedTab";
 import { getCompanyUsers, getProfileEmployeeInfo, type ProfileRow } from "@/lib/supabase/users";
 import { resolvePresenceStatus, PRESENCE_DOT_CLASS, PRESENCE_LABEL } from "@/lib/presence";
-import { getRoleDepartmentBreakdown, canSubmitConductNote, normalizeRole, isAttendanceManagerTierRole, TECHNICIAN_PAY_ROLES } from "@/lib/roleLabels";
+import { getRoleDepartmentBreakdown, canSubmitConductNote, normalizeRole, isAttendanceManagerTierRole, TECHNICIAN_PAY_ROLES, isCompanySuperAdminRole, isFinanceRole } from "@/lib/roleLabels";
+import { getPendingCheckoutProposals, approveCheckoutProposal, type CheckoutProposal } from "@/lib/supabase/technicianCheckoutProposals";
 import { addAgentNote, getAllAgentNotes, type CsrAgentNote } from "@/lib/supabase/csrAgentNotes";
 import {
   getCompanyTimecardEntries,
@@ -21,7 +22,7 @@ import { getAttendanceNotes, upsertAttendanceNote } from "@/lib/supabase/attenda
 import { ActivityLogPanel } from "@/components/ActivityLogPanel";
 import { logModuleActivity } from "@/lib/supabase/moduleActivityLog";
 import { getOrCreateDmThread, sendMessage } from "@/lib/supabase/messaging";
-import { setTicketOnsiteCheckIn } from "@/lib/supabase/tickets";
+import { setTicketOnsiteCheckIn, getLatestVisitUpdatesByProfileIds, type LatestVisitUpdate } from "@/lib/supabase/tickets";
 import { getCompanyTicketAttendance, type TicketAttendanceRow } from "@/lib/supabase/technicianWhereabouts";
 import { TIME_ZONES } from "@/lib/serverTime";
 import { resolveTeamLeadOrManager, visibleAttendanceProfileIds } from "@/lib/notifyRouting";
@@ -79,6 +80,10 @@ interface DailyRecord {
   /** Scheduled shift times ("HH:MM", possibly "") — shown in the name popover, see requiredTimePopoverId. */
   requiredCheckIn: string;
   requiredCheckOut: string;
+  /** A pending, not-yet-approved Time Out this technician's own device proposed on arriving back at branch/home — see checkoutProposalsByKey. Null once approved (real checkOut takes over) or when none exists. */
+  checkoutProposal: CheckoutProposal | null;
+  /** This technician's own most recent ticket update, regardless of checkoutProposal/checkOut state — see lastTicketUpdateByProfile. Null for non-technician rows or a technician with no visit history. */
+  lastTicketUpdate: LatestVisitUpdate | null;
 }
 
 const PTO_TYPE_LABELS: Record<PtoType, string> = {
@@ -226,6 +231,9 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
   const [profiles, setProfiles] = useState<ProfileRow[]>([]);
   const [csrComposition, setCsrComposition] = useState<CsrTeamComposition | null>(null);
   const [entries, setEntries] = useState<CompanyTimecardEntry[]>([]);
+  const [checkoutProposals, setCheckoutProposals] = useState<CheckoutProposal[]>([]);
+  const [approvingProposalId, setApprovingProposalId] = useState<string | null>(null);
+  const [lastTicketUpdateByProfile, setLastTicketUpdateByProfile] = useState<Map<string, LatestVisitUpdate>>(new Map());
   const [ptoRequests, setPtoRequests] = useState<PtoRequestRow[]>([]);
   const [corrections, setCorrections] = useState<TimecardCorrectionRow[]>([]);
   const [correctionHistory, setCorrectionHistory] = useState<TimecardCorrectionHistoryRow[]>([]);
@@ -333,7 +341,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
     }
     setLoading(true);
     try {
-      const [profileId, profileRows, csrCompositionResult, entryRows, noteRows, ptoRows, correctionRows, historyRows, conductNoteRows, employeeRequestRows] = await Promise.all([
+      const [profileId, profileRows, csrCompositionResult, entryRows, noteRows, ptoRows, correctionRows, historyRows, conductNoteRows, employeeRequestRows, checkoutProposalRows] = await Promise.all([
         getProfileIdByFirebaseUid(uid),
         getCompanyUsers(),
         getCsrTeamComposition().catch(() => null),
@@ -344,11 +352,13 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
         getCompanyTimecardCorrectionHistory(),
         getAllAgentNotes().catch(() => []),
         getCompanyEmployeeRequests().catch(() => []),
+        getPendingCheckoutProposals().catch(() => []),
       ]);
       setMyProfileId(profileId);
       setProfiles(profileRows);
       setCsrComposition(csrCompositionResult);
       setEntries(entryRows);
+      setCheckoutProposals(checkoutProposalRows);
       const noteMap: Record<string, { content: string; notifyIndividual: boolean; notifyTeamLead: boolean }> = {};
       noteRows.forEach((n) => {
         noteMap[n.profileId] = { content: n.content, notifyIndividual: n.notifyIndividual, notifyTeamLead: n.notifyTeamLead };
@@ -522,6 +532,24 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
     return result;
   }, [profiles, allowedLocations, teamScopedIds]);
 
+  // Each visible technician's own most recent ticket update — shown next
+  // to Check Out on the Daily Attendance Tracker so a reviewer can see what
+  // they were last working on, whether or not they've clocked out yet.
+  useEffect(() => {
+    const technicianIds = visibleProfiles.filter((p) => TECHNICIAN_PAY_ROLES.has(normalizeRole(p.role))).map((p) => p.id);
+    if (technicianIds.length === 0) {
+      setLastTicketUpdateByProfile(new Map());
+      return;
+    }
+    let cancelled = false;
+    getLatestVisitUpdatesByProfileIds(technicianIds).then((map) => {
+      if (!cancelled) setLastTicketUpdateByProfile(map);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [visibleProfiles]);
+
   // PTO Management tab (KPI tile + both request lists) — same team scoping
   // as visibleProfiles/Daily Attendance above, so a manager-tier viewer only
   // ever sees their own team's PTO requests, never the whole company's.
@@ -545,6 +573,12 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
 
   const isDailyDateToday = dailyDate === todayISO;
   const dailyDateLabel = isDailyDateToday ? "Today" : dailyDate;
+
+  const checkoutProposalsByKey = useMemo(() => {
+    const map = new Map<string, CheckoutProposal>();
+    checkoutProposals.forEach((p) => map.set(`${p.profileId}|${p.workDate}`, p));
+    return map;
+  }, [checkoutProposals]);
 
   // Shared by the single-day tracker and the date-range filter below — same
   // per-employee-per-date computation either way, just called once per date
@@ -585,9 +619,11 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
         clockedInBy: clockedInByName,
         requiredCheckIn: p.required_check_in || "",
         requiredCheckOut: p.required_check_out || "",
+        checkoutProposal: checkOut ? null : checkoutProposalsByKey.get(`${p.id}|${dateISO}`) ?? null,
+        lastTicketUpdate: lastTicketUpdateByProfile.get(p.id) ?? null,
       };
     },
-    [nowByTimezone, allProfileById]
+    [nowByTimezone, allProfileById, checkoutProposalsByKey, lastTicketUpdateByProfile]
   );
 
   const dailyRecords: DailyRecord[] = useMemo(
@@ -980,6 +1016,26 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
         next.delete(record.profileId);
         return next;
       });
+    }
+  };
+
+  // Approve an auto-proposed Time Out (technicianCheckoutProposals.ts) —
+  // only ever rendered for SuperAdmin/Finance (see canApproveCheckoutProposals
+  // below), matching RLS's own restriction on the actual update. Writes the
+  // proposed time onto the technician's real check-out, then refreshes so
+  // the row switches from "proposed" styling to a normal confirmed check-out.
+  const canApproveCheckoutProposals = isCompanySuperAdminRole(role, extraRoles) || isFinanceRole(role, extraRoles);
+  const handleApproveCheckoutProposal = async (proposal: CheckoutProposal) => {
+    if (!myProfileId) return;
+    if (!window.confirm(`Approve this auto-detected Time Out (${proposal.proposedCheckOut})?`)) return;
+    setApprovingProposalId(proposal.id);
+    try {
+      await approveCheckoutProposal(proposal, myProfileId);
+      await loadAll();
+    } catch (error) {
+      alert(`Failed to approve: ${error instanceof Error ? error.message : "Unknown error"}`);
+    } finally {
+      setApprovingProposalId(null);
     }
   };
 
@@ -1607,7 +1663,37 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                             </button>
                           )}
                         </td>
-                        <td className="px-3 py-3 text-slate-300">{record.checkOut}</td>
+                        <td className="px-3 py-3 text-slate-300">
+                          <div className="flex flex-col gap-0.5 items-start">
+                            {record.checkOut !== "—" ? (
+                              <span>{record.checkOut}</span>
+                            ) : record.checkoutProposal ? (
+                              <span
+                                className="text-amber-300 font-mono text-xs"
+                                title={`Auto-detected on arrival at ${record.checkoutProposal.source} — not yet approved`}
+                              >
+                                {record.checkoutProposal.proposedCheckOut} <span className="text-[10px] uppercase text-amber-400/70">(proposed)</span>
+                              </span>
+                            ) : (
+                              <span>—</span>
+                            )}
+                            {record.lastTicketUpdate && (
+                              <span className="text-[10px] text-slate-500" title="This technician's own most recent ticket update">
+                                Last update: {record.lastTicketUpdate.ticketNo} @ {new Date(record.lastTicketUpdate.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                              </span>
+                            )}
+                            {record.checkoutProposal && canApproveCheckoutProposals && (
+                              <button
+                                type="button"
+                                disabled={approvingProposalId === record.checkoutProposal.id}
+                                onClick={() => handleApproveCheckoutProposal(record.checkoutProposal!)}
+                                className="inline-flex items-center px-2 py-0.5 rounded-md bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-50 text-amber-300 text-xs font-semibold transition"
+                              >
+                                {approvingProposalId === record.checkoutProposal.id ? "Approving…" : "Approve"}
+                              </button>
+                            )}
+                          </div>
+                        </td>
                         <td className="px-3 py-3">
                           {record.alerts.length > 0 ? (
                             <div className="flex flex-wrap gap-1">

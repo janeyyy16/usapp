@@ -23,6 +23,7 @@ import { useAuth } from "@/lib/auth";
 import { getMyProfileId } from "@/lib/supabase/users";
 import { getSignableDocument, signDocument, type SignableDocument } from "@/lib/supabase/signableDocuments";
 import { uploadSignableDocumentSignature, uploadSignableDocumentAttachment, uploadContractorDataForm, refreshStorageAuthToken } from "@/lib/firebase/storage";
+import { compressImage } from "@/lib/imageCompression";
 import { captureHtmlToPdfBlob, loadAssetDataUrl } from "@/lib/pdfCapture";
 import {
   buildContractorDataBodyMarkup,
@@ -92,6 +93,49 @@ function formatPhoneInput(raw: string): string {
 const inputCls = "glass-input text-sm py-1.5 px-3 rounded-md w-full";
 const labelCls = "text-[10px] font-semibold text-muted-foreground uppercase tracking-wide";
 
+/**
+ * Submit does several sequential network steps (uploads, PDF render, PDF
+ * upload, DB write) with no timeout of its own — on a slow/spotty
+ * connection (mobile data, not wifi) a single stalled request left the
+ * button reading "Submitting…" forever with no error, while the DB never
+ * actually recorded anything. This doesn't cancel the underlying request
+ * (no AbortController plumbed through the upload helpers) — it just stops
+ * the UI waiting on it and surfaces a clear, step-specific error so the
+ * user knows to retry instead of staring at a frozen button.
+ */
+/**
+ * SSN card / driver's license photos come straight off a phone camera —
+ * often several MB uncompressed — with no size limit on the file input, so
+ * a slow/cellular connection was very likely to time out mid-upload before
+ * this existed. Same compressImage() TicketPhotos.tsx already uses (resize
+ * to 1920px, target ~1MB). Falls back to the original file if compression
+ * itself fails for any reason, rather than blocking the whole submission on
+ * a compression bug.
+ */
+async function compressForUpload(file: File): Promise<File> {
+  try {
+    const result = await compressImage(file);
+    const ext = result.mimeType === "image/webp" ? "webp" : result.mimeType === "image/png" ? "png" : "jpg";
+    return new File([result.blob], file.name.replace(/\.[^.]+$/, `.${ext}`), { type: result.mimeType });
+  } catch (err) {
+    console.error("[contractor-data] photo compression failed, uploading original:", err);
+    return file;
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, step: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${step} is taking too long — check your connection and try again.`)),
+      ms
+    );
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err) => { clearTimeout(timer); reject(err); }
+    );
+  });
+}
+
 export function FillContractorDataPage({ docId }: Props) {
   const { ready, uid, displayName, role } = useAuth();
   const [myProfileId, setMyProfileId] = useState<string | null>(null);
@@ -99,6 +143,7 @@ export function FillContractorDataPage({ docId }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [submitStep, setSubmitStep] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState(false);
   const [logoDataUrl, setLogoDataUrl] = useState("");
 
@@ -212,33 +257,68 @@ export function FillContractorDataPage({ docId }: Props) {
       // fresh ID token first so a slow mobile connection can't let it go
       // stale partway through and fail the LAST upload with a confusing
       // "storage/unauthorized" (see refreshStorageAuthToken's doc comment).
-      await refreshStorageAuthToken();
+      setSubmitStep("Preparing upload…");
+      await withTimeout(refreshStorageAuthToken(), 15_000, "Preparing upload");
 
-      const ssnCardUrls = await Promise.all(ssnCardFiles.map((file, i) => uploadSignableDocumentAttachment(companyId, doc.id, "ssnCardUrls", i, file)));
-      const driversLicenseUrls = await Promise.all(driversLicenseFiles.map((file, i) => uploadSignableDocumentAttachment(companyId, doc.id, "driversLicenseUrls", i, file)));
+      setSubmitStep(`Uploading SSN card${ssnCardFiles.length > 1 ? "s" : ""}…`);
+      const compressedSsnCardFiles = await Promise.all(ssnCardFiles.map(compressForUpload));
+      const ssnCardUrls = await withTimeout(
+        Promise.all(compressedSsnCardFiles.map((file, i) => uploadSignableDocumentAttachment(companyId, doc.id, "ssnCardUrls", i, file))),
+        60_000,
+        "Uploading SSN card"
+      );
 
-      const signatureUrl = await uploadSignableDocumentSignature(companyId, doc.id, "employee", dataUrl);
+      setSubmitStep("Uploading driver's license…");
+      const compressedDriversLicenseFiles = await Promise.all(driversLicenseFiles.map(compressForUpload));
+      const driversLicenseUrls = await withTimeout(
+        Promise.all(compressedDriversLicenseFiles.map((file, i) => uploadSignableDocumentAttachment(companyId, doc.id, "driversLicenseUrls", i, file))),
+        60_000,
+        "Uploading driver's license"
+      );
+
+      setSubmitStep("Uploading signature…");
+      const signatureUrl = await withTimeout(
+        uploadSignableDocumentSignature(companyId, doc.id, "employee", dataUrl),
+        30_000,
+        "Uploading signature"
+      );
       const signedAt = new Date().toISOString();
       const finalData: ContractorDataFormData = { ...form, employeeName, ssnCardUrls, driversLicenseUrls, dateSigned: signedAt, signatureDataUrl: dataUrl };
       const entry = { name: displayName || employeeName || "Signed", url: signatureUrl, signedAt };
 
-      const pdfBlob = await captureHtmlToPdfBlob(
-        buildContractorDataBodyMarkup(finalData, logoDataUrl, entry),
-        contractorDataStyles
+      setSubmitStep("Generating document…");
+      const pdfBlob = await withTimeout(
+        captureHtmlToPdfBlob(buildContractorDataBodyMarkup(finalData, logoDataUrl, entry), contractorDataStyles),
+        30_000,
+        "Generating document"
       );
-      const pdfUrl = await uploadContractorDataForm(companyId, employeeName, pdfBlob);
+      const pdfUrl = await withTimeout(uploadContractorDataForm(companyId, employeeName, pdfBlob), 60_000, "Uploading document");
 
-      await signDocument(doc.id, "employee", entry, pdfUrl, finalData as unknown as Record<string, any>);
+      setSubmitStep("Saving…");
+      await withTimeout(
+        signDocument(doc.id, "employee", entry, pdfUrl, finalData as unknown as Record<string, any>),
+        20_000,
+        "Saving"
+      );
 
+      // The document is fully saved as of the signDocument() call above —
+      // a failure notifying HR past this point must never surface as a
+      // submit failure (it used to: an unprotected await here that threw
+      // reported "Failed to submit" even though the real submission had
+      // already succeeded).
       if (doc.createdBy) {
-        const thread = await getOrCreateDmThread(myProfileId, doc.createdBy);
-        const filename = `Employee Data - ${employeeName}.pdf`;
-        await sendMessage({
-          dmThreadId: thread.id,
-          senderId: myProfileId,
-          senderName: displayName || "Employee",
-          body: `📄 Employee Data for ${employeeName} has been submitted: [${filename}](${pdfUrl})`,
-        });
+        try {
+          const thread = await getOrCreateDmThread(myProfileId, doc.createdBy);
+          const filename = `Employee Data - ${employeeName}.pdf`;
+          await sendMessage({
+            dmThreadId: thread.id,
+            senderId: myProfileId,
+            senderName: displayName || "Employee",
+            body: `📄 Employee Data for ${employeeName} has been submitted: [${filename}](${pdfUrl})`,
+          });
+        } catch (notifyErr) {
+          console.error("[contractor-data] DM notify to creator failed:", notifyErr);
+        }
       }
 
       getHrNotificationSettings()
@@ -256,6 +336,7 @@ export function FillContractorDataPage({ docId }: Props) {
       setError(err instanceof Error ? err.message : "Failed to submit form.");
     } finally {
       setSubmitting(false);
+      setSubmitStep(null);
     }
   };
 
@@ -456,7 +537,7 @@ export function FillContractorDataPage({ docId }: Props) {
                   disabled={submitting}
                   className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50 w-fit"
                 >
-                  {submitting ? "Submitting…" : "Submit to HR"}
+                  {submitting ? (submitStep || "Submitting…") : "Submit to HR"}
                 </button>
               </div>
             </div>

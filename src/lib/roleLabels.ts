@@ -267,6 +267,13 @@ export function isCompanySuperAdminRole(
   return (extraRoles ?? []).some((r) => normalizeRole(r) === "SUPERADMIN");
 }
 
+const FINANCE_ROLES = new Set(["FINANCE"]);
+
+/** Holds the FINANCE role, primary or extra — "any held role" pile-up semantics, matching every other role check in this file. */
+export function isFinanceRole(role: string | null | undefined, extraRoles?: string[] | null): boolean {
+  return anyHeldRoleIn(FINANCE_ROLES, role, extraRoles);
+}
+
 /**
  * Roles that may submit a warning/mistake conduct note about an employee
  * (employee_conduct_notes — see csrAgentNotes.ts). Any manager-flavored
