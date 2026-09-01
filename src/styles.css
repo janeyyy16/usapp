@@ -1759,6 +1759,26 @@ input::-ms-clear {
   gap: 0.5rem;
   justify-content: flex-end;
 }
+.mtech-app-header-clock {
+  display: flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  padding: 0.25rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+.mtech-app-header-clock-time {
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+.mtech-app-header-clock-zone {
+  font-size: 0.58rem;
+  font-weight: 600;
+  opacity: 0.75;
+}
 .mtech-app-profile-btn {
   width: 34px;
   height: 34px;
@@ -5721,6 +5741,20 @@ a.mtech-phone-link:active { opacity: 0.7; }
 }
 .mtech-timecard-btn-time { background: #16a34a; }
 .mtech-timecard-btn-meal { background: #d97706; }
+.mtech-timecard-btn-armed {
+  background: #b45309;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.55);
+}
+.mtech-timecard-armcancel {
+  align-self: center;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.7);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
 .mtech-timecard-note {
   margin-top: 0.1rem;
   font-size: 0.72rem;
@@ -7862,6 +7896,26 @@ a.mtech-phone-link:active { opacity: 0.7; }
   align-items: center;
   gap: 0.5rem;
   justify-content: flex-end;
+}
+.mtech-app-header-clock {
+  display: flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  padding: 0.25rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+.mtech-app-header-clock-time {
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+.mtech-app-header-clock-zone {
+  font-size: 0.58rem;
+  font-weight: 600;
+  opacity: 0.75;
 }
 .mtech-app-profile-btn {
   width: 34px;
@@ -11823,6 +11877,20 @@ a.mtech-phone-link:active { opacity: 0.7; }
 }
 .mtech-timecard-btn-time { background: #16a34a; }
 .mtech-timecard-btn-meal { background: #d97706; }
+.mtech-timecard-btn-armed {
+  background: #b45309;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.55);
+}
+.mtech-timecard-armcancel {
+  align-self: center;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.7);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
 .mtech-timecard-note {
   margin-top: 0.1rem;
   font-size: 0.72rem;

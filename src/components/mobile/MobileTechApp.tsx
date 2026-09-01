@@ -878,6 +878,7 @@ export function MobileTechApp() {
       <AppHeaderMobile
         logoSrc={logo}
         userName={headerName}
+        uid={uid}
         showBack={showTopBack}
         onBack={handleTopBack}
         onOpenTimecard={() => setView("timecard")}
@@ -1068,10 +1069,74 @@ export function MobileTechApp() {
   );
 }
 
+// Header reference clock. Follows the server's own clock (getServerNow —
+// same source that locks time-clock punches), NOT the phone's clock, so it
+// stays honest even if the device date/time is changed. Synced once on
+// mount and re-synced every few minutes; ticks locally in between. Shown in
+// the signed-in technician's own scheduled timezone (profiles.schedule_
+// timezone), matching the desktop header's CentralClock.
+function MobileHeaderClock({ uid }: { uid: string | null }) {
+  const [tz, setTz] = useState<ScheduleTimezone>("CST");
+  const offsetRef = useRef<number | null>(null);
+  const [display, setDisplay] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!uid) return;
+    let cancelled = false;
+    getMyProfileSchedule(uid)
+      .then((s) => { if (!cancelled) setTz(s.scheduleTimezone); })
+      .catch(() => { /* best-effort — falls back to CST */ });
+    return () => { cancelled = true; };
+  }, [uid]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const sync = async () => {
+      try {
+        const serverNow = await getServerNow();
+        if (!cancelled) offsetRef.current = serverNow.getTime() - Date.now();
+      } catch {
+        // Server unreachable — if we've never synced, fall back to the
+        // device clock rather than hiding the clock entirely.
+        if (offsetRef.current === null) offsetRef.current = 0;
+      }
+    };
+    void sync();
+    const tick = window.setInterval(sync, 5 * 60_000);
+    return () => { cancelled = true; window.clearInterval(tick); };
+  }, []);
+
+  useEffect(() => {
+    const render = () => {
+      if (offsetRef.current === null) return;
+      setDisplay(
+        new Intl.DateTimeFormat("en-US", {
+          timeZone: TIME_ZONES[tz].timeZone,
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true,
+        }).format(new Date(Date.now() + offsetRef.current))
+      );
+    };
+    render();
+    const id = window.setInterval(render, 1000);
+    return () => window.clearInterval(id);
+  }, [tz]);
+
+  if (!display) return null;
+  return (
+    <div className="mtech-app-header-clock" title={`${TIME_ZONES[tz].label} · server time`}>
+      <span className="mtech-app-header-clock-time">{display}</span>
+      <span className="mtech-app-header-clock-zone">{tz}</span>
+    </div>
+  );
+}
+
 // ── New top header — logo left, profile bubble right ─────────────────────
 function AppHeaderMobile({
   logoSrc,
   userName,
+  uid,
   showBack,
   onBack,
   onOpenTimecard,
@@ -1084,6 +1149,7 @@ function AppHeaderMobile({
 }: {
   logoSrc: string;
   userName: string;
+  uid: string | null;
   showBack: boolean;
   onBack: () => void;
   onOpenTimecard: () => void;
@@ -1120,8 +1186,9 @@ function AppHeaderMobile({
       {/* Center: app name wordmark */}
       <div className="mtech-app-header-title">Admin Hub</div>
 
-      {/* Right: notification bell + profile bubble → logout dropdown */}
+      {/* Right: reference clock + notification bell + profile bubble → logout dropdown */}
       <div className="mtech-app-header-right">
+        <MobileHeaderClock uid={uid} />
         <NotificationsMenu onLinkClick={onNotificationLink} onViewAll={onOpenNotifications} />
         <button
           type="button"
@@ -4139,15 +4206,23 @@ function HomeOnSiteCard({
   // already proven) or the ticket is done; only runs for a clocked-in tech
   // who's confirmed location sharing (same prerequisites as the shared
   // watcher) and never in the dev simulate mode.
-  // Comma-joined ticket numbers still awaiting check-in among the rows shown
-  // that have a precise point to measure against — non-empty means "the tech
-  // is arriving somewhere we can verify", so keep refining. Rows that only
-  // have an approximate anchor (or none) don't count: a sharper device fix
-  // can't make an approximate geofence pass, so those go straight to the
-  // manual override.
+  // Comma-joined ticket numbers across ALL of today's tickets (not just
+  // focusTickets) still awaiting check-in that have a precise point to
+  // measure against — non-empty means "there's still somewhere to verify
+  // arrival", so keep refining. Deliberately NOT scoped to focusTickets: once
+  // one ticket is checked in but not yet marked done, it alone occupies
+  // focusTickets (see the "active" branch above), so a focusTickets-scoped
+  // key would go empty and this effect would stop refining GPS — the next
+  // ticket would then be stuck testing distance against a stale fix from the
+  // first address forever, since it can only ever enter focusTickets once
+  // it's already within the (unrefined) radius. Reported by a tech: after
+  // finishing one job and driving to the next, Work Start never unlocked —
+  // exactly this deadlock. Rows that only have an approximate anchor (or
+  // none) don't count: a sharper device fix can't make an approximate
+  // geofence pass, so those go straight to the manual override.
   const arrivingKey = useMemo(
     () =>
-      focusTickets
+      visibleTickets
         .filter(
           (t) =>
             !arrivedAt[t.ticketNo] &&
@@ -4158,7 +4233,7 @@ function HomeOnSiteCard({
         .map((t) => t.ticketNo)
         .sort()
         .join(","),
-    [focusTickets, arrivedAt, doneAt, ticketPos],
+    [visibleTickets, arrivedAt, doneAt, ticketPos],
   );
   useEffect(() => {
     if (typeof navigator === "undefined" || !navigator.geolocation) return;
@@ -4466,6 +4541,7 @@ function MobileHomeView({
   const [requiredCheckOut, setRequiredCheckOut] = useState("");
   const [workingHours, setWorkingHours] = useState<number | null>(null);
   const [mealMinutes, setMealMinutes] = useState<number | null>(null);
+  const [scheduleTimezone, setScheduleTimezone] = useState<ScheduleTimezone>("CST");
   const [scheduleProfileId, setScheduleProfileId] = useState<string | null>(null);
   const [entry, setEntry] = useState<UITimeEntry>({ checkIn: "", checkOut: "", mealStart: "", mealEnd: "", notes: "" });
   const [saving, setSaving] = useState(false);
@@ -4484,6 +4560,7 @@ function MobileHomeView({
         setRequiredCheckOut(schedule.requiredCheckOut);
         setWorkingHours(schedule.workingHours);
         setMealMinutes(schedule.mealMinutes);
+        setScheduleTimezone(schedule.scheduleTimezone);
         setScheduleProfileId(schedule.profileId || null);
         if (!schedule.profileId) return;
         const monthEntries = await getMonthEntries(schedule.profileId, now.getFullYear(), now.getMonth());
@@ -4496,20 +4573,28 @@ function MobileHomeView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uid]);
 
-  const getNowTime = (): string => {
-    const t = new Date();
-    return `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}:${String(t.getSeconds()).padStart(2, "0")}`;
-  };
-
-  const persist = async (next: UITimeEntry) => {
+  // Stamps `field` with the server's own current instant (never the phone's
+  // clock — see src/lib/serverTime.ts), converted into this technician's
+  // scheduled timezone, so setting the phone's date/time can't fake a punch.
+  // Same logic as MobileTimecardView.persistPunch — the two clock surfaces
+  // must never disagree on where a punch's time comes from.
+  const persistPunch = async (field: keyof Pick<UITimeEntry, "checkIn" | "checkOut" | "mealStart" | "mealEnd">) => {
     if (!scheduleProfileId) {
       alert("Could not resolve your profile. Please re-login.");
       return;
     }
-    setEntry(next);
     setSaving(true);
     try {
-      await saveTimecardEntry(scheduleProfileId, todayKey, next);
+      const serverNow = await getServerNow();
+      const workDate = zonedDateKey(serverNow, scheduleTimezone);
+      const time = zonedTimeString(serverNow, scheduleTimezone);
+      if (workDate !== todayKey) {
+        alert("It's now a new day — please reopen the app and try again.");
+        return;
+      }
+      const next = { ...entry, [field]: time };
+      setEntry(next);
+      await saveTimecardEntry(scheduleProfileId, workDate, next);
     } catch (e) {
       console.error("MobileHomeView: save failed", e);
       alert(`Failed to save: ${e instanceof Error ? e.message : "Unknown error"}`);
@@ -4545,14 +4630,14 @@ function MobileHomeView({
     if (!canTimeIn) return;
     if (armedCard !== "checkIn") { arm("checkIn"); return; }
     disarm();
-    persist({ ...entry, checkIn: getNowTime() });
+    void persistPunch("checkIn");
   };
 
   const handleTimeOut = () => {
     if (!canTimeOut) return;
     if (armedCard !== "checkOut") { arm("checkOut"); return; }
     disarm();
-    persist({ ...entry, checkOut: getNowTime() });
+    void persistPunch("checkOut");
   };
 
   const handleMealIn = () => {
@@ -4571,14 +4656,14 @@ function MobileHomeView({
       return;
     }
     disarm();
-    persist({ ...entry, mealStart: getNowTime() });
+    void persistPunch("mealStart");
   };
 
   const handleMealOut = () => {
     if (!canMealOut) return;
     if (armedCard !== "mealEnd") { arm("mealEnd"); return; }
     disarm();
-    persist({ ...entry, mealEnd: getNowTime() });
+    void persistPunch("mealEnd");
   };
 
   const menuTiles = [
@@ -4933,6 +5018,23 @@ function MobileTimecardView({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
+  // One tap arms, a second tap within a few seconds actually punches — so a
+  // stray tap on "Time Out" can't silently end the shift (which then locks
+  // the button for the rest of the day). Mirrors the Home card's ClockCard
+  // confirm. Auto-disarms so an armed button doesn't sit there indefinitely.
+  const [armedPunch, setArmedPunch] = useState<"time" | "meal" | null>(null);
+  const armTimerRef = useRef<number | null>(null);
+  const armPunch = (which: "time" | "meal") => {
+    if (armTimerRef.current) window.clearTimeout(armTimerRef.current);
+    setArmedPunch(which);
+    armTimerRef.current = window.setTimeout(() => setArmedPunch(null), 4000);
+  };
+  const disarmPunch = () => {
+    if (armTimerRef.current) window.clearTimeout(armTimerRef.current);
+    setArmedPunch(null);
+  };
+  useEffect(() => () => { if (armTimerRef.current) window.clearTimeout(armTimerRef.current); }, []);
+
   const now = new Date();
   const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
   const todayLabel = now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
@@ -5009,33 +5111,44 @@ function MobileTimecardView({
   };
 
   const handleTimeToggle = () => {
+    if (entry.checkOut || saving) return;
+    if (armedPunch !== "time") { armPunch("time"); return; }
+    disarmPunch();
     if (!entry.checkIn) void persistPunch("checkIn");
-    else if (!entry.checkOut) void persistPunch("checkOut");
+    else void persistPunch("checkOut");
   };
 
   const handleMealToggle = () => {
-    if (!entry.checkIn) {
-      alert("Please log time in first.");
+    if (entry.mealEnd || saving) return;
+    // Validate on the first (arming) tap so we never arm a punch that will
+    // just fail on the confirm tap.
+    if (armedPunch !== "meal") {
+      if (!entry.checkIn) {
+        alert("Please log time in first.");
+        return;
+      }
+      if (entry.checkOut) {
+        alert("You've already timed out for the day.");
+        return;
+      }
+      if ((!requiredCheckIn || !requiredCheckOut) && !workingHours) {
+        alert("No scheduled shift is set for your account. Contact your admin to set your required schedule.");
+        return;
+      }
+      // Same rule as TimeClockMenu.tsx / routes/timecard.tsx: shifts of 6 hours
+      // or less have no meal break, and an explicit Working Hours override
+      // (migration 0109) takes priority over the Time In/Out subtraction.
+      const scheduledShift = resolveScheduledShiftHours(requiredCheckIn, requiredCheckOut, workingHours, mealMinutes);
+      if (scheduledShift <= 6) {
+        alert(`Meal break is only available for scheduled shifts of more than 6 hours. Your scheduled shift is ${scheduledShift.toFixed(1)} hours.`);
+        return;
+      }
+      armPunch("meal");
       return;
     }
-    if (entry.checkOut) {
-      alert("You've already timed out for the day.");
-      return;
-    }
-    if ((!requiredCheckIn || !requiredCheckOut) && !workingHours) {
-      alert("No scheduled shift is set for your account. Contact your admin to set your required schedule.");
-      return;
-    }
-    // Same rule as TimeClockMenu.tsx / routes/timecard.tsx: shifts of 6 hours
-    // or less have no meal break, and an explicit Working Hours override
-    // (migration 0109) takes priority over the Time In/Out subtraction.
-    const scheduledShift = resolveScheduledShiftHours(requiredCheckIn, requiredCheckOut, workingHours, mealMinutes);
-    if (scheduledShift <= 6) {
-      alert(`Meal break is only available for scheduled shifts of more than 6 hours. Your scheduled shift is ${scheduledShift.toFixed(1)} hours.`);
-      return;
-    }
+    disarmPunch();
     if (!entry.mealStart) void persistPunch("mealStart");
-    else if (!entry.mealEnd) void persistPunch("mealEnd");
+    else void persistPunch("mealEnd");
   };
 
   const hoursToday = entry.checkIn && entry.checkOut
@@ -5076,20 +5189,30 @@ function MobileTimecardView({
 
           <button
             type="button"
-            className="mtech-timecard-btn mtech-timecard-btn-time"
+            className={`mtech-timecard-btn mtech-timecard-btn-time${armedPunch === "time" ? " mtech-timecard-btn-armed" : ""}`}
             disabled={!!entry.checkOut || saving}
             onClick={handleTimeToggle}
           >
-            {!entry.checkIn ? "🕐 Time In" : !entry.checkOut ? "🛑 Time Out" : "✓ Shift Complete"}
+            {armedPunch === "time"
+              ? `Tap again to confirm ${!entry.checkIn ? "Time In" : "Time Out"}`
+              : !entry.checkIn ? "🕐 Time In" : !entry.checkOut ? "🛑 Time Out" : "✓ Shift Complete"}
           </button>
           <button
             type="button"
-            className="mtech-timecard-btn mtech-timecard-btn-meal"
+            className={`mtech-timecard-btn mtech-timecard-btn-meal${armedPunch === "meal" ? " mtech-timecard-btn-armed" : ""}`}
             disabled={!!entry.mealEnd || saving}
             onClick={handleMealToggle}
           >
-            {!entry.mealStart ? "🍽 Meal In" : !entry.mealEnd ? "✓ Meal Out" : "Meal Done"}
+            {armedPunch === "meal"
+              ? `Tap again to confirm ${!entry.mealStart ? "Meal In" : "Meal Out"}`
+              : !entry.mealStart ? "🍽 Meal In" : !entry.mealEnd ? "✓ Meal Out" : "Meal Done"}
           </button>
+
+          {armedPunch && (
+            <button type="button" className="mtech-timecard-armcancel" onClick={disarmPunch}>
+              Cancel
+            </button>
+          )}
 
           {requiredCheckIn && requiredCheckOut && (
             <p className="mtech-timecard-note">Scheduled shift: {requiredCheckIn}–{requiredCheckOut}</p>
