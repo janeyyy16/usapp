@@ -50,13 +50,21 @@ export function normalizeWorkPlan(plan: WorkPlan | null | undefined, locations: 
  * The set of locations a user may access: any location where weekday or weekend
  * is enabled in their work plan. Returns null to mean "no restriction" (e.g.
  * an empty/unset plan for admins) — callers decide how to treat null.
+ *
+ * A plan that HAS location rows but none with weekday/weekend enabled also
+ * returns null, not []. buildDefaultLocationPlan() starts every row with both
+ * toggles off, so just opening + saving the Work Plan grid produces exactly
+ * that shape — and treating it as "restricted to zero locations" locked
+ * technicians out of the whole mobile app (and their own assigned tickets on
+ * the Work Map). A plan with nothing enabled is indistinguishable from an
+ * unconfigured one, so it's treated as unconfigured.
  */
 export function accessibleLocations(plan: WorkPlan | null | undefined): string[] | null {
   if (!plan || Object.keys(plan).length === 0) return null;
   const locs = Object.entries(plan)
     .filter(([, v]) => v && (v.weekday || v.weekend))
     .map(([loc]) => loc);
-  return locs;
+  return locs.length > 0 ? locs : null;
 }
 
 /** Roles that bypass the work-plan location restriction (see everything). */

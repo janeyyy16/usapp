@@ -628,17 +628,19 @@ export function MobileTechApp() {
     };
   }, [isSelfRole]);
 
-  // Location-restricted set (techs/restricted roles). null = unrestricted.
-  const locScoped = useMemo(() => {
-    if (allowedLocations === null) return tickets;
-    return tickets.filter((t) => allowedLocations.includes(t.location));
-  }, [tickets, allowedLocations]);
-
   // The technician name we're scoping to: self for techs, selected for managers.
   const scopeTech = isSelfRole ? displayName || email || "" : selectedTech;
 
   const myTickets = useMemo(() => {
     if (!scopeTech) return [];
+    // Match on the technician name only — deliberately NOT filtered by the
+    // work-plan location scope (allowedLocations). A ticket dispatch assigned
+    // to this technician by name is their job; hiding it because its branch
+    // isn't in their planned locations (an incomplete/empty work plan, or a
+    // cross-branch assignment) just makes the app show "No tickets here" for
+    // a tech who actually has work — reported for Tyrease Smith and others.
+    // Location scope still governs the manager roster / mileage views below.
+    //
     // Tolerant name match: normalise whitespace + case, and accept the
     // ticket's technician field matching either the technician's full
     // display name or the email-derived alias (e.g. "jkoetsier"). This
@@ -655,16 +657,21 @@ export function MobileTechApp() {
     if (parts.length >= 2) candidates.add(parts[parts.length - 1]);
     // If the scope looks like an email, also key by the local part.
     if (scope.includes("@")) candidates.add(scope.split("@")[0]);
-    return locScoped.filter((t) => {
+    // Substring matching only against multi-word / email candidates — never
+    // the bare last name, or "Tyrease Smith" would pick up "Sean Smith" and
+    // "Percy Smith" too. A last-name-only ticket ("Koetsier") still matches
+    // via the exact-set check below.
+    const fuzzy = Array.from(candidates).filter((c) => c.includes(" ") || c.includes("@"));
+    return tickets.filter((t) => {
       const tt = normalise(String(t.technician ?? ""));
       if (!tt) return false;
       if (candidates.has(tt)) return true;
-      // Fuzzy contains so "Jordan Koetsier" matches "jkoetsier" or
-      // vice-versa — the planner already uses this tolerance to bucket
-      // tickets to a tech.
-      return Array.from(candidates).some((c) => tt.includes(c) || c.includes(tt));
+      // Fuzzy contains so "Jordan Koetsier" still matches a ticket stored as
+      // "Jordan Koetsier Jr" / "Koetsier, Jordan" — the planner uses the same
+      // tolerance to bucket tickets to a tech.
+      return fuzzy.some((c) => tt.includes(c) || c.includes(tt));
     });
-  }, [locScoped, scopeTech]);
+  }, [tickets, scopeTech]);
 
   // Home landing page's "Assigned Today" list — same tickets To Do would
   // show, further narrowed to today's schedule date.
