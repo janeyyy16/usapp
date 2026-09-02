@@ -92,11 +92,21 @@ export async function getMyProfileSchedule(firebaseUid: string): Promise<{
   /** profiles.schedule_timezone — which real-world clock this employee's punches should be stamped in (see src/lib/serverTime.ts). Defaults to "CST", same convention as AppHeader's clock and getMyFullProfile. */
   scheduleTimezone: "CST" | "EST";
 }> {
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("id, required_check_in, required_check_out, off_days, schedule_timezone")
-    .eq("firebase_uid", firebaseUid)
-    .maybeSingle();
+  // Network failures are retried and then surfaced as a thrown error — a
+  // transient blip here used to return profileId:null, which downstream reads
+  // as "you have no profile" and makes the timecard show a blank punch card
+  // (and any punch then alerts "please re-login"). A real column error still
+  // returns the empty shape below, so an un-applied optional-column migration
+  // can't take the whole page down (see the doc comment above).
+  const { data, error } = await withNetworkRetry(async () => {
+    const res = await supabase
+      .from("profiles")
+      .select("id, required_check_in, required_check_out, off_days, schedule_timezone")
+      .eq("firebase_uid", firebaseUid)
+      .maybeSingle();
+    if (res.error && isNetworkFailure(res.error.message)) throw new Error(res.error.message);
+    return res;
+  });
   if (error) {
     console.error("getMyProfileSchedule error:", error.message);
     return { profileId: null, requiredCheckIn: "", requiredCheckOut: "", workingHours: null, mealMinutes: null, offDays: [], scheduleTimezone: "CST" };
@@ -193,17 +203,23 @@ export async function getMonthEntries(
   const lastDay = new Date(year, month + 1, 0).getDate();
   const end = `${year}-${mm}-${String(lastDay).padStart(2, "0")}`;
 
-  const { data, error } = await supabase
-    .from("timecard_entries")
-    .select("work_date, check_in, check_out, meal_start, meal_end, notes")
-    .eq("profile_id", profileId)
-    .gte("work_date", start)
-    .lte("work_date", end);
-
-  if (error) {
-    console.error("getMonthEntries error:", error.message);
-    throw new Error(error.message);
-  }
+  // Retry a genuine network blip (a tech's phone between coverage spots)
+  // before giving up — a thrown failure here leaves the timecard unable to
+  // load, and a card that renders anyway would show blank punches the tech
+  // might then overwrite.
+  const data = await withNetworkRetry(async () => {
+    const { data, error } = await supabase
+      .from("timecard_entries")
+      .select("work_date, check_in, check_out, meal_start, meal_end, notes")
+      .eq("profile_id", profileId)
+      .gte("work_date", start)
+      .lte("work_date", end);
+    if (error) {
+      console.error("getMonthEntries error:", error.message);
+      throw new Error(error.message);
+    }
+    return data;
+  });
 
   const map: Record<string, UITimeEntry> = {};
   (data ?? []).forEach((row: any) => {
@@ -220,16 +236,19 @@ export async function getMonthEntries(
 
 /** Single day's entry for the caller's profile — lighter than getMonthEntries for callers (e.g. the header time-clock widget) that only need today. */
 export async function getEntryForDate(profileId: string, workDate: string): Promise<UITimeEntry | null> {
-  const { data, error } = await supabase
-    .from("timecard_entries")
-    .select("check_in, check_out, meal_start, meal_end, notes")
-    .eq("profile_id", profileId)
-    .eq("work_date", workDate)
-    .maybeSingle();
-  if (error) {
-    console.error("getEntryForDate error:", error.message);
-    throw new Error(error.message);
-  }
+  const data = await withNetworkRetry(async () => {
+    const { data, error } = await supabase
+      .from("timecard_entries")
+      .select("check_in, check_out, meal_start, meal_end, notes")
+      .eq("profile_id", profileId)
+      .eq("work_date", workDate)
+      .maybeSingle();
+    if (error) {
+      console.error("getEntryForDate error:", error.message);
+      throw new Error(error.message);
+    }
+    return data;
+  });
   if (!data) return null;
   return {
     checkIn: data.check_in ?? "",
@@ -274,6 +293,44 @@ export async function saveEntry(
       );
     if (error) {
       console.error("saveEntry error:", error.message);
+      throw new Error(error.message);
+    }
+  });
+}
+
+const PUNCH_COLUMN: Record<"checkIn" | "checkOut" | "mealStart" | "mealEnd", string> = {
+  checkIn: "check_in",
+  checkOut: "check_out",
+  mealStart: "meal_start",
+  mealEnd: "meal_end",
+};
+
+/**
+ * Stamp ONE punch column for a day, leaving the others exactly as they are in
+ * the database. The mobile Time In/Out + Meal In/Out buttons must use this,
+ * never saveEntry(): saveEntry re-writes all five columns from the client's
+ * in-memory copy, so if that copy failed to load (a network blip in the
+ * field) and rendered blank, the next tap would upsert NULLs over the real
+ * check-in / meal punches. This upsert only names the single column tapped —
+ * PostgREST's ON CONFLICT updates just the columns present in the payload —
+ * so a stale local view can't erase anything.
+ */
+export async function savePunch(
+  profileId: string,
+  workDate: string,
+  field: "checkIn" | "checkOut" | "mealStart" | "mealEnd",
+  time: string
+): Promise<void> {
+  const column = PUNCH_COLUMN[field];
+  await withNetworkRetry(async () => {
+    const { error } = await supabase
+      .from("timecard_entries")
+      .upsert(
+        { profile_id: profileId, work_date: workDate, [column]: time },
+        { onConflict: "profile_id,work_date" }
+      );
+    if (error) {
+      console.error("savePunch error:", error.message);
       throw new Error(error.message);
     }
   });

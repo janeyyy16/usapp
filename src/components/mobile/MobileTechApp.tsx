@@ -53,7 +53,7 @@ import {
 } from "@/lib/supabase/messaging";
 import { getTicketBilling, saveTicketBilling, type TicketBilling } from "@/lib/supabase/billing";
 import { getMyPayslips, payslipStatusLabel, type MyPayslipRow } from "@/lib/supabase/payslips";
-import { getMyProfileSchedule, getMonthEntries, getCompanyTimecardEntries, saveEntry as saveTimecardEntry, resolveScheduledShiftHours, type UITimeEntry, type CompanyTimecardEntry } from "@/lib/supabase/timecards";
+import { getMyProfileSchedule, getMonthEntries, getCompanyTimecardEntries, saveEntry as saveTimecardEntry, savePunch, resolveScheduledShiftHours, type UITimeEntry, type CompanyTimecardEntry } from "@/lib/supabase/timecards";
 import { visibleAttendanceProfileIds } from "@/lib/notifyRouting";
 import { getCsrTeamComposition } from "@/lib/supabase/csrTeams";
 import { isAttendanceManagerTierRole, normalizeRole, ROLE_LABELS, TECHNICIAN_PAY_ROLES } from "@/lib/roleLabels";
@@ -4076,6 +4076,11 @@ function HomeOnSiteCard({
     { pos: { lat: number; lng: number }; accuracyM: number; at: number } | null
   >(null);
   const [refiningFix, setRefiningFix] = useState(false);
+  // Flips true once the automatic check has been trying and failing for a
+  // sustained stretch — the signal that GPS won't sharpen or the address is
+  // mapped to the wrong place, so a technician who's genuinely on site needs
+  // a way through even past the normal 3-mi override window.
+  const [stuckMode, setStuckMode] = useState(false);
   const preciseFresh = preciseFix != null && Date.now() - preciseFix.at < 45_000;
   const myPos = preciseFresh ? preciseFix!.pos : coarsePos;
   const fixAccuracyM = preciseFresh ? preciseFix!.accuracyM : coarseAccuracyM;
@@ -4263,6 +4268,18 @@ function HomeOnSiteCard({
     return () => { cancelled = true; window.clearInterval(id); setRefiningFix(false); };
   }, [arrivingKey, permissionDenied, devSimulate, clockedIn, consentConfirmed]);
 
+  // arrivingKey is stable while the tech waits (it's keyed on the tickets, not
+  // on the moving GPS fix), so this 90-second timer isn't constantly reset —
+  // it measures a genuine sustained failure to auto-verify. Cleared the moment
+  // there's nothing left awaiting check-in (all arrived / done / in radius).
+  const STUCK_AFTER_MS = 90_000;
+  useEffect(() => {
+    if (!arrivingKey || devSimulate) { setStuckMode(false); return; }
+    setStuckMode(false);
+    const id = window.setTimeout(() => setStuckMode(true), STUCK_AFTER_MS);
+    return () => window.clearTimeout(id);
+  }, [arrivingKey, devSimulate]);
+
   const formatNow = () => new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const formatTimeAt = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
@@ -4333,6 +4350,29 @@ function HomeOnSiteCard({
     void handleImHere(t, `manual override — ${measured}`);
   };
 
+  // Last-resort check-in for when the ticket geocoded to a real point but
+  // that point is well outside even the 3-mi override window — a weak-signal
+  // coarse fix or a wrong map pin. Two confirmations (not one) because
+  // there's no distance sanity-check left, and the ticket note is worded so
+  // dispatch can see at a glance this arrival was never GPS-verified.
+  const fmtAccuracy = (m: number | null) =>
+    m == null || !Number.isFinite(m)
+      ? ""
+      : `, fix accuracy ±${m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`}`;
+  const handleForceCheckIn = (t: Ticket, measuredMiles: number | null) => {
+    const measured =
+      measuredMiles === null
+        ? `no usable GPS fix${fmtAccuracy(fixAccuracyM)}`
+        : `GPS placed me ${measuredMiles.toFixed(1)} mi from the address${fmtAccuracy(fixAccuracyM)}`;
+    if (!window.confirm(
+      `GPS can't confirm you're on site — ${measured}.\n\nThis usually means a weak signal or the address is mapped to the wrong spot. Only continue if you're actually at ${t.ticketNo}.`,
+    )) return;
+    if (!window.confirm(
+      `Check in to ${t.ticketNo} without GPS verification?\n\nThis is flagged on the ticket for dispatch to review.`,
+    )) return;
+    void handleImHere(t, `manual override — NOT GPS-verified (${measured})`);
+  };
+
   const handleImDone = async (t: Ticket) => {
     const time = formatNow();
     const at = new Date().toISOString();
@@ -4389,13 +4429,26 @@ function HomeOnSiteCard({
           // holding a coarse position — "1.2 mi away" from a cell-tower fix
           // is noise, so say we're still locating rather than show it. Not
           // for approximate anchors: a sharper fix can't help there.
-          const locating = pending && refiningFix && !preciseFresh && geocoded && !approx;
+          // Once we've been stuck a while, or the fix is plainly cell-tower-
+          // grade (accuracy worse than ~1 km), a sharper GPS fix isn't coming
+          // — stop cycling "Getting precise location…" and let the fallback
+          // buttons sit still.
+          const fixIsCoarse = fixAccuracyM != null && fixAccuracyM > 1000;
+          const gpsGivenUp = stuckMode || fixIsCoarse;
+          const locating =
+            pending && refiningFix && !preciseFresh && geocoded && !approx && !gpsGivenUp;
           // Manual "I'm here anyway" — offered while the automatic check is
           // failing but the tech is plausibly on site: no usable geocode, an
           // approximate-only anchor, or a precise point within the cap.
           const canManual =
             pending && !locating &&
             (!geocoded || approx || (dist !== null && dist <= ON_SITE_CHECKIN_MANUAL_OVERRIDE_MAX_MILES));
+          // Beyond the 3-mi override window the address DID geocode, so the
+          // distance is real — but if it's this far off and GPS has given up,
+          // the pin or the signal is unusable here. Heavier-friction check-in
+          // (two confirmations, flagged NOT GPS-verified on the ticket).
+          const canForceCheckIn =
+            pending && !locating && !canManual && geocoded && !approx && gpsGivenUp;
           return (
             <div key={t.ticketNo} className={`mtech-home-onsite-row${pending ? " mtech-home-onsite-row--pending" : ""}`}>
               <div className="mtech-home-onsite-info">
@@ -4444,6 +4497,16 @@ function HomeOnSiteCard({
                         onClick={() => handleManualCheckIn(t, dist, approx)}
                       >
                         I'm here anyway
+                      </button>
+                    )}
+                    {canForceCheckIn && (
+                      <button
+                        type="button"
+                        className="mtech-home-onsite-btn mtech-home-onsite-btn--manual"
+                        disabled={isBusy}
+                        onClick={() => handleForceCheckIn(t, dist)}
+                      >
+                        Work Start anyway
                       </button>
                     )}
                   </div>
@@ -4545,6 +4608,11 @@ function MobileHomeView({
   const [scheduleProfileId, setScheduleProfileId] = useState<string | null>(null);
   const [entry, setEntry] = useState<UITimeEntry>({ checkIn: "", checkOut: "", mealStart: "", mealEnd: "", notes: "" });
   const [saving, setSaving] = useState(false);
+  // When the timecard fails to load we must NOT fall through to a blank punch
+  // row — a tech who thinks their time reset would re-tap Time In and (before
+  // savePunch) overwrite the real check-in. Show a retry instead.
+  const [loadError, setLoadError] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   const now = new Date();
   const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
@@ -4562,16 +4630,19 @@ function MobileHomeView({
         setMealMinutes(schedule.mealMinutes);
         setScheduleTimezone(schedule.scheduleTimezone);
         setScheduleProfileId(schedule.profileId || null);
-        if (!schedule.profileId) return;
+        if (!schedule.profileId) { setLoadError(true); return; }
         const monthEntries = await getMonthEntries(schedule.profileId, now.getFullYear(), now.getMonth());
-        if (!cancelled) setEntry(monthEntries[todayKey] || { checkIn: "", checkOut: "", mealStart: "", mealEnd: "", notes: "" });
+        if (cancelled) return;
+        setEntry(monthEntries[todayKey] || { checkIn: "", checkOut: "", mealStart: "", mealEnd: "", notes: "" });
+        setLoadError(false);
       } catch (e) {
         console.error("MobileHomeView: load today's entry failed", e);
+        if (!cancelled) setLoadError(true);
       }
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uid]);
+  }, [uid, reloadNonce]);
 
   // Stamps `field` with the server's own current instant (never the phone's
   // clock — see src/lib/serverTime.ts), converted into this technician's
@@ -4592,9 +4663,10 @@ function MobileHomeView({
         alert("It's now a new day — please reopen the app and try again.");
         return;
       }
-      const next = { ...entry, [field]: time };
-      setEntry(next);
-      await saveTimecardEntry(scheduleProfileId, workDate, next);
+      // Single-column upsert — never re-writes the sibling punches from this
+      // (possibly stale) local copy. See savePunch's doc comment.
+      await savePunch(scheduleProfileId, workDate, field, time);
+      setEntry((prev) => ({ ...prev, [field]: time }));
     } catch (e) {
       console.error("MobileHomeView: save failed", e);
       alert(`Failed to save: ${e instanceof Error ? e.message : "Unknown error"}`);
@@ -4603,10 +4675,10 @@ function MobileHomeView({
     }
   };
 
-  const canTimeIn = !entry.checkIn && !saving;
-  const canTimeOut = !!entry.checkIn && !entry.checkOut && !saving;
-  const canMealIn = !!entry.checkIn && !entry.checkOut && !entry.mealStart && !saving;
-  const canMealOut = !!entry.mealStart && !entry.mealEnd && !saving;
+  const canTimeIn = !loadError && !entry.checkIn && !saving;
+  const canTimeOut = !loadError && !!entry.checkIn && !entry.checkOut && !saving;
+  const canMealIn = !loadError && !!entry.checkIn && !entry.checkOut && !entry.mealStart && !saving;
+  const canMealOut = !loadError && !!entry.mealStart && !entry.mealEnd && !saving;
 
   // Which card is currently showing its inline "Yes / No" confirm —
   // at most one at a time. Auto-disarms after a few seconds so an armed
@@ -4712,6 +4784,12 @@ function MobileHomeView({
         />
       </div>
 
+      {loadError ? (
+        <div className="mtech-home-clockerror">
+          <span>Couldn't load your timecard — your punches are safe, this is just the display.</span>
+          <button type="button" onClick={() => { setLoadError(false); setReloadNonce((n) => n + 1); }}>Retry</button>
+        </div>
+      ) : (
       <div className="mtech-timecard-summary mtech-home-clockrow">
         <ClockCard
           label="Time In" value={entry.checkIn ? entry.checkIn.slice(0, 5) : ""} valueClass="in"
@@ -4734,6 +4812,7 @@ function MobileHomeView({
           onTap={handleTimeOut} onCancel={disarm}
         />
       </div>
+      )}
 
       <HomeOnSiteCard tickets={activeTickets} userName={userName} role={role} />
 
@@ -5016,6 +5095,8 @@ function MobileTimecardView({
   const [scheduleTimezone, setScheduleTimezone] = useState<ScheduleTimezone>("CST");
   const [entry, setEntry] = useState<UITimeEntry>({ checkIn: "", checkOut: "", mealStart: "", mealEnd: "", notes: "" });
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const [saving, setSaving] = useState(false);
 
   // One tap arms, a second tap within a few seconds actually punches — so a
@@ -5056,21 +5137,25 @@ function MobileTimecardView({
         setMealMinutes(schedule.mealMinutes);
         setScheduleTimezone(schedule.scheduleTimezone);
         if (!schedule.profileId) {
-          setEntry({ checkIn: "", checkOut: "", mealStart: "", mealEnd: "", notes: "" });
+          // Not "you have no punches" — we couldn't confirm your profile.
+          // Don't render a blank, tappable card the tech might overwrite.
+          setLoadError(true);
           return;
         }
         const monthEntries = await getMonthEntries(schedule.profileId, now.getFullYear(), now.getMonth());
         if (cancelled) return;
         setEntry(monthEntries[todayKey] || { checkIn: "", checkOut: "", mealStart: "", mealEnd: "", notes: "" });
+        setLoadError(false);
       } catch (e) {
         console.error("MobileTimecardView: load failed", e);
+        if (!cancelled) setLoadError(true);
       } finally {
         if (!cancelled) setLoading(false);
       }
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uid]);
+  }, [uid, reloadNonce]);
 
   const timeDiff = (t1: string, t2: string): number => {
     if (!t1 || !t2) return 0;
@@ -5099,9 +5184,10 @@ function MobileTimecardView({
         alert("It's now a new day — please reopen your timecard and try again.");
         return;
       }
-      const next = { ...entry, [field]: time };
-      setEntry(next);
-      await saveTimecardEntry(profileId, workDate, next);
+      // Single-column upsert — a stale/blank local `entry` can't null the
+      // other punches. See savePunch's doc comment.
+      await savePunch(profileId, workDate, field, time);
+      setEntry((prev) => ({ ...prev, [field]: time }));
     } catch (e) {
       console.error("MobileTimecardView: save failed", e);
       alert(`Failed to save: ${e instanceof Error ? e.message : "Unknown error"}`);
@@ -5164,6 +5250,11 @@ function MobileTimecardView({
 
       {loading ? (
         <div className="mtech-muted">Loading timecard…</div>
+      ) : loadError ? (
+        <div className="mtech-home-clockerror">
+          <span>Couldn't load your timecard. Your punches are safe — this is only the display. Check your connection and retry.</span>
+          <button type="button" onClick={() => { setLoadError(false); setReloadNonce((n) => n + 1); }}>Retry</button>
+        </div>
       ) : (
         <>
           <div className="mtech-timecard-summary">

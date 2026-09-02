@@ -5762,6 +5762,31 @@ a.mtech-phone-link:active { opacity: 0.7; }
   text-align: center;
   padding: 0 0.5rem;
 }
+.mtech-home-clockerror {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  background: var(--mt-surface);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  border-radius: 12px;
+  padding: 0.7rem 0.85rem;
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.85);
+}
+.mtech-home-clockerror button {
+  appearance: none;
+  flex-shrink: 0;
+  border: 1px solid rgba(245, 158, 11, 0.55);
+  background: transparent;
+  color: #f59e0b;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0.35rem 0.75rem;
+  border-radius: 8px;
+  cursor: pointer;
+}
 
 /* ── Clock In Team (manager proxy clock-in) ───────────────────────────── */
 .mtech-clockin {
@@ -11897,6 +11922,31 @@ a.mtech-phone-link:active { opacity: 0.7; }
   color: rgba(255, 255, 255, 0.85);
   text-align: center;
   padding: 0 0.5rem;
+}
+.mtech-home-clockerror {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  background: var(--mt-surface);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  border-radius: 12px;
+  padding: 0.7rem 0.85rem;
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.85);
+}
+.mtech-home-clockerror button {
+  appearance: none;
+  flex-shrink: 0;
+  border: 1px solid rgba(245, 158, 11, 0.55);
+  background: transparent;
+  color: #f59e0b;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0.35rem 0.75rem;
+  border-radius: 8px;
+  cursor: pointer;
 }
 
 /* ── Clock In Team (manager proxy clock-in) ───────────────────────────── */
