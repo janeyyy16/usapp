@@ -270,28 +270,28 @@ export function FillFlashTechnicianTravelPage({ docId }: Props) {
                   )}
 
                   {!pageLoading && pageNum === numPages && (
-                    <>
-                      <canvas
-                        {...sigPad.canvasProps}
-                        style={{
-                          position: "absolute",
-                          left: PAGE3_RECT.signature.x * scale,
-                          top: (PAGE_HEIGHT - PAGE3_RECT.signature.y - PAGE3_RECT.signature.h) * scale,
-                          width: PAGE3_RECT.signature.w * scale,
-                          height: PAGE3_RECT.signature.h * scale,
-                        }}
-                      />
-                      <div style={overlayStyle(PAGE3_RECT.dateSigned)} className="flex items-center font-bold text-[#00008B]">
-                        {fmtDateSignedDisplay(new Date())}
-                      </div>
-                    </>
+                    <div style={overlayStyle(PAGE3_RECT.dateSigned)} className="flex items-center font-bold text-[#00008B]">
+                      {fmtDateSignedDisplay(new Date())}
+                    </div>
                   )}
                 </div>
               ))}
             </div>
 
-            <div className="flex items-center justify-center mt-2">
-              <SignaturePadControls pad={sigPad} />
+            {/* Signed at full size here (not squeezed into the printed
+                blank's tiny 200x26pt line) — fillFlashTechnicianTravelPdf
+                places the captured image into PAGE3_RECT.signature on the
+                real PDF regardless of how large it was drawn on screen, so
+                this is purely a "make it easy to actually sign" change. */}
+            <div className="mt-3">
+              <label className="block text-xs font-semibold text-muted-foreground mb-1">Your Signature</label>
+              <canvas
+                {...sigPad.canvasProps}
+                className={`bg-white rounded-md border border-white/15 w-full max-w-md ${sigPad.canvasProps.className}`}
+              />
+              <div className="mt-2">
+                <SignaturePadControls pad={sigPad} />
+              </div>
             </div>
 
             {error && (
