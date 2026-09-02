@@ -5067,7 +5067,14 @@ function MobileHomeView({
   const [reloadNonce, setReloadNonce] = useState(0);
 
   const now = new Date();
-  const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  // The employee's SCHEDULED work-day, not the phone's own local calendar
+  // date — for a Philippines-based technician (policy: follows Central
+  // Time business hours, not native Asia/Manila, see attendanceGrace.ts),
+  // the phone's own date rolls over hours before Central's does, which
+  // used to make today's already-saved check-in look missing (and later
+  // in the shift, block Meal/Check-Out with a false "it's a new day" error)
+  // once the two dates diverged mid-shift.
+  const todayKey = zonedDateKey(now, scheduleTimezone);
 
   useEffect(() => {
     if (!uid) return;
@@ -5083,7 +5090,11 @@ function MobileHomeView({
         setScheduleTimezone(schedule.scheduleTimezone);
         setScheduleProfileId(schedule.profileId || null);
         if (!schedule.profileId) { setLoadError(true); return; }
-        const monthEntries = await getMonthEntries(schedule.profileId, now.getFullYear(), now.getMonth());
+        // Year/month from todayKey (already zoned), not the phone's own
+        // now.getFullYear()/getMonth() — see MobileTimecardView's identical
+        // fix for why those can disagree right around a month boundary.
+        const [zYear, zMonth] = todayKey.split("-").map(Number);
+        const monthEntries = await getMonthEntries(schedule.profileId, zYear, zMonth - 1);
         if (cancelled) return;
         setEntry(monthEntries[todayKey] || { checkIn: "", checkOut: "", mealStart: "", mealEnd: "", notes: "" });
         setLoadError(false);
@@ -5595,8 +5606,20 @@ function MobileTimecardView({
   useEffect(() => () => { if (armTimerRef.current) window.clearTimeout(armTimerRef.current); }, []);
 
   const now = new Date();
-  const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-  const todayLabel = now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  // Scheduled work-day (see MobileHomeView's identical fix) — not the
+  // phone's own local calendar date, which for a Philippines-based
+  // technician (Central Time policy, not native Asia/Manila) rolls over
+  // hours before Central's date does, mid-shift.
+  const todayKey = zonedDateKey(now, scheduleTimezone);
+  // Labeled in the same zone as todayKey — otherwise a PH-based tech past
+  // their local midnight would see a date here that doesn't match the
+  // entry actually being shown/edited below.
+  const todayLabel = new Intl.DateTimeFormat("en-US", {
+    timeZone: TIME_ZONES[scheduleTimezone].timeZone,
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  }).format(now);
 
   useEffect(() => {
     if (!uid) {
@@ -5620,7 +5643,13 @@ function MobileTimecardView({
           setLoadError(true);
           return;
         }
-        const monthEntries = await getMonthEntries(schedule.profileId, now.getFullYear(), now.getMonth());
+        // Year/month parsed from todayKey (already in the employee's
+        // scheduled zone), not the phone's own now.getFullYear()/getMonth()
+        // — right around a month boundary those two can disagree (e.g. PH
+        // local already reads Oct 1 while the Central work-date is still
+        // Sep 30), which fetched the wrong month entirely.
+        const [zYear, zMonth] = todayKey.split("-").map(Number);
+        const monthEntries = await getMonthEntries(schedule.profileId, zYear, zMonth - 1);
         if (cancelled) return;
         setEntry(monthEntries[todayKey] || { checkIn: "", checkOut: "", mealStart: "", mealEnd: "", notes: "" });
         setLoadError(false);
