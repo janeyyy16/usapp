@@ -506,7 +506,7 @@ export function MobileTechApp() {
   }, [view, profileId]);
 
   const [tab, setTab] = useState<"today" | "todo" | "done" | "search">(
-    _persisted.tab ?? "todo",
+    _persisted.tab ?? "today",
   );
   const [search, setSearch] = useState("");
   const [activeTicketNo, setActiveTicketNo] = useState<string | null>(
@@ -1044,7 +1044,7 @@ export function MobileTechApp() {
             roster={roster}
             onSelect={(tech) => {
               setSelectedTech(tech);
-              setTab("todo");
+              setTab("today");
               setView("tickets");
             }}
           />
