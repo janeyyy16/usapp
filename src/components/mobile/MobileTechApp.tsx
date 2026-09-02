@@ -3056,6 +3056,7 @@ function RepairTab({ ticket, authorName }: { ticket: Ticket; authorName: string 
         title=""
         uploadedBy={authorName}
         visitOptions={Array.from(new Set(visits.map((v) => String(v.visitNo || "")).filter(Boolean)))}
+        enableOfflineQueue
       />
     </div>
   );

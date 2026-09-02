@@ -1,9 +1,10 @@
 /**
  * Offline action queue for the mobile technician app — On-Site Check-In
- * ("I'm Here"/"I'm Done") and Visit Log saves. When a write fails (offline,
- * or any transient network error — the two look identical from here), the
- * caller enqueues it here instead of just alerting and giving up; drainQueue
- * replays every queued row once back online.
+ * ("I'm Here"/"I'm Done"), Visit Log saves, and ticket photo uploads. When a
+ * write fails (offline, or any transient network error — the two look
+ * identical from here), the caller enqueues it here instead of just
+ * alerting and giving up; drainQueue replays every queued row once back
+ * online.
  *
  * A separate Dexie database from src/lib/db.ts's AHSDatabase on purpose —
  * that one is unrelated legacy dummy/demo data for a handful of never-
@@ -15,8 +16,9 @@ import Dexie, { type Table } from "dexie";
 import { addTicketComment } from "@/lib/supabase/comments";
 import { setTicketOnsiteCheckIn, updateTicketVisit } from "@/lib/supabase/tickets";
 import type { UIVisit } from "@/lib/supabase/tickets";
+import { uploadTicketPhoto } from "@/lib/firebase/storage";
 
-export type QueuedActionType = "onsite_checkin" | "visit_save";
+export type QueuedActionType = "onsite_checkin" | "visit_save" | "photo_upload";
 
 export interface OnsiteCheckinPayload {
   ticketNo: string;
@@ -32,10 +34,29 @@ export interface VisitSavePayload {
   visit: Partial<UIVisit>;
 }
 
+/**
+ * Already compressed at enqueue time (same compressImage() call the online
+ * path uses) — the point of queuing is to skip straight to a ready-to-send
+ * upload once back online, not to defer CPU work that doesn't need a
+ * network connection anyway. Dexie stores the Blob natively in IndexedDB,
+ * no base64 round-trip needed.
+ */
+export interface PhotoUploadPayload {
+  companyId: string;
+  ticketPath: string;
+  blob: Blob;
+  fileName: string;
+  uploadedBy?: string;
+  visitNo?: string;
+  width?: number;
+  height?: number;
+  originalSize?: number;
+}
+
 export interface QueuedAction {
   id?: number;
   type: QueuedActionType;
-  payload: OnsiteCheckinPayload | VisitSavePayload;
+  payload: OnsiteCheckinPayload | VisitSavePayload | PhotoUploadPayload;
   createdAt: string;
   status: "pending" | "failed";
   lastError?: string;
@@ -72,6 +93,15 @@ export async function enqueueVisitSave(payload: VisitSavePayload): Promise<void>
   });
 }
 
+export async function enqueuePhotoUpload(payload: PhotoUploadPayload): Promise<void> {
+  await db.queuedActions.add({
+    type: "photo_upload",
+    payload,
+    createdAt: new Date().toISOString(),
+    status: "pending",
+  });
+}
+
 /** Live count of everything still waiting to sync — drives the "Pending sync" badge. */
 export async function pendingQueueCount(): Promise<number> {
   return db.queuedActions.count();
@@ -84,9 +114,18 @@ async function replay(action: QueuedAction): Promise<void> {
       addTicketComment(p.ticketNo, p.commentBody, p.authorName, p.authorRole),
       setTicketOnsiteCheckIn(p.ticketNo, p.event, p.at),
     ]);
-  } else {
+  } else if (action.type === "visit_save") {
     const p = action.payload as VisitSavePayload;
     await updateTicketVisit(p.visitId, p.visit);
+  } else {
+    const p = action.payload as PhotoUploadPayload;
+    await uploadTicketPhoto(p.companyId, p.ticketPath, p.blob, p.fileName, {
+      uploadedBy: p.uploadedBy,
+      visitNo: p.visitNo,
+      width: p.width,
+      height: p.height,
+      originalSize: p.originalSize,
+    });
   }
 }
 

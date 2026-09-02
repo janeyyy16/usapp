@@ -8,13 +8,14 @@ import {
   type TicketPhoto,
 } from "@/lib/firebase/storage";
 import { compressImage, validateImageFile, formatBytes } from "@/lib/imageCompression";
+import { enqueuePhotoUpload, pendingQueueCount } from "@/lib/offlineQueue";
 
 const MAX_PHOTOS = 20;
 
 interface UploadQueueItem {
   id: string;
   fileName: string;
-  status: "compressing" | "uploading" | "done" | "error";
+  status: "compressing" | "uploading" | "done" | "error" | "queued";
   progress: number;
   originalSize: number;
   originalDims?: { width: number; height: number };
@@ -40,12 +41,15 @@ export function TicketPhotos({
   title,
   uploadedBy,
   visitOptions,
+  enableOfflineQueue,
 }: {
   ticketNo: string;
   category?: string;
   title?: string;
   uploadedBy?: string;
   visitOptions?: string[];
+  /** Mobile only — desktop leaves this off, so a failed upload there still just fails outright (unchanged behavior). A failure while offline queues the already-compressed photo instead of erroring; OfflineQueueBadge (mounted in MobileTechApp) drains it once back online. */
+  enableOfflineQueue?: boolean;
 }) {
   const { companyId, ready } = useAuth();
   const [photos, setPhotos] = useState<TicketPhoto[]>([]);
@@ -82,6 +86,36 @@ export function TicketPhotos({
     })();
     return () => { cancelled = true; };
   }, [ready, cid, ticketPath]);
+
+  // Reconciles "queued" placeholders once OfflineQueueBadge's background
+  // drain (elsewhere in the app) actually uploads them — this component has
+  // no direct signal for that, so it polls the same pending count the badge
+  // does. A drop means at least one queued item (not necessarily one of
+  // THIS ticket's, but this is the only cheap signal available) finished,
+  // so re-list this ticket's real photos and drop any "queued" placeholders
+  // that are presumably now among them.
+  useEffect(() => {
+    if (!uploadQueue.some((q) => q.status === "queued")) return;
+    let cancelled = false;
+    let lastCount: number | null = null;
+    const check = async () => {
+      const n = await pendingQueueCount().catch(() => null);
+      if (cancelled || n === null) return;
+      if (lastCount !== null && n < lastCount) {
+        const list = await listTicketPhotos(cid, ticketPath).catch(() => null);
+        if (cancelled) return;
+        if (list) setPhotos(list);
+        setUploadQueue((prev) => prev.filter((q) => q.status !== "queued"));
+      }
+      lastCount = n;
+    };
+    check();
+    const interval = window.setInterval(check, 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [uploadQueue, cid, ticketPath]);
 
   const isImage = (name: string) => /\.(png|jpe?g|gif|webp|bmp|heic|heif)$/i.test(name);
 
@@ -147,8 +181,13 @@ export function TicketPhotos({
     await Promise.allSettled(
       valid.map(async (file, i) => {
         const id = items[i].id;
+        // Declared outside the try so the catch block below can still
+        // queue the already-compressed blob if only the upload (not the
+        // compression) failed — compression is CPU-only and needs no
+        // network, so there's no reason to redo it on a network failure.
+        let compressed: Awaited<ReturnType<typeof compressImage>> | null = null;
         try {
-          const compressed = await compressImage(file);
+          compressed = await compressImage(file);
           updateQueueItem(id, {
             status: "uploading",
             originalDims: { width: compressed.originalWidth, height: compressed.originalHeight },
@@ -175,6 +214,29 @@ export function TicketPhotos({
           setUploadQueue((prev) => prev.filter((q) => q.id !== id));
         } catch (err) {
           console.error(`Photo upload failed for "${file.name}":`, err);
+          if (enableOfflineQueue) {
+            // Compression is CPU-only (no network needed) — if it already
+            // succeeded, queue that same blob as-is instead of redoing it;
+            // only falls back to the raw file if the failure happened
+            // during compression itself.
+            try {
+              await enqueuePhotoUpload({
+                companyId: cid,
+                ticketPath,
+                blob: compressed?.blob ?? file,
+                fileName: file.name,
+                uploadedBy,
+                visitNo: selectedVisitNo || undefined,
+                width: compressed?.width,
+                height: compressed?.height,
+                originalSize: compressed?.originalSize ?? file.size,
+              });
+              updateQueueItem(id, { status: "queued", progress: 100 });
+              return;
+            } catch (queueErr) {
+              console.error(`Failed to queue "${file.name}" for offline sync:`, queueErr);
+            }
+          }
           updateQueueItem(id, {
             status: "error",
             error: err instanceof Error ? err.message : "Unknown error",
@@ -258,10 +320,11 @@ export function TicketPhotos({
               <div key={item.id} className="rounded-lg border border-white/10 bg-slate-900/50 px-3 py-2 text-xs">
                 <div className="flex items-center justify-between gap-2">
                   <span className="truncate text-slate-300">{item.fileName}</span>
-                  <span className={item.status === "error" ? "text-red-400" : "text-slate-400"}>
+                  <span className={item.status === "error" ? "text-red-400" : item.status === "queued" ? "text-amber-400" : "text-slate-400"}>
                     {item.status === "compressing" && "Compressing…"}
                     {item.status === "uploading" && `Uploading ${item.progress}%`}
                     {item.status === "error" && "Failed"}
+                    {item.status === "queued" && "Waiting to sync"}
                   </span>
                 </div>
                 {item.status === "uploading" && (
