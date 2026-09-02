@@ -532,6 +532,14 @@ export function WorkPlannerPage({ mod, sub }: Props) {
     [groupedTickets, showEmptyTechs],
   );
 
+  // Same "Show technicians with no tickets" gate the schedule columns use —
+  // a tech hidden there (no tickets today) shouldn't still show up as a
+  // toggleable entry in the map legend.
+  const legendTechRoster = useMemo(
+    () => (showEmptyTechs ? selectedTechRoster : visibleGroupedTickets.map(({ tech }) => tech)),
+    [selectedTechRoster, visibleGroupedTickets, showEmptyTechs],
+  );
+
   const techSummary = useMemo(() => {
     return selectedTechRoster.map((tech, index) => {
       const records = visibleTickets.filter((ticket) => ticket.technician === tech);
@@ -1364,7 +1372,7 @@ export function WorkPlannerPage({ mod, sub }: Props) {
               </div>
             )}
             <div className="legend-for-map" id="mapLegend">
-              {selectedTechRoster.slice(0, 5).map((tech, index) => (
+              {legendTechRoster.map((tech, index) => (
                 <label key={tech} className="legend-for-map-item" style={{ cursor: "pointer" }}>
                   <input
                     type="checkbox"
