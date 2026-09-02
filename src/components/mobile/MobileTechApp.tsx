@@ -438,31 +438,6 @@ export function MobileTechApp() {
   // isn't clobbered) — same reasoning HomeOnSiteCard's seed used to have.
   const [arrivedAt, setArrivedAt] = useState<Record<string, string>>({});
   const [doneAt, setDoneAt] = useState<Record<string, string>>({});
-  const formatTimeAt = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const ticketNoKey = tickets.map((t) => t.ticketNo).join(",");
-  useEffect(() => {
-    if (!ticketNoKey) return;
-    let cancelled = false;
-    getOnsiteCheckins(ticketNoKey.split(","))
-      .then((checkins) => {
-        if (cancelled) return;
-        const arrived: Record<string, string> = {};
-        const done: Record<string, string> = {};
-        for (const [ticketNo, v] of Object.entries(checkins)) {
-          if (v.arrivedAt) arrived[ticketNo] = formatTimeAt(v.arrivedAt);
-          if (v.doneAt) done[ticketNo] = formatTimeAt(v.doneAt);
-        }
-        setArrivedAt((prev) => ({ ...arrived, ...prev }));
-        setDoneAt((prev) => ({ ...done, ...prev }));
-      })
-      .catch((e) => console.warn("Failed to load on-site check-in status", e));
-    return () => { cancelled = true; };
-    // Also re-fetched on `view` change, same reasoning as
-    // disputedTimeByTicketNo below — an Approve on desktop (which writes
-    // straight onto onsite_arrived_at/onsite_done_at) should be visible
-    // here without needing a full page reload.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ticketNoKey, view]);
 
   // Ticket Time Disputes (pending or approved), keyed by the ticket they're
   // tied to — a small "Disputed Time" note on that ticket's row in the
@@ -722,6 +697,42 @@ export function MobileTechApp() {
       return fuzzy.some((c) => tt.includes(c) || c.includes(tt));
     });
   }, [tickets, scopeTech]);
+
+  // Seed arrivedAt/doneAt from what's actually persisted (onsite_arrived_at/
+  // onsite_done_at). Scoped to myTickets (this technician's own tickets),
+  // NOT the raw company-wide `tickets` — the latter is EVERY ticket for the
+  // whole company (thousands of rows for a real tenant), which built an
+  // .in("ticket_no", [...]) filter tens of KB long and got rejected outright
+  // by Supabase with a bare "400 Bad Request" (reproduced directly against
+  // production: a 3,558-ticket company's full list fails this exact query,
+  // while myTickets-sized lists — one technician's own — stay well within
+  // limits). Same "myTickets, not tickets" rule missingTimestampTicketNos
+  // above already follows, for the same reason.
+  const formatTimeAt = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const myTicketNoKey = myTickets.map((t) => t.ticketNo).join(",");
+  useEffect(() => {
+    if (!myTicketNoKey) return;
+    let cancelled = false;
+    getOnsiteCheckins(myTicketNoKey.split(","))
+      .then((checkins) => {
+        if (cancelled) return;
+        const arrived: Record<string, string> = {};
+        const done: Record<string, string> = {};
+        for (const [ticketNo, v] of Object.entries(checkins)) {
+          if (v.arrivedAt) arrived[ticketNo] = formatTimeAt(v.arrivedAt);
+          if (v.doneAt) done[ticketNo] = formatTimeAt(v.doneAt);
+        }
+        setArrivedAt((prev) => ({ ...arrived, ...prev }));
+        setDoneAt((prev) => ({ ...done, ...prev }));
+      })
+      .catch((e) => console.warn("Failed to load on-site check-in status", e));
+    return () => { cancelled = true; };
+    // Also re-fetched on `view` change, same reasoning as
+    // disputedTimeByTicketNo below — an Approve on desktop (which writes
+    // straight onto onsite_arrived_at/onsite_done_at) should be visible
+    // here without needing a full page reload.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [myTicketNoKey, view]);
 
   // Ticket rows flagged "CL-Ready to Complete" but with neither Work Start
   // nor Work Done ever actually stamped — a real gap between what the
