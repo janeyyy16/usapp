@@ -12,6 +12,7 @@ export interface AttendanceNoteRow {
   content: string;
   notifyIndividual: boolean;
   notifyTeamLead: boolean;
+  createdBy: string | null;
 }
 
 // Supabase caps an unbounded select at 1000 rows — a company's attendance
@@ -27,7 +28,7 @@ export async function getAttendanceNotes(
   for (let from = 0; ; from += PAGE_SIZE) {
     const { data, error } = await supabase
       .from("attendance_notes")
-      .select("profile_id, note_date, content, notify_individual, notify_team_lead")
+      .select("profile_id, note_date, content, notify_individual, notify_team_lead, created_by")
       .not("profile_id", "is", null)
       .gte("note_date", startDate)
       .lte("note_date", endDate)
@@ -43,6 +44,7 @@ export async function getAttendanceNotes(
         content: row.content ?? "",
         notifyIndividual: Boolean(row.notify_individual),
         notifyTeamLead: Boolean(row.notify_team_lead),
+        createdBy: row.created_by ?? null,
       }))
     );
     if (!data || data.length < PAGE_SIZE) break;

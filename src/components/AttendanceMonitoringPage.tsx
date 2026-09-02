@@ -19,6 +19,7 @@ import {
   type CompanyTimecardEntry,
 } from "@/lib/supabase/timecards";
 import { getAttendanceNotes, upsertAttendanceNote } from "@/lib/supabase/attendanceNotes";
+import { getBranchRoles, type BranchRoles } from "@/lib/supabase/generalInfo";
 import { ActivityLogPanel } from "@/components/ActivityLogPanel";
 import { logModuleActivity } from "@/lib/supabase/moduleActivityLog";
 import { getOrCreateDmThread, sendMessage } from "@/lib/supabase/messaging";
@@ -309,7 +310,8 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
   const [correctionStatusFilter, setCorrectionStatusFilter] = useState<"all" | CorrectionStatus>("all");
   const [correctionDepartmentFilter, setCorrectionDepartmentFilter] = useState<string>("all");
   const [correctionTimecardData, setCorrectionTimecardData] = useState<{ checkIn: string; checkOut: string; mealStart: string; mealEnd: string }>({ checkIn: "", checkOut: "", mealStart: "", mealEnd: "" });
-  const [notesData, setNotesData] = useState<Record<string, { content: string; notifyIndividual: boolean; notifyTeamLead: boolean }>>({});
+  const [notesData, setNotesData] = useState<Record<string, { content: string; notifyIndividual: boolean; notifyTeamLead: boolean; createdBy: string | null }>>({});
+  const [branchRoles, setBranchRoles] = useState<BranchRoles[]>([]);
   const [newNote, setNewNote] = useState("");
   const [notifyIndividual, setNotifyIndividual] = useState(false);
   const [notifyTeamLead, setNotifyTeamLead] = useState(false);
@@ -357,7 +359,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
     }
     setLoading(true);
     try {
-      const [profileId, profileRows, csrCompositionResult, entryRows, noteRows, ptoRows, correctionRows, historyRows, conductNoteRows, employeeRequestRows, checkoutProposalRows] = await Promise.all([
+      const [profileId, profileRows, csrCompositionResult, entryRows, noteRows, ptoRows, correctionRows, historyRows, conductNoteRows, employeeRequestRows, checkoutProposalRows, branchRoleRows] = await Promise.all([
         getProfileIdByFirebaseUid(uid),
         getCompanyUsers(),
         getCsrTeamComposition().catch(() => null),
@@ -369,15 +371,17 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
         getAllAgentNotes().catch(() => []),
         getCompanyEmployeeRequests().catch(() => []),
         getPendingCheckoutProposals().catch(() => []),
+        getBranchRoles().catch(() => []),
       ]);
       setMyProfileId(profileId);
       setProfiles(profileRows);
       setCsrComposition(csrCompositionResult);
       setEntries(entryRows);
       setCheckoutProposals(checkoutProposalRows);
-      const noteMap: Record<string, { content: string; notifyIndividual: boolean; notifyTeamLead: boolean }> = {};
+      setBranchRoles(branchRoleRows);
+      const noteMap: Record<string, { content: string; notifyIndividual: boolean; notifyTeamLead: boolean; createdBy: string | null }> = {};
       noteRows.forEach((n) => {
-        noteMap[n.profileId] = { content: n.content, notifyIndividual: n.notifyIndividual, notifyTeamLead: n.notifyTeamLead };
+        noteMap[n.profileId] = { content: n.content, notifyIndividual: n.notifyIndividual, notifyTeamLead: n.notifyTeamLead, createdBy: n.createdBy };
       });
       setNotesData(noteMap);
       setPtoRequests(ptoRows);
@@ -516,6 +520,58 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
     if (!id) return "—";
     const p = allProfileById.get(id);
     return p?.display_name || p?.email || "—";
+  };
+
+  // General Information's per-branch directory (Branch Manager / Senior
+  // Branch Manager), keyed loosely (trim + lowercase) since it's free-typed
+  // there rather than picked from the same branch list this table's own
+  // record.location values come from.
+  const branchRolesByLocation = useMemo(() => {
+    const map = new Map<string, BranchRoles>();
+    branchRoles.forEach((r) => map.set(r.branch.trim().toLowerCase(), r));
+    return map;
+  }, [branchRoles]);
+  const branchManagerFor = (location: string | null | undefined, key: "branchManager" | "seniorBranchManager") => {
+    if (!location) return "—";
+    return branchRolesByLocation.get(location.trim().toLowerCase())?.[key] || "—";
+  };
+
+  // Note preview + Add/Edit button shared by every tile in the Missing Clock
+  // In/Out and Late Arrival alert modals — reuses the exact same notesData/
+  // Notes Modal state the Daily Attendance Tracker table's own note button
+  // already writes to, so a note added from either place shows up in both.
+  const renderAlertTileNote = (record: { profileId: string }) => {
+    if (!canManageNotes) return null;
+    const note = notesData[record.profileId];
+    return (
+      <div className="mt-3 pt-3 border-t border-white/10 flex items-start justify-between gap-3">
+        <div className="flex-1 min-w-0">
+          {note?.content ? (
+            <>
+              <p className="text-xs text-slate-300 break-words">{note.content}</p>
+              {note.createdBy && (
+                <p className="text-[11px] text-slate-500 mt-0.5">— {profileName(note.createdBy)}</p>
+              )}
+            </>
+          ) : (
+            <p className="text-xs text-slate-500 italic">Why are they absent? Add a note.</p>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            setSelectedNote(record.profileId);
+            setNewNote(note?.content || "");
+            setNotifyIndividual(note?.notifyIndividual || false);
+            setNotifyTeamLead(note?.notifyTeamLead || false);
+          }}
+          className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 transition"
+        >
+          <MessageSquare className="h-3.5 w-3.5" />
+          <span className="text-xs">{note ? "Edit" : "Add Note"}</span>
+        </button>
+      </div>
+    );
   };
 
   const myProfile = useMemo(
@@ -965,7 +1021,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
         notifyTeamLead,
         createdBy: myProfileId,
       });
-      setNotesData({ ...notesData, [selectedNote]: { content: newNote, notifyIndividual, notifyTeamLead } });
+      setNotesData({ ...notesData, [selectedNote]: { content: newNote, notifyIndividual, notifyTeamLead, createdBy: myProfileId } });
       void logModuleActivity({
         module: "attendance-monitoring",
         actorName: displayName || "Admin",
@@ -1573,6 +1629,8 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                       {dateRangeActive && <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date</th>}
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Employee</th>
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Location</th>
+                      <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Branch Manager</th>
+                      <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Senior Branch Manager</th>
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Department</th>
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Role</th>
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Check In</th>
@@ -1583,13 +1641,13 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                   </thead>
                   <tbody>
                     {loading || dailyDateLoading || (dateRangeActive && rangeFilterLoading) ? (
-                      <tr><td colSpan={dateRangeActive ? 9 : 8} className="px-3 py-8 text-center text-slate-400">Loading attendance…</td></tr>
+                      <tr><td colSpan={dateRangeActive ? 11 : 10} className="px-3 py-8 text-center text-slate-400">Loading attendance…</td></tr>
                     ) : filteredAndSortedData.length === 0 ? (
-                      <tr><td colSpan={dateRangeActive ? 9 : 8} className="px-3 py-8 text-center text-slate-400">No employees match this filter.</td></tr>
+                      <tr><td colSpan={dateRangeActive ? 11 : 10} className="px-3 py-8 text-center text-slate-400">No employees match this filter.</td></tr>
                     ) : dailyDataByDepartment.map((group) => (
                       <Fragment key={group.department}>
                         <tr className="bg-white/[0.03]">
-                          <td colSpan={dateRangeActive ? 9 : 8} className="px-3 py-2 text-xs font-bold text-blue-300 uppercase tracking-wide">
+                          <td colSpan={dateRangeActive ? 11 : 10} className="px-3 py-2 text-xs font-bold text-blue-300 uppercase tracking-wide">
                             {group.department} <span className="text-slate-500 font-normal normal-case">({group.records.length})</span>
                           </td>
                         </tr>
@@ -1633,6 +1691,8 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                           )}
                         </td>
                         <td className="px-3 py-3 text-slate-300">{record.location || "—"}</td>
+                        <td className="px-3 py-3 text-slate-300">{branchManagerFor(record.location, "branchManager")}</td>
+                        <td className="px-3 py-3 text-slate-300">{branchManagerFor(record.location, "seniorBranchManager")}</td>
                         <td className="px-3 py-3 text-slate-300">{record.department || "—"}</td>
                         <td className="px-3 py-3 text-slate-300">{getRoleDepartmentBreakdown(record.role).roleLabel || "—"}</td>
                         <td className="px-3 py-3 text-slate-300">
@@ -2530,9 +2590,13 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
           </div>
         )}
 
-        {/* Notes Modal */}
+        {/* Notes Modal — z-[60], above the Alert Details Modal's z-50: this
+            can now be opened from a tile inside that modal (still open
+            underneath), and being earlier in the DOM than the Alert modal
+            means matching z-index would render it hidden behind that modal
+            instead of on top of it. */}
         {selectedNote && (
-          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[60]">
             <div className="bg-slate-900 border border-white/10 rounded-lg p-6 max-w-md w-full mx-4">
               <div className="flex items-start justify-between mb-4">
                 <div>
@@ -2544,6 +2608,9 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
               <div className="mb-4">
                 <label className="block text-sm font-semibold text-slate-300 mb-2">Add Note</label>
                 <textarea value={newNote} onChange={(e) => setNewNote(e.target.value)} placeholder="Add note for this employee..." className="w-full bg-slate-800/50 border border-white/10 rounded-lg p-3 text-white text-sm placeholder-slate-500 focus:border-blue-500 focus:outline-none resize-none" rows={4} />
+                {notesData[selectedNote]?.createdBy && (
+                  <p className="text-[11px] text-slate-500 mt-1.5">Added by <span className="text-slate-400 font-semibold">{profileName(notesData[selectedNote].createdBy)}</span></p>
+                )}
               </div>
               <div className="space-y-3 mb-6">
                 <label className="flex items-center gap-3 cursor-pointer">
@@ -2925,6 +2992,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                           )}
                         </div>
                       </div>
+                      {renderAlertTileNote(record)}
                     </div>
                   ))}
 
@@ -2943,6 +3011,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                           </span>
                         </div>
                       </div>
+                      {renderAlertTileNote(record)}
                     </div>
                   ))}
 
@@ -2961,6 +3030,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                           </span>
                         </div>
                       </div>
+                      {renderAlertTileNote(record)}
                     </div>
                   ))}
                 </div>
