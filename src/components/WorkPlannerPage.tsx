@@ -80,12 +80,6 @@ function shortAddress(t: { city?: string; state?: string; zip?: string; location
 }
 
 const LOCATION_OPTIONS = LOCATIONS;
-const STATUS_LEGEND = [
-  { label: "Pending", className: "color-pending" },
-  { label: "Ready for Service", className: "color-ready" },
-  { label: "Completed", className: "color-completed" },
-  { label: "Claimed", className: "color-claimed" },
-];
 // Daily schedule columns: each time frame, plus an ANYTIME catch-all.
 const TIME_SLOTS: Array<PlannerTicket["slot"]> = [...TIME_FRAMES, "ANYTIME"];
 const SLOT_TIMES: Record<string, string> = FRAME_START_TIME;
@@ -113,14 +107,6 @@ function getStatusGroup(status: string) {
   if (value.includes("ready")) return "Ready for Service";
   if (value.includes("claim")) return "Claimed";
   return "Pending";
-}
-
-function getToneClass(ticket: PlannerTicket, index: number) {
-  const status = String(ticket.status || "").toLowerCase();
-  if (status.includes("complet") || status.includes("closed") || status.includes("done")) return `tone-tech-${index % 6}`;
-  if (status.includes("ready")) return `tone-tech-${(index + 1) % 6}`;
-  if (status.includes("claim")) return `tone-tech-${(index + 2) % 6}`;
-  return `tone-tech-${index % 6}`;
 }
 
 function getInitials(value: string | null | undefined) {
@@ -294,6 +280,11 @@ export function WorkPlannerPage({ mod, sub }: Props) {
   // state so the displayed count re-renders when it changes.
   const plottedTicketsRef = useRef<Array<{ ticket: PlannerTicket; position: { lat: number; lng: number } }>>([]);
   const [plottedTicketCount, setPlottedTicketCount] = useState(0);
+  // Same per-technician map-pin number ("JK1" -> 1, "JK2" -> 2, ...) shown
+  // on the Daily Schedule tile for that ticket, keyed by ticketNo — set
+  // from the exact same hierarchyNumber computed while building the map
+  // markers below, so the tile and the pin always agree.
+  const [ticketMapNumberByNo, setTicketMapNumberByNo] = useState<Map<string, number>>(new Map());
   // Technicians unchecked in the map legend — their tickets are skipped
   // when plotting pins/routes on THIS map only (the ticket list panel,
   // Technicians summary table, etc. are untouched). Empty = everyone shown,
@@ -306,6 +297,10 @@ export function WorkPlannerPage({ mod, sub }: Props) {
     setSelectedMarkerIndex(0);
   }, [hiddenMapTechs]);
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  // Scrolled into view when a Daily Schedule tile is clicked (see
+  // handleScheduleTileClick below), so the map pan/zoom that click triggers
+  // is actually visible instead of happening off-screen.
+  const mapSectionRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
   const markersRef = useRef<any[]>([]);
   const polylinesRef = useRef<any[]>([]);
@@ -873,6 +868,7 @@ export function WorkPlannerPage({ mod, sub }: Props) {
 
       // Group tickets by technician to determine hierarchy numbers
       const ticketsByTech = new Map<string, number>();
+      const mapNumberByTicketNo = new Map<string, number>();
 
       plottedResults.forEach(({ ticket, position }, index) => {
         // Determine hierarchy number for this technician
@@ -880,6 +876,7 @@ export function WorkPlannerPage({ mod, sub }: Props) {
         const currentCount = ticketsByTech.get(techName) || 0;
         const hierarchyNumber = currentCount + 1;
         ticketsByTech.set(techName, hierarchyNumber);
+        mapNumberByTicketNo.set(ticket.ticketNo, hierarchyNumber);
 
         // Get technician initials
         const initials = ticket.technician ? getInitials(ticket.technician) : "??";
@@ -906,6 +903,7 @@ export function WorkPlannerPage({ mod, sub }: Props) {
 
         extendBounds(position);
       });
+      setTicketMapNumberByNo(mapNumberByTicketNo);
 
       // Draw a route line per technician connecting their stops in order
       // (JK1 -> JK2 -> JK3), colored to match the tech's badges.
@@ -1118,6 +1116,19 @@ export function WorkPlannerPage({ mod, sub }: Props) {
     dragSourceRef.current = null;
   };
 
+  // Daily Schedule tile click -> pan/zoom the Assigned Locations Map to
+  // that ticket's pin (same plotted-tickets list the pin navigator uses),
+  // and scroll the map into view since it sits below the schedule grid.
+  // The ticket NUMBER itself is a separate link (target="_blank",
+  // stopPropagation) that opens the ticket's own detail page instead —
+  // clicking the rest of the tile must never also trigger that.
+  const handleScheduleTileClick = (ticket: PlannerTicket) => {
+    const idx = plottedTicketsRef.current.findIndex((p) => p.ticket.ticketNo === ticket.ticketNo);
+    if (idx < 0) return; // no plotted pin for this ticket (e.g. it never geocoded)
+    setSelectedMarkerIndex(idx);
+    mapSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+
   const currentLocationLabel = location || "Select a location";
 
   return (
@@ -1165,14 +1176,7 @@ export function WorkPlannerPage({ mod, sub }: Props) {
         </div>
 
         <div className="status-legend">
-          <div className="legend-title">Overall Status: Repair Status (customizable in Admin &gt; Repair Statuses)</div>
           <div className="legend-items">
-            {STATUS_LEGEND.map((item) => (
-              <div key={item.label} className="legend-item">
-                <div className={`legend-color ${item.className}`} />
-                <span>{item.label}</span>
-              </div>
-            ))}
             <label className="checkbox-group legend-item">
               <input type="checkbox" checked={showEmptyTechs} onChange={(event) => setShowEmptyTechs(event.target.checked)} />
               <span>Show technicians with no tickets</span>
@@ -1215,7 +1219,7 @@ export function WorkPlannerPage({ mod, sub }: Props) {
                           return (
                             <div
                               key={ticket.ticketNo}
-                              className={`work-order-card ${getToneClass(ticket, techIndex + index)}`}
+                              className="work-order-card"
                               draggable
                               onDragStart={(event) => {
                                 // Track both transfers: cross-cell move (handleDragStart)
@@ -1259,23 +1263,46 @@ export function WorkPlannerPage({ mod, sub }: Props) {
                                 // also fire on the parent.
                                 dragSourceRef.current = null;
                               }}
-                              onClick={() => setSelectedTicket(ticket)}
-                              title="Drag to reorder within this slot, or to a different slot/technician"
+                              onClick={() => handleScheduleTileClick(ticket)}
+                              title="Click to zoom the map to this ticket — drag to reorder within this slot, or to a different slot/technician"
                             >
-                              <a
-                                className="work-order-ticket"
-                                href={`/ticket/${encodeURIComponent(ticket.ticketNo)}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                onClick={(event) => event.stopPropagation()}
-                              >
-                                {ticket.ticketNo}
-                              </a>
-                              <div className="work-order-customer">{ticket.customer}</div>
-                              <div className="work-order-address">{shortAddress(ticket)}</div>
-                              <div className="work-order-status">
-                                <span className={`work-order-status-dot ${getToneClass(ticket, index)}`} />
-                                {displayStatus}
+                              <div style={{ display: "flex", alignItems: "stretch", gap: 8 }}>
+                                {ticketMapNumberByNo.has(ticket.ticketNo) && (
+                                  <div
+                                    className="work-order-map-number"
+                                    title="Matches this ticket's number on the map pin (e.g. JK1)"
+                                    style={{
+                                      flexShrink: 0,
+                                      display: "flex",
+                                      alignItems: "center",
+                                      justifyContent: "center",
+                                      width: 22,
+                                      borderRadius: 6,
+                                      background: "rgba(255,255,255,0.18)",
+                                      fontSize: 13,
+                                      fontWeight: 800,
+                                    }}
+                                  >
+                                    {ticketMapNumberByNo.get(ticket.ticketNo)}
+                                  </div>
+                                )}
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <a
+                                    className="work-order-ticket"
+                                    href={`/ticket/${encodeURIComponent(ticket.ticketNo)}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(event) => event.stopPropagation()}
+                                  >
+                                    {ticket.ticketNo}
+                                  </a>
+                                  <div className="work-order-customer">{ticket.customer}</div>
+                                  <div className="work-order-address">{shortAddress(ticket)}</div>
+                                  <div className="work-order-status">
+                                    <span className="work-order-status-dot" style={{ background: "#60a5fa" }} />
+                                    {displayStatus}
+                                  </div>
+                                </div>
                               </div>
                             </div>
                           );
@@ -1290,7 +1317,7 @@ export function WorkPlannerPage({ mod, sub }: Props) {
           )}
         </div>
 
-        <div className="map-section">
+        <div className="map-section" ref={mapSectionRef}>
           <div className="map-section-title">Assigned Locations Map</div>
           <div className="map-shell">
             {mapProvider === "google" && (

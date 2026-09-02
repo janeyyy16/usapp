@@ -385,7 +385,7 @@ export function MobileTechApp() {
   const NAV_STATE_KEY = "ahs:mtech:nav-state:v1";
   const readNavState = (): {
     view?: View;
-    tab?: "todo" | "done" | "search";
+    tab?: "today" | "todo" | "done" | "search";
     detailTab?: DetailTab;
     selectedTech?: string | null;
     activeTicketNo?: string | null;
@@ -528,7 +528,7 @@ export function MobileTechApp() {
     prevViewRef.current = view;
   }, [view, profileId]);
 
-  const [tab, setTab] = useState<"todo" | "done" | "search">(
+  const [tab, setTab] = useState<"today" | "todo" | "done" | "search">(
     _persisted.tab ?? "todo",
   );
   const [search, setSearch] = useState("");
@@ -800,7 +800,7 @@ export function MobileTechApp() {
   }, [users, allowedLocations]);
 
   const visibleTickets = useMemo(() => {
-    let list = myTickets;
+    let list = tab === "today" ? todaysTickets : myTickets;
     if (tab === "todo") list = list.filter((t) => !isDone(t.status));
     else if (tab === "done") list = list.filter((t) => isDone(t.status));
     if (search.trim()) {
@@ -812,7 +812,7 @@ export function MobileTechApp() {
       );
     }
     return list;
-  }, [myTickets, tab, search]);
+  }, [myTickets, todaysTickets, tab, search]);
 
   const activeTicket = useMemo(
     () => tickets.find((t) => t.ticketNo === activeTicketNo) || null,
@@ -1444,8 +1444,8 @@ function TicketsView({
 }: {
   loading: boolean;
   tickets: Ticket[];
-  tab: "todo" | "done" | "search";
-  setTab: (t: "todo" | "done" | "search") => void;
+  tab: "today" | "todo" | "done" | "search";
+  setTab: (t: "today" | "todo" | "done" | "search") => void;
   search: string;
   setSearch: (s: string) => void;
   onOpen: (t: Ticket) => void;
@@ -1467,6 +1467,9 @@ function TicketsView({
       </div>
 
       <div className="mtech-tabs">
+        <button className={tab === "today" ? "active" : ""} onClick={() => setTab("today")} type="button">
+          Today
+        </button>
         <button className={tab === "todo" ? "active" : ""} onClick={() => setTab("todo")} type="button">
           To Do
         </button>
