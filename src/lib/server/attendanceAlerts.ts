@@ -40,6 +40,19 @@
  * PTO-awareness is deliberately not handled here — an employee on approved
  * PTO today still gets evaluated like anyone else with a schedule. That gap
  * already existed in the client-side alert logic and wasn't part of the ask.
+ *
+ * missing_clock_out gets one more recipient group on top of HR/Finance +
+ * resolved manager: when the flagged profile is a technician (any
+ * TECHNICIAN_PAY_ROLES tier), their branch's Branch Manager and Parts
+ * Manager (General Information's per-branch directory,
+ * general_info_branch_roles — the same free-typed-name table
+ * GeneralInfoPage.tsx edits and AttendanceMonitoringPage.tsx's Branch
+ * Manager/Senior Branch Manager columns read) also get notified — they're
+ * the ones who actually need to know a technician never clocked out, not
+ * just HR. Resolved by matching the directory's free-typed name against
+ * profiles.display_name, same tolerance resolveManagerId already uses
+ * below. missing_clock_in intentionally does not get this treatment — the
+ * ask was specifically about not clocking OUT.
  */
 
 import {
@@ -49,6 +62,7 @@ import {
   DEFAULT_ATTENDANCE_TIMEZONE,
   payGraceMinutesFor,
 } from "../attendanceGrace";
+import { TECHNICIAN_PAY_ROLES } from "../roleLabels";
 
 type AlertType = "missing_clock_in" | "missing_clock_out";
 type NotificationKind = AlertType | "pattern_missing_clock_in" | "pattern_missing_clock_out";
@@ -193,7 +207,7 @@ export async function runAttendanceAlertCheck(
     return d.toISOString().slice(0, 10);
   })();
 
-  const [profilesRes, entriesRes, alertsRes, historyRes, membersRes] = await Promise.all([
+  const [profilesRes, entriesRes, alertsRes, historyRes, membersRes, branchRolesRes] = await Promise.all([
     fetch(
       `${supabaseUrl}/rest/v1/profiles?select=id,company_id,display_name,role,extra_roles,manager_name,assigned_branch,required_check_in,required_check_out,off_days&is_active=eq.true`,
       { headers: sbHeaders }
@@ -209,6 +223,9 @@ export async function runAttendanceAlertCheck(
       { headers: sbHeaders }
     ),
     fetch(`${supabaseUrl}/rest/v1/csr_team_members?select=profile_id,team_id,is_leader`, { headers: sbHeaders }),
+    fetch(`${supabaseUrl}/rest/v1/general_info_branch_roles?select=branch,branch_manager,parts_manager`, {
+      headers: sbHeaders,
+    }),
   ]);
   if (!profilesRes.ok) {
     summary.errors.push(`Failed to list profiles: HTTP ${profilesRes.status}`);
@@ -233,6 +250,9 @@ export async function runAttendanceAlertCheck(
   const teamMembers: Array<{ profile_id: string; team_id: string; is_leader: boolean }> = membersRes.ok
     ? await membersRes.json()
     : [];
+  const branchRoles: Array<{ branch: string; branch_manager: string | null; parts_manager: string | null }> =
+    branchRolesRes.ok ? await branchRolesRes.json() : [];
+  const branchRolesByBranch = new Map(branchRoles.map((r) => [r.branch.trim().toLowerCase(), r]));
 
   const entryByProfile = new Map(entries.map((e) => [e.profile_id, e]));
   const dedupSet = new Set(alreadyNotified.map((a) => `${a.profile_id}|${a.alert_type}`));
@@ -279,6 +299,30 @@ export async function runAttendanceAlertCheck(
     return match?.id ?? null;
   }
 
+  // Only for missing_clock_out, only for technicians (see this file's own
+  // header comment) — the branch's Branch Manager and Parts Manager from
+  // General Information's directory, resolved by name the same tolerant
+  // way resolveManagerId is. Either field being blank/unmatched just
+  // contributes nothing, same as resolveManagerId returning null.
+  function resolveBranchRoleRecipientIds(p: ServerProfile): string[] {
+    if (!TECHNICIAN_PAY_ROLES.has(normalizeRole(p.role))) return [];
+    const branch = (p.assigned_branch || "").trim().toLowerCase();
+    if (!branch) return [];
+    const row = branchRolesByBranch.get(branch);
+    if (!row) return [];
+    const names = [row.branch_manager, row.parts_manager]
+      .map((n) => (n || "").trim().toLowerCase())
+      .filter((n): n is string => !!n);
+    const ids: string[] = [];
+    for (const name of names) {
+      const match = profiles.find(
+        (o) => o.company_id === p.company_id && (o.display_name || "").trim().toLowerCase() === name
+      );
+      if (match) ids.push(match.id);
+    }
+    return ids;
+  }
+
   const firedAlerts: FiredAlert[] = [];
 
   for (const p of profiles) {
@@ -309,6 +353,9 @@ export async function runAttendanceAlertCheck(
       const recipients = new Set<string>(notifyRolesByCompany.get(p.company_id) ?? []);
       const managerId = resolveManagerId(p);
       if (managerId) recipients.add(managerId);
+      if (alertType === "missing_clock_out") {
+        resolveBranchRoleRecipientIds(p).forEach((id) => recipients.add(id));
+      }
       recipients.delete(p.id);
 
       const recordFired = () => {
