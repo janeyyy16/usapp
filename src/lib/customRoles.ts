@@ -1,6 +1,6 @@
 /**
  * Custom roles — created from the UI (Accessibility Management's "Add
- * Role"), see migration 0208_custom_roles.sql. Unlike moduleAccess.ts's
+ * Role"), see migration 0209_custom_roles.sql. Unlike moduleAccess.ts's
  * hydrate-once-at-login cache, a role created mid-session must show up
  * immediately in every open role picker in that same session, so this
  * mirrors isOnline.ts's singleton-listener pattern (module-level cache +
