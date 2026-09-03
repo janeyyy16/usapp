@@ -440,6 +440,20 @@ export function MobileTechApp() {
   // isn't clobbered) — same reasoning HomeOnSiteCard's seed used to have.
   const [arrivedAt, setArrivedAt] = useState<Record<string, string>>({});
   const [doneAt, setDoneAt] = useState<Record<string, string>>({});
+  // True once onsite_arrived_at/onsite_done_at have actually been read back
+  // at least once this session. Until then the On-Site Check-In card must
+  // NOT offer an enabled "Work Start" for a ticket whose real state simply
+  // hasn't loaded yet: a technician on a long visit who reloads (or whose
+  // PWA was killed while backgrounded — routine on iOS after ~30 min) would
+  // otherwise see "Work Start" on a ticket they checked into hours earlier,
+  // tap it, and overwrite the original arrival time with `now` — which then
+  // matches the "Work Done" they tap seconds later, so the ticket's
+  // Start–End both read the same minute. Reported via Slack: a duplicate
+  // "arrived" servicer-note hours after the first, immediately followed by
+  // "marked done" at that same minute.
+  const [checkinsLoaded, setCheckinsLoaded] = useState(false);
+  const [checkinsLoadError, setCheckinsLoadError] = useState(false);
+  const [checkinsReloadNonce, setCheckinsReloadNonce] = useState(0);
 
   // Ticket Time Disputes (pending or approved), keyed by the ticket they're
   // tied to — a small "Disputed Time" note on that ticket's row in the
@@ -720,43 +734,72 @@ export function MobileTechApp() {
   const formatTimeAt = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const myTicketNoKey = myTickets.map((t) => t.ticketNo).join(",");
   useEffect(() => {
-    if (!myTicketNoKey) return;
+    if (!myTicketNoKey) { setCheckinsLoaded(true); return; }
     let cancelled = false;
-    getOnsiteCheckins(myTicketNoKey.split(","))
-      .then((checkins) => {
-        if (cancelled) return;
-        const arrived: Record<string, string> = {};
-        const done: Record<string, string> = {};
-        for (const [ticketNo, v] of Object.entries(checkins)) {
-          if (v.arrivedAt) arrived[ticketNo] = formatTimeAt(v.arrivedAt);
-          if (v.doneAt) done[ticketNo] = formatTimeAt(v.doneAt);
+    const applyCheckins = (checkins: Record<string, { arrivedAt: string | null; doneAt: string | null }>) => {
+      const arrived: Record<string, string> = {};
+      const done: Record<string, string> = {};
+      for (const [ticketNo, v] of Object.entries(checkins)) {
+        if (v.arrivedAt) arrived[ticketNo] = formatTimeAt(v.arrivedAt);
+        if (v.doneAt) done[ticketNo] = formatTimeAt(v.doneAt);
+      }
+      setArrivedAt((prev) => ({ ...arrived, ...prev }));
+      setDoneAt((prev) => ({ ...done, ...prev }));
+    };
+    // Same "genuine network failure only" test the timecard reads use —
+    // a real column/permission error shouldn't burn three retries.
+    const isNetErr = (m: string) =>
+      /network|failed to fetch|fetch failed|timeout|timed out|econn|enotfound|offline|load failed/i.test(m);
+    const run = async () => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const checkins = await getOnsiteCheckins(myTicketNoKey.split(","));
+          if (cancelled) return;
+          applyCheckins(checkins);
+          setCheckinsLoaded(true);
+          setCheckinsLoadError(false);
+          if (profileId) void cacheRead(`checkins:${profileId}`, checkins);
+          return;
+        } catch (e) {
+          if (cancelled) return;
+          const msg = e instanceof Error ? e.message : String(e);
+          if (!isNetErr(msg) || attempt === 2) {
+            console.warn("Failed to load on-site check-in status, trying local cache", e);
+            const cached = profileId
+              ? await getCachedRead<Record<string, { arrivedAt: string | null; doneAt: string | null }>>(`checkins:${profileId}`)
+              : undefined;
+            if (cancelled) return;
+            if (cached) {
+              // A prior successful load standing in for this one — real
+              // state, just possibly a little stale, so still safe to
+              // treat as loaded (gates Work Start the same as a live
+              // fetch would). See checkinsLoaded's own doc comment.
+              applyCheckins(cached);
+              setCheckinsLoaded(true);
+              setCheckinsLoadError(false);
+            } else {
+              // Leave checkinsLoaded as-is: if a PRIOR fetch already
+              // succeeded this session the card keeps working off that
+              // state; only a first load that never succeeded (and has
+              // no cache to fall back on) gates the button and surfaces
+              // the retry affordance.
+              setCheckinsLoadError(true);
+            }
+            return;
+          }
+          await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
         }
-        setArrivedAt((prev) => ({ ...arrived, ...prev }));
-        setDoneAt((prev) => ({ ...done, ...prev }));
-        if (profileId) void cacheRead(`checkins:${profileId}`, checkins);
-      })
-      .catch(async (e) => {
-        console.warn("Failed to load on-site check-in status, trying local cache", e);
-        const cached = profileId
-          ? await getCachedRead<Record<string, { arrivedAt: string | null; doneAt: string | null }>>(`checkins:${profileId}`)
-          : undefined;
-        if (cancelled || !cached) return;
-        const arrived: Record<string, string> = {};
-        const done: Record<string, string> = {};
-        for (const [ticketNo, v] of Object.entries(cached)) {
-          if (v.arrivedAt) arrived[ticketNo] = formatTimeAt(v.arrivedAt);
-          if (v.doneAt) done[ticketNo] = formatTimeAt(v.doneAt);
-        }
-        setArrivedAt((prev) => ({ ...arrived, ...prev }));
-        setDoneAt((prev) => ({ ...done, ...prev }));
-      });
+      }
+    };
+    void run();
     return () => { cancelled = true; };
     // Also re-fetched on `view` change, same reasoning as
     // disputedTimeByTicketNo below — an Approve on desktop (which writes
     // straight onto onsite_arrived_at/onsite_done_at) should be visible
-    // here without needing a full page reload.
+    // here without needing a full page reload. checkinsReloadNonce is the
+    // manual "Retry" hook from the card when the first load failed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [myTicketNoKey, view]);
+  }, [myTicketNoKey, view, checkinsReloadNonce]);
 
   // Offline read cache — this technician's own ticket list, re-cached every
   // time it changes so a later app close/reopen with no connection yet
@@ -1203,6 +1246,9 @@ export function MobileTechApp() {
             setArrivedAt={setArrivedAt}
             doneAt={doneAt}
             setDoneAt={setDoneAt}
+            checkinsLoaded={checkinsLoaded}
+            checkinsLoadError={checkinsLoadError && !checkinsLoaded}
+            onRetryCheckins={() => { setCheckinsLoadError(false); setCheckinsReloadNonce((n) => n + 1); }}
           />
         )}
 
@@ -4419,6 +4465,9 @@ function HomeOnSiteCard({
   setArrivedAt,
   doneAt,
   setDoneAt,
+  checkinsLoaded,
+  checkinsLoadError,
+  onRetryCheckins,
 }: {
   tickets: Ticket[];
   userName: string;
@@ -4431,6 +4480,14 @@ function HomeOnSiteCard({
   setArrivedAt: Dispatch<SetStateAction<Record<string, string>>>;
   doneAt: Record<string, string>;
   setDoneAt: Dispatch<SetStateAction<Record<string, string>>>;
+  /** False until onsite_arrived_at/onsite_done_at have been read back once.
+   * Gates the "Work Start" button so a not-yet-loaded ticket can't be
+   * re-checked-in over its real arrival time. */
+  checkinsLoaded: boolean;
+  /** First load never succeeded (after retries) — show a retry affordance
+   * instead of silently defaulting every ticket to "Work Start". */
+  checkinsLoadError: boolean;
+  onRetryCheckins: () => void;
 }) {
   const [mapProvider, setMapProvider] = useState<MapProvider | null>(null);
   const [ticketPos, setTicketPos] = useState<Record<string, { lat: number; lng: number; approximate: boolean } | null>>({});
@@ -4699,6 +4756,11 @@ function HomeOnSiteCard({
   // technician with an alert; either way they don't stand around waiting
   // on a request that may never complete right now.
   const handleImHere = async (t: Ticket, manualNote?: string) => {
+    // Never stamp an arrival while the persisted check-in state is still
+    // unknown — see checkinsLoaded. The buttons that call this are already
+    // disabled in that state; this is the last line of defence against a
+    // fresh reload re-checking-in over a real, hours-old arrival time.
+    if (!checkinsLoaded) return;
     const time = formatNow();
     const at = new Date().toISOString();
     const body = checkInCommentBody("arrived", time, manualNote);
@@ -4826,6 +4888,12 @@ function HomeOnSiteCard({
   return (
     <div className="mtech-home-onsite">
       <div className="mtech-home-onsite-title">On-Site Check-In</div>
+      {checkinsLoadError && (
+        <div className="mtech-home-clockerror">
+          <span>Couldn't load your check-in status — Work Start is held until it loads so an in-progress ticket isn't re-stamped.</span>
+          <button type="button" onClick={onRetryCheckins}>Retry</button>
+        </div>
+      )}
       {geocodeTotal > 0 && (
         <div style={{ margin: "0.1rem 0 0.6rem" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: "0.68rem", color: offlineReady ? "#4ade80" : "#94a3b8", marginBottom: "0.25rem" }}>
@@ -4868,7 +4936,11 @@ function HomeOnSiteCard({
           const hereAt = arrivedAt[t.ticketNo];
           const finishedAt = doneAt[t.ticketNo];
           const isBusy = busy === t.ticketNo;
-          const pending = !inRadius && !hereAt && !finishedAt;
+          // Real onsite_arrived_at/onsite_done_at not read back yet this
+          // session — hereAt/finishedAt being blank here means "unknown",
+          // not "never checked in", so no check-in action can be offered.
+          const stateUnknown = !checkinsLoaded;
+          const pending = !stateUnknown && !inRadius && !hereAt && !finishedAt;
           // Refining the fix (real-GPS one-shot in flight) and still only
           // holding a coarse position — "1.2 mi away" from a cell-tower fix
           // is noise, so say we're still locating rather than show it. Not
@@ -4928,10 +5000,10 @@ function HomeOnSiteCard({
                     <button
                       type="button"
                       className="mtech-home-onsite-btn"
-                      disabled={!inRadius || isBusy || locating}
+                      disabled={stateUnknown || !inRadius || isBusy || locating}
                       onClick={() => handleImHere(t)}
                     >
-                      {isBusy ? "…" : locating ? "Locating…" : "Work Start"}
+                      {stateUnknown ? "Checking status…" : isBusy ? "…" : locating ? "Locating…" : "Work Start"}
                     </button>
                     {canManual && (
                       <button
@@ -5021,6 +5093,9 @@ function MobileHomeView({
   setArrivedAt,
   doneAt,
   setDoneAt,
+  checkinsLoaded,
+  checkinsLoadError,
+  onRetryCheckins,
 }: {
   userName: string;
   role: string | null;
@@ -5042,6 +5117,9 @@ function MobileHomeView({
   setArrivedAt: Dispatch<SetStateAction<Record<string, string>>>;
   doneAt: Record<string, string>;
   setDoneAt: Dispatch<SetStateAction<Record<string, string>>>;
+  checkinsLoaded: boolean;
+  checkinsLoadError: boolean;
+  onRetryCheckins: () => void;
 }) {
   const hourNow = new Date().getHours();
   const greeting =
@@ -5303,6 +5381,9 @@ function MobileHomeView({
         setArrivedAt={setArrivedAt}
         doneAt={doneAt}
         setDoneAt={setDoneAt}
+        checkinsLoaded={checkinsLoaded}
+        checkinsLoadError={checkinsLoadError}
+        onRetryCheckins={onRetryCheckins}
       />
 
       <div className="mtech-home-divider" />
