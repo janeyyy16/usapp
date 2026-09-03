@@ -1,5 +1,5 @@
 -- =====================================================================
--- 0209 — Soft-delete for mileage_entries
+-- 0210 — Soft-delete for mileage_entries
 --
 -- The Mileage tab's Trash icon used to hard-delete a row outright (no
 -- reason captured, no way back). This adds a soft-delete instead: the row

@@ -486,7 +486,7 @@ export async function getTechAutoMileageTotals(periodStart: string, periodEnd: s
   // EFFECTIVE total (a Finance override/adjustment, if any, on top of the
   // calculated total_mileage), not the raw calculated figure, so a manual
   // correction actually reaches payroll. The deleted_at filter above keeps
-  // a soft-deleted entry (softDeleteMileageEntry, migration 0209 — a stop
+  // a soft-deleted entry (softDeleteMileageEntry, migration 0210 — a stop
   // the technician never actually made) out of this entirely.
   const perDay = new Map<string, number>();
   for (const row of (data ?? []) as any[]) {

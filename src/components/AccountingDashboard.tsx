@@ -885,7 +885,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   // Ticket Attendance's own Mileage column/total — one non-deleted mileage
   // entry per ticket # (auto-synced entries are already one row per
   // ticket). legMileage (this ticket's own leg of its day's route, see
-  // migration 0210) is what's shown; a ticket not yet mileage-synced, or
+  // migration 0211) is what's shown; a ticket not yet mileage-synced, or
   // whose day hasn't been recalculated since legMileage shipped, has none.
   const mileageByTicketNo = useMemo(() => {
     const map = new Map<string, MileageEntry>();
@@ -1020,7 +1020,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   // Live progress while a sync run is in flight — syncMileageFromTickets
   // reports back after each technician-day it (re)computes, since route
   // lookups are the slow part and a run can cover many days (especially
-  // the first sync after leg_mileage/migration 0210 shipped, which
+  // the first sync after leg_mileage/migration 0211 shipped, which
   // reprocesses every previously-synced day once to backfill it).
   const [mileageSyncProgress, setMileageSyncProgress] = useState<{ done: number; total: number } | null>(null);
   // Lets the Stop button cancel an in-flight sync (see syncMileageFromTickets's

@@ -83,7 +83,7 @@ export interface MileageEntry {
    *  hold is released. Cleared again if the entry is ever re-held.
    *  Migration 0186. */
   payrollReleasedAt: string | null;
-  /** Soft-delete (migration 0209) — for a stop the technician never
+  /** Soft-delete (migration 0210) — for a stop the technician never
    *  actually made (customer cancelled, couldn't get there, etc.), so it
    *  needs to come OUT of the day's route and mileage total entirely.
    *  Different from payrollExcluded ("On Hold"), which is for a stop the
@@ -102,7 +102,7 @@ export interface MileageEntry {
    *  shared day total payroll reads, unaffected by this) — summing every
    *  entry's legMileage for one day reconstructs that same day total. Null
    *  for manual entries (no route/stop-order concept), a stop that failed
-   *  to geocode, or a row not yet recalculated since migration 0210.
+   *  to geocode, or a row not yet recalculated since migration 0211.
    *  Computed in syncMileageFromTickets/recalculateMileageDayRoute via
    *  computeDailyRouteMiles's legMiles (mapEngine.ts). */
   legMileage: number | null;

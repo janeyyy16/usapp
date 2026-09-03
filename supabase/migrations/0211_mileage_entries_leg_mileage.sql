@@ -1,5 +1,5 @@
 -- =====================================================================
--- 0210 — Per-ticket leg mileage for mileage_entries
+-- 0211 — Per-ticket leg mileage for mileage_entries
 --
 -- Every ticket a technician had on the same day currently shows the exact
 -- same number in the Mileage tab — that day's whole route total (branch ->
@@ -19,7 +19,7 @@
 -- backfills itself the next time that day's route is synced/recalculated,
 -- no migration script needed.
 --
--- Run once in the Supabase SQL Editor, after 0209.
+-- Run once in the Supabase SQL Editor, after 0210.
 -- =====================================================================
 
 alter table mileage_entries
