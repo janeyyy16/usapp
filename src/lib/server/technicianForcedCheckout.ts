@@ -29,10 +29,36 @@
  * Mirrors attendanceAlerts.ts / nsaPartsSync.ts: raw PostgREST + service
  * key, per-row try/catch, a plain summary object, company_id only used to
  * group internally (single global job, not per-tenant).
+ *
+ * Two notifications fire per forced checkout (best-effort — a failure here
+ * never undoes the checkout itself, which has already been committed):
+ *   1. A manager-facing one to HR/Finance + the technician's resolved
+ *      manager + their branch's Branch Manager/Parts Manager — same
+ *      recipient shape attendanceAlerts.ts's missing_clock_out alert uses,
+ *      reimplemented locally rather than shared (this file already avoids
+ *      importing the browser Supabase client the same way attendanceAlerts.ts
+ *      does, so its resolution helpers aren't reusable as-is either).
+ *   2. A self-facing one straight to the technician.
+ * Not batched across technicians the way attendanceAlerts.ts's grace-period
+ * alert is — each forced checkout is already a one-time, day-closing event
+ * per technician, not something that re-fires every 5 minutes until fixed.
  */
 
 import { timezoneForBranch } from "../attendanceGrace";
 import { TECHNICIAN_PAY_ROLES, normalizeRole } from "../roleLabels";
+
+const NOTIFY_ROLES = new Set(["HR", "FINANCE"]);
+
+function fmtHoursMinutes(hours: number): string {
+  const totalMinutes = Math.max(0, Math.round(hours * 60));
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return `${h}hrs ${m}mins`;
+}
+
+function hoursBetween(hms1: string, hms2: string): number {
+  return (toSeconds(hms2) - toSeconds(hms1)) / 3600;
+}
 
 type CheckoutBasis = "ticket_done" | "ticket_arrived" | "scheduled_end" | "eod";
 
@@ -60,6 +86,7 @@ interface ServerProfile {
   assigned_branch: string | null;
   required_check_out: string | null;
   schedule_timezone: string | null;
+  manager_name: string | null;
 }
 
 interface OpenEntry {
@@ -67,6 +94,8 @@ interface OpenEntry {
   profile_id: string;
   work_date: string;
   check_in: string;
+  meal_start: string | null;
+  meal_end: string | null;
   notes: string | null;
 }
 
@@ -168,15 +197,16 @@ export async function runTechnicianForcedCheckout(
   const now = new Date();
   const lookbackStart = isoDaysAgo(STRAGGLER_LOOKBACK_DAYS);
 
-  const [profilesRes, entriesRes] = await Promise.all([
+  const [profilesRes, entriesRes, branchRolesRes] = await Promise.all([
     fetch(
-      `${supabaseUrl}/rest/v1/profiles?select=id,company_id,display_name,role,extra_roles,assigned_branch,required_check_out,schedule_timezone&is_active=eq.true`,
+      `${supabaseUrl}/rest/v1/profiles?select=id,company_id,display_name,role,extra_roles,assigned_branch,required_check_out,schedule_timezone,manager_name&is_active=eq.true`,
       { headers: sbHeaders }
     ),
     fetch(
-      `${supabaseUrl}/rest/v1/timecard_entries?select=id,profile_id,work_date,check_in,notes&check_in=not.is.null&check_out=is.null&work_date=gte.${lookbackStart}`,
+      `${supabaseUrl}/rest/v1/timecard_entries?select=id,profile_id,work_date,check_in,meal_start,meal_end,notes&check_in=not.is.null&check_out=is.null&work_date=gte.${lookbackStart}`,
       { headers: sbHeaders }
     ),
+    fetch(`${supabaseUrl}/rest/v1/general_info_branch_roles?select=branch,branch_manager,parts_manager`, { headers: sbHeaders }),
   ]);
 
   if (!profilesRes.ok) {
@@ -192,10 +222,47 @@ export async function runTechnicianForcedCheckout(
   const openEntries: OpenEntry[] = (await entriesRes.json()).filter(
     (e: OpenEntry) => e.check_in && e.check_in.trim() !== ""
   );
+  const branchRoles: Array<{ branch: string; branch_manager: string | null; parts_manager: string | null }> = branchRolesRes.ok
+    ? await branchRolesRes.json()
+    : [];
+  const branchRolesByBranch = new Map(branchRoles.map((r) => [r.branch.trim().toLowerCase(), r]));
 
   const techById = new Map(
     profiles.filter((p) => heldTechnicianRole(p.role, p.extra_roles)).map((p) => [p.id, p])
   );
+
+  // Per-company HR/Finance recipient list — same shape attendanceAlerts.ts builds.
+  const notifyRolesByCompany = new Map<string, Set<string>>();
+  profiles.forEach((p) => {
+    const roles = [p.role, ...(p.extra_roles ?? [])].map((r) => normalizeRole(r));
+    if (roles.some((r) => NOTIFY_ROLES.has(r))) {
+      if (!notifyRolesByCompany.has(p.company_id)) notifyRolesByCompany.set(p.company_id, new Set());
+      notifyRolesByCompany.get(p.company_id)!.add(p.id);
+    }
+  });
+
+  function resolveManagerId(p: ServerProfile): string | null {
+    const managerName = (p.manager_name || "").trim().toLowerCase();
+    if (!managerName) return null;
+    const match = profiles.find(
+      (o) => o.company_id === p.company_id && (o.display_name || "").trim().toLowerCase() === managerName
+    );
+    return match?.id ?? null;
+  }
+
+  function resolveBranchRoleRecipientIds(p: ServerProfile): string[] {
+    const branch = (p.assigned_branch || "").trim().toLowerCase();
+    if (!branch) return [];
+    const row = branchRolesByBranch.get(branch);
+    if (!row) return [];
+    const names = [row.branch_manager, row.parts_manager].map((n) => (n || "").trim().toLowerCase()).filter(Boolean);
+    const ids: string[] = [];
+    for (const name of names) {
+      const match = profiles.find((o) => o.company_id === p.company_id && (o.display_name || "").trim().toLowerCase() === name);
+      if (match) ids.push(match.id);
+    }
+    return ids;
+  }
 
   for (const entry of openEntries) {
     const p = techById.get(entry.profile_id);
@@ -311,6 +378,40 @@ export async function runTechnicianForcedCheckout(
           body: JSON.stringify({ status: "dismissed", updated_at: now.toISOString() }),
         }
       ).catch(() => {});
+
+      // Notifications — best-effort, the checkout above has already
+      // succeeded regardless of whether these land.
+      let workedHours = hoursBetween(entry.check_in, checkOut);
+      if (entry.meal_start && entry.meal_end) workedHours -= hoursBetween(entry.meal_start, entry.meal_end);
+      const hoursLabel = fmtHoursMinutes(workedHours);
+
+      const managerRecipients = new Set<string>(notifyRolesByCompany.get(p.company_id) ?? []);
+      const managerId = resolveManagerId(p);
+      if (managerId) managerRecipients.add(managerId);
+      resolveBranchRoleRecipientIds(p).forEach((id) => managerRecipients.add(id));
+      managerRecipients.delete(p.id);
+
+      const managerBody = `${name} has been forced clock out by the system. Wasn't able to clock out manually. Total Working Hours: ${hoursLabel}`;
+      const selfBody = `You were automatically clocked out by the system. We couldn't detect a manual clock-out. Total Working Hours: ${hoursLabel}`;
+
+      const sendNotification = (recipientId: string, body: string, linkTo: string) =>
+        fetch(`${supabaseUrl}/rest/v1/notifications`, {
+          method: "POST",
+          headers: sbHeaders,
+          body: JSON.stringify({
+            company_id: p.company_id,
+            recipient_id: recipientId,
+            sender_id: null,
+            sender_name: "Attendance Monitor",
+            body,
+            link_to: linkTo,
+          }),
+        }).catch((e) => summary.errors.push(`Notify ${recipientId} for ${name}: ${e instanceof Error ? e.message : String(e)}`));
+
+      await Promise.all([
+        ...Array.from(managerRecipients, (id) => sendNotification(id, managerBody, "/m/dashboard/attendance-monitoring")),
+        sendNotification(p.id, selfBody, "/m/dashboard/employee-self-service?tab=attendance"),
+      ]);
     } catch (e) {
       summary.errors.push(`${name} (${entry.work_date}): ${e instanceof Error ? e.message : String(e)}`);
     }
