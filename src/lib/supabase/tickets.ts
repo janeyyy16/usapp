@@ -359,6 +359,49 @@ export async function getCompanyTickets(): Promise<Ticket[]> {
   return all;
 }
 
+export interface ScheduledTicketRow {
+  ticketNo: string;
+  technician: string;
+  scheduleDate: string;
+}
+
+/**
+ * Lean ticket lookup for Attendance Monitoring's Tickets column — every
+ * ticket scheduled anywhere in [startDateISO, endDateISO], just enough
+ * fields to match a row's tickets by technician name and date. Deliberately
+ * NOT getCompanyTickets() filtered client-side: that fetches every ticket
+ * the company has ever had (thousands, full customer/history payload) just
+ * to answer "who's on for these one or two days" — a real, previously-hit
+ * problem (see getOnsiteCheckins' 400 Bad Request from an oversized filter
+ * built the same wrong way). schedule_date is indexed and the date span
+ * here is always small (a day, a pay period), so this stays cheap
+ * regardless of company size.
+ */
+export async function getTicketsScheduledInRange(startDateISO: string, endDateISO: string): Promise<ScheduledTicketRow[]> {
+  const all: ScheduledTicketRow[] = [];
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from("tickets")
+      .select("ticket_no, technician, schedule_date")
+      .gte("schedule_date", startDateISO)
+      .lte("schedule_date", endDateISO)
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) {
+      console.error("getTicketsScheduledInRange error:", error.message);
+      throw new Error(error.message);
+    }
+    all.push(
+      ...(data ?? []).map((row: any) => ({
+        ticketNo: row.ticket_no as string,
+        technician: (row.technician as string | null) ?? "",
+        scheduleDate: (row.schedule_date as string | null) ?? "",
+      }))
+    );
+    if (!data || data.length < PAGE_SIZE) break;
+  }
+  return all;
+}
+
 /**
  * Get one ticket by its ticket number (company-scoped).
  */

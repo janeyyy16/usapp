@@ -57,7 +57,7 @@ import { getTicketBilling, saveTicketBilling, type TicketBilling } from "@/lib/s
 import { getMyPayslips, payslipStatusLabel, type MyPayslipRow } from "@/lib/supabase/payslips";
 import { getMyProfileSchedule, getMonthEntries, getCompanyTimecardEntries, saveEntry as saveTimecardEntry, savePunch, resolveScheduledShiftHours, type UITimeEntry, type CompanyTimecardEntry } from "@/lib/supabase/timecards";
 import { visibleAttendanceProfileIds } from "@/lib/notifyRouting";
-import { getCsrTeamComposition } from "@/lib/supabase/csrTeams";
+import { getCsrTeamComposition, type CsrTeamComposition } from "@/lib/supabase/csrTeams";
 import { isAttendanceManagerTierRole, normalizeRole, ROLE_LABELS, TECHNICIAN_PAY_ROLES } from "@/lib/roleLabels";
 import { LOCATIONS } from "@/lib/locations";
 import { timezoneForBranch, nowInTimezone } from "@/lib/attendanceGrace";
@@ -320,6 +320,7 @@ export function MobileTechApp() {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [loading, setLoading] = useState(true);
   const [users, setUsers] = useState<ProfileRow[]>([]);
+  const [csrComposition, setCsrComposition] = useState<CsrTeamComposition | null>(null);
   const isSelfRole = [role, ...extraRoles].some((r) => r && SELF_ROLES.has(r.toUpperCase()));
 
   // Resolved once for the whole app shell — needed by DetailView to know
@@ -658,15 +659,22 @@ export function MobileTechApp() {
     return () => { cancelled = true; };
   }, [profileId]);
 
-  // Load real company users (for the manager technician roster). Techs don't
-  // need this list, so only fetch for non-self roles.
+  // Load real company users (for the manager technician roster) plus CSR
+  // team composition, needed by visibleAttendanceProfileIds below to scope
+  // a CSR team leader's roster to their own team. Techs don't need any of
+  // this, so only fetch for non-self roles.
   useEffect(() => {
     if (isSelfRole) return;
     let cancelled = false;
     (async () => {
       try {
-        const rows = await getCompanyUsers();
-        if (!cancelled) setUsers(rows);
+        const [rows, composition] = await Promise.all([
+          getCompanyUsers(),
+          getCsrTeamComposition().catch(() => null),
+        ]);
+        if (cancelled) return;
+        setUsers(rows);
+        setCsrComposition(composition);
       } catch (e) {
         console.error("Mobile: failed to load users", e);
         if (!cancelled) setUsers([]);
@@ -866,35 +874,30 @@ export function MobileTechApp() {
   // with nothing to show even when there's real work to check into.
   const activeTickets = useMemo(() => myTickets.filter((t) => !isDone(t.status)), [myTickets]);
 
-  // Technician roster for managers — real TECHNICIAN-role users from Supabase,
-  // scoped to the manager's allowed locations (assigned_branch / branch_access).
+  // Technician roster for managers — real technician-tier users from
+  // Supabase (any TECHNICIAN_PAY_ROLES tier, not just plain "Technician",
+  // so Technical Director/Assistant Director show up too), scoped with the
+  // same rule Attendance Monitoring uses: Admin/SuperAdmin/HR/Finance see
+  // every technician company-wide (visibleAttendanceProfileIds returns null
+  // for them); a Branch Manager and every other manager-tier role (Senior
+  // Branch Manager, Parts, Technician Manager, CSR Manager/Team Leader,
+  // ...) see only their own direct reports (by manager_name) plus, for
+  // Parts specifically, every technician at their own branch. Anyone else
+  // sees only themselves — fails closed, not open, if role resolution is
+  // ever unclear.
   const roster = useMemo(() => {
-    // Include users who have TECHNICIAN as their primary role OR in
-    // extra_roles (e.g. a manager+technician), but only while active — a
-    // deactivated tech shouldn't still show up in the roster.
-    const techUsers = users.filter((u) => {
-      if (!u.is_active) return false;
-      const primary = (u.role || "").toUpperCase();
-      if (primary.includes("TECHNICIAN")) return true;
-      const extras = ((u as any).extra_roles as string[] | null | undefined) || [];
-      return extras.some((r) => String(r).toUpperCase().includes("TECHNICIAN"));
-    });
-    const inScope = techUsers.filter((u) => {
-      if (allowedLocations === null) return true;
-      const branches = [u.assigned_branch, ...(u.branch_access || "").split(/[,;]/)]
-        .map((b) => (b || "").trim())
-        .filter(Boolean);
-      // If the tech has no branch info, keep them visible (don't hide silently).
-      if (branches.length === 0) return true;
-      return branches.some((b) => allowedLocations.includes(b));
-    });
+    const myProfile = users.find((u) => u.id === profileId) ?? null;
+    const scoped = myProfile ? visibleAttendanceProfileIds(myProfile, users, csrComposition) : new Set<string>();
+    const inScope = users.filter(
+      (u) => u.is_active && (scoped === null || scoped.has(u.id)) && TECHNICIAN_PAY_ROLES.has(normalizeRole(u.role))
+    );
     return inScope
       .map((u) => ({
         name: u.display_name || u.username || u.email,
         branch: u.assigned_branch || "",
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [users, allowedLocations]);
+  }, [users, profileId, csrComposition]);
 
   const visibleTickets = useMemo(() => {
     let list = tab === "today" ? todaysTickets : myTickets;
@@ -1109,6 +1112,9 @@ export function MobileTechApp() {
             arrivedAt={arrivedAt}
             doneAt={doneAt}
             onDispute={(ticketNo) => { setTicketTimeDisputePrefillTicketNo(ticketNo); setView("tickettimedispute"); }}
+            isSelfRole={isSelfRole}
+            roster={roster}
+            onSelectTech={setSelectedTech}
           />
         )}
 
@@ -1657,6 +1663,9 @@ function TicketsView({
   arrivedAt,
   doneAt,
   onDispute,
+  isSelfRole,
+  roster,
+  onSelectTech,
 }: {
   loading: boolean;
   tickets: Ticket[];
@@ -1674,12 +1683,38 @@ function TicketsView({
   doneAt: Record<string, string>;
   /** Opens Ticket Time Dispute pre-selected to this ticket — offered on a missing-timestamp card so filing one doesn't need a trip through the dropdown. */
   onDispute: (ticketNo: string) => void;
+  /** Techs only ever see their own tickets — no picker for them, same plain label as before. */
+  isSelfRole: boolean;
+  /** Branch Manager and above: already scoped to their own allowed locations
+   *  (Admin/SuperAdmin see everyone — allowedLocations is null for them).
+   *  Same roster RosterView uses, so switching technicians here and via
+   *  that screen always offer the identical set. */
+  roster: Array<{ name: string; branch: string }>;
+  onSelectTech: (name: string) => void;
 }) {
   const today = new Date().toLocaleDateString("en-US");
   return (
     <>
       <div className="mtech-subbar">
-        <span className="mtech-date">{techLabel ? techLabel : today}</span>
+        {isSelfRole ? (
+          <span className="mtech-date">{techLabel ? techLabel : today}</span>
+        ) : (
+          <select
+            className="mtech-date"
+            value={techLabel}
+            onChange={(e) => onSelectTech(e.target.value)}
+            aria-label="Technician"
+          >
+            {!roster.some((r) => r.name === techLabel) && techLabel && (
+              <option value={techLabel}>{techLabel}</option>
+            )}
+            {roster.map((r) => (
+              <option key={r.name} value={r.name}>
+                {r.name}{r.branch ? ` · ${r.branch}` : ""}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
 
       <div className="mtech-tabs">

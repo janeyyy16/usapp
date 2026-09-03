@@ -200,7 +200,9 @@ export function PayrollCalculationPage({ mod, sub }: { mod: ModuleDef; sub: SubM
       csv += `"${r.name}","${r.department}","${r.roleLabel}",${r.regularHours.toFixed(2)},${r.overtimeHours.toFixed(2)},"${rateLabel(r)}",${r.grossPay.toFixed(2)}\n`;
     });
     const el = document.createElement("a");
-    el.setAttribute("href", "data:text/csv;charset=utf-8," + encodeURIComponent(csv));
+    // Leading BOM — without it Excel mis-decodes any non-ASCII character as
+    // Windows-1252 instead of the UTF-8 the charset=utf-8 above declares.
+    el.setAttribute("href", "data:text/csv;charset=utf-8," + encodeURIComponent(String.fromCharCode(0xfeff) + csv));
     el.setAttribute("download", `payroll-${startDate}-to-${endDate}.csv`);
     el.style.display = "none";
     document.body.appendChild(el);

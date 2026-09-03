@@ -272,7 +272,9 @@ export function ExpenseTrackingPage({ mod, sub, embedded }: { mod: ModuleDef; su
       csv += `"${profileName(e.profileId)}","${e.category}","${e.expenseDate}","${e.amount.toFixed(2)}","${e.description}","${e.status}"\n`;
     });
     const el = document.createElement("a");
-    el.setAttribute("href", "data:text/csv;charset=utf-8," + encodeURIComponent(csv));
+    // Leading BOM — without it Excel mis-decodes any non-ASCII character as
+    // Windows-1252 instead of the UTF-8 the charset=utf-8 above declares.
+    el.setAttribute("href", "data:text/csv;charset=utf-8," + encodeURIComponent(String.fromCharCode(0xfeff) + csv));
     el.setAttribute("download", `expenses-${new Date().toISOString().slice(0, 10)}.csv`);
     el.style.display = "none";
     document.body.appendChild(el);

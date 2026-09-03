@@ -686,7 +686,9 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
       : `Attendance Report\nGenerated: ${new Date().toLocaleDateString()}\nRecords: ${ATTENDANCE_DAILY.length}`;
     
     const element = document.createElement("a");
-    element.setAttribute("href", "data:text/csv;charset=utf-8," + encodeURIComponent(csvContent));
+    // Leading BOM — without it Excel mis-decodes any non-ASCII character as
+    // Windows-1252 instead of the UTF-8 the charset=utf-8 above declares.
+    element.setAttribute("href", "data:text/csv;charset=utf-8," + encodeURIComponent(String.fromCharCode(0xfeff) + csvContent));
     element.setAttribute("download", `${type}-report-${Date.now()}.csv`);
     element.style.display = "none";
     document.body.appendChild(element);

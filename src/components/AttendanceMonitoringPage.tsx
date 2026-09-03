@@ -23,7 +23,7 @@ import { getBranchRoles, type BranchRoles } from "@/lib/supabase/generalInfo";
 import { ActivityLogPanel } from "@/components/ActivityLogPanel";
 import { logModuleActivity } from "@/lib/supabase/moduleActivityLog";
 import { getOrCreateDmThread, sendMessage } from "@/lib/supabase/messaging";
-import { getLatestVisitUpdatesByProfileIds, type LatestVisitUpdate } from "@/lib/supabase/tickets";
+import { getLatestVisitUpdatesByProfileIds, getTicketsScheduledInRange, type LatestVisitUpdate, type ScheduledTicketRow } from "@/lib/supabase/tickets";
 import { resolveTeamLeadOrManager, visibleAttendanceProfileIds } from "@/lib/notifyRouting";
 import { getCsrTeamComposition, type CsrTeamComposition } from "@/lib/supabase/csrTeams";
 import { ATTENDANCE_GRACE_MINUTES, addMinutesToHHMM, nowInTimezone, timezoneForBranch, DEFAULT_ATTENDANCE_TIMEZONE, payGraceMinutesFor, applyGraceToCheckIn, roundCheckOutToSchedule, toSeconds, ON_TIME_BUFFER_SECONDS } from "@/lib/attendanceGrace";
@@ -83,6 +83,8 @@ interface DailyRecord {
   checkoutProposal: CheckoutProposal | null;
   /** This technician's own most recent ticket update, regardless of checkoutProposal/checkOut state — see lastTicketUpdateByProfile. Null for non-technician rows or a technician with no visit history. */
   lastTicketUpdate: LatestVisitUpdate | null;
+  /** Ticket numbers scheduled to this person on this date — see ticketsByNameAndDate. Matched by name (tickets.technician is free text, not a profile FK), same convention Work Planner/mobile use. */
+  tickets: string[];
 }
 
 const PTO_TYPE_LABELS: Record<PtoType, string> = {
@@ -302,6 +304,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
   // person on a different date. Only one open at a time — clicking the
   // same name again, or a different name, closes/switches it.
   const [requiredTimePopoverKey, setRequiredTimePopoverKey] = useState<string | null>(null);
+  const [ticketsPopoverKey, setTicketsPopoverKey] = useState<string | null>(null);
   const [selectedNote, setSelectedNote] = useState<string | null>(null);
   const [selectedCorrection, setSelectedCorrection] = useState<TimecardCorrectionRow | null>(null);
   // Attendance Corrections table's own search/filter — separate from
@@ -445,6 +448,37 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
       .finally(() => { if (!cancelled) setRangeFilterLoading(false); });
     return () => { cancelled = true; };
   }, [dateRangeActive, filterDateFrom, filterDateTo, ready, uid]);
+
+  // Tickets column — whichever span is actually on screen right now: the
+  // single dailyDate, or the From/To range once active. Re-fetched whenever
+  // that span changes, same as the entries fetches above.
+  const [scheduledTickets, setScheduledTickets] = useState<ScheduledTicketRow[]>([]);
+  useEffect(() => {
+    if (!ready || !uid) return;
+    const start = dateRangeActive ? filterDateFrom : dailyDate;
+    const end = dateRangeActive ? filterDateTo : dailyDate;
+    let cancelled = false;
+    getTicketsScheduledInRange(start, end)
+      .then((rows) => { if (!cancelled) setScheduledTickets(rows); })
+      .catch((err) => { console.error("Failed to load scheduled tickets for attendance:", err); if (!cancelled) setScheduledTickets([]); });
+    return () => { cancelled = true; };
+  }, [dateRangeActive, filterDateFrom, filterDateTo, dailyDate, ready, uid]);
+
+  // Keyed by normalized technician name + date — tickets.technician is free
+  // text, not a profile foreign key, so name matching is the same approach
+  // Work Planner/mobile ticket assignment already uses everywhere else.
+  const ticketsByNameAndDate = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const t of scheduledTickets) {
+      const name = t.technician.trim().toLowerCase();
+      if (!name || !t.scheduleDate) continue;
+      const key = `${name}|${t.scheduleDate.slice(0, 10)}`;
+      const list = map.get(key);
+      if (list) list.push(t.ticketNo);
+      else map.set(key, [t.ticketNo]);
+    }
+    return map;
+  }, [scheduledTickets]);
 
   const dailyEntryByProfileId = useMemo(() => {
     const map = new Map<string, CompanyTimecardEntry>();
@@ -683,9 +717,10 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
         requiredCheckOut: p.required_check_out || "",
         checkoutProposal: checkOut ? null : checkoutProposalsByKey.get(`${p.id}|${dateISO}`) ?? null,
         lastTicketUpdate: lastTicketUpdateByProfile.get(p.id) ?? null,
+        tickets: ticketsByNameAndDate.get(`${(p.display_name || p.email || "").trim().toLowerCase()}|${dateISO}`) ?? [],
       };
     },
-    [nowByTimezone, allProfileById, checkoutProposalsByKey, lastTicketUpdateByProfile]
+    [nowByTimezone, allProfileById, checkoutProposalsByKey, lastTicketUpdateByProfile, ticketsByNameAndDate]
   );
 
   const dailyRecords: DailyRecord[] = useMemo(
@@ -983,24 +1018,69 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
   };
 
   const handleDownloadSummary = () => {
-    const today = dailyDate;
+    // Absent — never clocked in at all, so excluded from the main table
+    // (see filteredAndSortedData's own filter comment: it's the day's
+    // actual attendance, not the full roster). Listed as its own section
+    // instead, same search/department/location filters applied, off-days
+    // excluded (matches the Absent KPI card's own definition).
+    const absentRecords = (dateRangeActive ? rangeRecords : dailyRecords)
+      .filter((record) => {
+        if (record.checkIn !== "—" || record.isOffDay) return false;
+        if (searchEmployee && !record.name.toLowerCase().includes(searchEmployee.toLowerCase())) return false;
+        if (filterDepartment !== "all" && record.department !== filterDepartment) return false;
+        if (filterLocation !== "all" && record.location !== filterLocation) return false;
+        return true;
+      })
+      .sort((a, b) => (dateRangeActive && a.date !== b.date ? (a.date! < b.date! ? -1 : 1) : a.name.localeCompare(b.name)));
+
     let csvContent = "Attendance Summary Report\n";
-    csvContent += `Date: ${today}\n\n`;
+    csvContent += dateRangeActive ? `Date range: ${filterDateFrom} to ${filterDateTo}\n\n` : `Date: ${dailyDate}\n\n`;
+    // Key Metrics stay anchored to the single-date picker (dailyDate) even
+    // in range mode — same KPI cards shown at the top of the page, not
+    // re-aggregated across the whole range.
     csvContent += "Key Metrics\n";
     csvContent += `Total Employees,${totalEmployees}\n`;
     csvContent += `Present ${dailyDateLabel},${presentToday}\n`;
     csvContent += `Absent ${dailyDateLabel},${absentToday}\n`;
     csvContent += `Late ${dailyDateLabel},${lateToday}\n\n`;
-    csvContent += "Daily Attendance Tracker\n";
-    csvContent += "Employee Name,Location,Department,Manager,Check In,Meal In,Meal Out,Check Out,Alerts,Notes\n";
-    dailyRecords.forEach((record) => {
+    csvContent += dateRangeActive ? "Attendance\n" : "Daily Attendance Tracker\n";
+    // filteredAndSortedData — the exact same rows the table on screen shows,
+    // so the export always matches whatever date/date-range and
+    // search/department/location/complete-only filters are currently set,
+    // instead of a fixed single day regardless of what's being viewed.
+    // Assigned Tickets is the count; Tickets holds every ticket number in
+    // one cell, for a quick at-a-glance/sortable number followed by detail.
+    csvContent += dateRangeActive
+      ? "Date,Employee Name,Location,Department,Manager,Check In,Meal In,Meal Out,Check Out,Assigned Tickets,Tickets,Alerts,Notes\n"
+      : "Employee Name,Location,Department,Manager,Check In,Meal In,Meal Out,Check Out,Assigned Tickets,Tickets,Alerts,Notes\n";
+    filteredAndSortedData.forEach((record) => {
       const alerts = record.alerts.join("; ");
       const notes = notesData[record.profileId]?.content || "";
-      csvContent += `"${record.name}","${record.location}","${record.department}","${record.manager}","${record.checkIn}","${record.mealIn}","${record.mealOut}","${record.checkOut}","${alerts}","${notes}"\n`;
+      const dateCol = dateRangeActive ? `"${record.date}",` : "";
+      const ticketsCol = record.tickets.join("; ");
+      csvContent += `${dateCol}"${record.name}","${record.location}","${record.department}","${record.manager}","${record.checkIn}","${record.mealIn}","${record.mealOut}","${record.checkOut}",${record.tickets.length},"${ticketsCol}","${alerts}","${notes}"\n`;
     });
+
+    if (absentRecords.length > 0) {
+      csvContent += "\nAbsent\n";
+      csvContent += dateRangeActive
+        ? "Date,Employee Name,Location,Department,Manager,Assigned Tickets,Tickets\n"
+        : "Employee Name,Location,Department,Manager,Assigned Tickets,Tickets\n";
+      absentRecords.forEach((record) => {
+        const dateCol = dateRangeActive ? `"${record.date}",` : "";
+        const ticketsCol = record.tickets.join("; ");
+        csvContent += `${dateCol}"${record.name}","${record.location}","${record.department}","${record.manager}",${record.tickets.length},"${ticketsCol}"\n`;
+      });
+    }
+
     const element = document.createElement("a");
-    element.setAttribute("href", "data:text/csv;charset=utf-8," + encodeURIComponent(csvContent));
-    element.setAttribute("download", `attendance-summary-${today}.csv`);
+    // Leading BOM — without it, Excel (unlike most other CSV readers)
+    // ignores the charset=utf-8 above and mis-decodes any non-ASCII
+    // character (the "—" placeholder below included) as Windows-1252,
+    // turning it into "â€”" on open.
+    element.setAttribute("href", "data:text/csv;charset=utf-8," + encodeURIComponent(String.fromCharCode(0xfeff) + csvContent));
+    const filenameDate = dateRangeActive ? `${filterDateFrom}_to_${filterDateTo}` : dailyDate;
+    element.setAttribute("download", `attendance-summary-${filenameDate}.csv`);
     element.style.display = "none";
     document.body.appendChild(element);
     element.click();
@@ -1635,19 +1715,20 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Role</th>
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Check In</th>
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Check Out</th>
+                      <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Tickets</th>
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Alerts</th>
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Notes</th>
                     </tr>
                   </thead>
                   <tbody>
                     {loading || dailyDateLoading || (dateRangeActive && rangeFilterLoading) ? (
-                      <tr><td colSpan={dateRangeActive ? 11 : 10} className="px-3 py-8 text-center text-slate-400">Loading attendance…</td></tr>
+                      <tr><td colSpan={dateRangeActive ? 12 : 11} className="px-3 py-8 text-center text-slate-400">Loading attendance…</td></tr>
                     ) : filteredAndSortedData.length === 0 ? (
-                      <tr><td colSpan={dateRangeActive ? 11 : 10} className="px-3 py-8 text-center text-slate-400">No employees match this filter.</td></tr>
+                      <tr><td colSpan={dateRangeActive ? 12 : 11} className="px-3 py-8 text-center text-slate-400">No employees match this filter.</td></tr>
                     ) : dailyDataByDepartment.map((group) => (
                       <Fragment key={group.department}>
                         <tr className="bg-white/[0.03]">
-                          <td colSpan={dateRangeActive ? 11 : 10} className="px-3 py-2 text-xs font-bold text-blue-300 uppercase tracking-wide">
+                          <td colSpan={dateRangeActive ? 12 : 11} className="px-3 py-2 text-xs font-bold text-blue-300 uppercase tracking-wide">
                             {group.department} <span className="text-slate-500 font-normal normal-case">({group.records.length})</span>
                           </td>
                         </tr>
@@ -1743,6 +1824,42 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                               </button>
                             )}
                           </div>
+                        </td>
+                        <td className="px-3 py-3 text-slate-300 relative">
+                          {record.tickets.length > 0 ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const key = dateRangeActive ? `${record.profileId}|${record.date}` : record.profileId;
+                                setTicketsPopoverKey((cur) => (cur === key ? null : key));
+                              }}
+                              className="text-blue-400 hover:text-blue-300 hover:underline cursor-pointer text-xs font-semibold"
+                            >
+                              {record.tickets.length}
+                            </button>
+                          ) : (
+                            <span className="text-slate-500">—</span>
+                          )}
+                          {ticketsPopoverKey === (dateRangeActive ? `${record.profileId}|${record.date}` : record.profileId) && (
+                            <div className="absolute left-0 top-full z-10 mt-1 w-56 max-h-64 overflow-y-auto rounded-lg border border-white/10 bg-slate-800 p-3 shadow-xl">
+                              <p className="text-[10px] uppercase tracking-wide text-slate-400 mb-1.5">
+                                Tickets{record.date ? ` — ${record.date}` : ""}
+                              </p>
+                              <div className="flex flex-col gap-1">
+                                {record.tickets.map((ticketNo) => (
+                                  <a
+                                    key={ticketNo}
+                                    href={`/ticket/${encodeURIComponent(ticketNo)}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-xs text-blue-400 hover:text-blue-300 hover:underline font-mono"
+                                  >
+                                    {ticketNo}
+                                  </a>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                         </td>
                         <td className="px-3 py-3">
                           {record.alerts.length > 0 ? (
