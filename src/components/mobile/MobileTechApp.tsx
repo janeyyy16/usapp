@@ -4802,15 +4802,28 @@ function HomeOnSiteCard({
   }, [arrivingKey, permissionDenied, devSimulate, clockedIn, consentConfirmed]);
 
   // arrivingKey is stable while the tech waits (it's keyed on the tickets, not
-  // on the moving GPS fix), so this 90-second timer isn't constantly reset —
-  // it measures a genuine sustained failure to auto-verify. Cleared the moment
-  // there's nothing left awaiting check-in (all arrived / done / in radius).
-  const STUCK_AFTER_MS = 90_000;
+  // on the moving GPS fix), so this isn't constantly reset — it measures a
+  // genuine sustained failure to auto-verify. Cleared the moment there's
+  // nothing left awaiting check-in (all arrived / done / in radius).
+  //
+  // Wall-clock elapsed via a polling interval, NOT a single setTimeout: a
+  // backgrounded PWA on iOS suspends JS timers, so a 90s setTimeout could
+  // take minutes of real time to fire after the tech locks their phone and
+  // walks to the door. Checking Date.now() on each 5s tick means the
+  // override appears ~on schedule regardless of how long the tab was
+  // suspended. 30s (was 90s) — a tech standing at a wrong-geocoded address
+  // shouldn't have to wait a minute and a half for a way through.
+  const STUCK_AFTER_MS = 30_000;
+  const arrivingSinceRef = useRef<number | null>(null);
   useEffect(() => {
-    if (!arrivingKey || devSimulate) { setStuckMode(false); return; }
+    if (!arrivingKey || devSimulate) { arrivingSinceRef.current = null; setStuckMode(false); return; }
+    arrivingSinceRef.current = Date.now();
     setStuckMode(false);
-    const id = window.setTimeout(() => setStuckMode(true), STUCK_AFTER_MS);
-    return () => window.clearTimeout(id);
+    const check = () => {
+      if (arrivingSinceRef.current && Date.now() - arrivingSinceRef.current >= STUCK_AFTER_MS) setStuckMode(true);
+    };
+    const id = window.setInterval(check, 5_000);
+    return () => window.clearInterval(id);
   }, [arrivingKey, devSimulate]);
 
   const formatNow = () => new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -5028,11 +5041,16 @@ function HomeOnSiteCard({
             pending && !locating &&
             (!geocoded || approx || (dist !== null && dist <= ON_SITE_CHECKIN_MANUAL_OVERRIDE_MAX_MILES));
           // Beyond the 3-mi override window the address DID geocode, so the
-          // distance is real — but if it's this far off and GPS has given up,
-          // the pin or the signal is unusable here. Heavier-friction check-in
-          // (two confirmations, flagged NOT GPS-verified on the ticket).
+          // distance is real — but a real 5-mi gap with a "precise" fix is
+          // almost always the address pin being wrong, not the tech being
+          // 5 miles away. Offer the heavier-friction check-in as soon as
+          // there's a settled precise fix to report (i.e. not still
+          // `locating`) — no separate "GPS gave up" wait. Its own two
+          // confirmations + "NOT GPS-verified" ticket flag are the guard.
+          // Reported: a tech physically on site at a mis-geocoded address
+          // with a dead greyed "Work Start" and no override in sight.
           const canForceCheckIn =
-            pending && !locating && !canManual && geocoded && !approx && gpsGivenUp;
+            pending && !locating && !canManual && geocoded && !approx;
           return (
             <div key={t.ticketNo} className={`mtech-home-onsite-row${pending ? " mtech-home-onsite-row--pending" : ""}`}>
               <div className="mtech-home-onsite-info">
