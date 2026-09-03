@@ -544,18 +544,40 @@ export async function setTicketOnsiteCheckIn(
   event: "arrived" | "done",
   at: string
 ): Promise<void> {
+  if (event === "done") {
+    const { error } = await supabase
+      .from("tickets")
+      .update({ onsite_done_at: at })
+      .eq("ticket_no", ticketNo);
+    if (error) {
+      console.error("setTicketOnsiteCheckIn error:", error.message);
+      throw new Error(error.message);
+    }
+    return;
+  }
+
   // A fresh "arrived" also clears any earlier onsite_done_at — otherwise a
   // technician re-checking into a ticket they'd already marked done once
   // (a callback, a re-visit, or just tapping "I'm Here" again) advances
   // onsite_arrived_at to the new time while the stale onsite_done_at from
   // the earlier visit is left sitting there, now BEFORE the new arrival —
-  // a real "start after end" case confirmed on ticket 730812. "done"
-  // itself only ever needs to set its own column.
-  const update = event === "arrived" ? { onsite_arrived_at: at, onsite_done_at: null } : { onsite_done_at: at };
+  // a real "start after end" case confirmed on ticket 730812.
+  //
+  // But do NOT advance onsite_arrived_at when a visit is already IN
+  // PROGRESS (onsite_arrived_at set, onsite_done_at still null). That's the
+  // reload / double-tap case: a tech on a long visit reloads the app, the
+  // card hasn't re-read the persisted state yet, shows "Work Start" again,
+  // they tap it, and the real hours-old arrival gets overwritten with
+  // `now` — which then matches the "Work Done" they tap moments later, so
+  // the ticket's Start–End collapse to one minute (reported via Slack on
+  // longer-running tickets). The `.or` filter below only matches rows
+  // where there's no arrival yet OR a previous visit was already closed
+  // out, so a genuine callback (re-check-in AFTER done) still works.
   const { error } = await supabase
     .from("tickets")
-    .update(update)
-    .eq("ticket_no", ticketNo);
+    .update({ onsite_arrived_at: at, onsite_done_at: null })
+    .eq("ticket_no", ticketNo)
+    .or("onsite_arrived_at.is.null,onsite_done_at.not.is.null");
   if (error) {
     console.error("setTicketOnsiteCheckIn error:", error.message);
     throw new Error(error.message);
