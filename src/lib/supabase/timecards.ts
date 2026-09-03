@@ -336,6 +336,30 @@ export async function savePunch(
   });
 }
 
+/**
+ * Append one line to a day's timecard notes without touching any punch
+ * column — reads the current notes, appends, then upserts only `notes`
+ * (same single-column-upsert safety as savePunch: a stale/blank in-memory
+ * entry can't wipe check_in/check_out/meals). Used by the automatic
+ * home-arrival clock-out to leave an audit marker alongside the punch it
+ * just wrote. Best-effort by contract — callers treat a failure here as
+ * non-fatal (the clock-out itself already succeeded).
+ */
+export async function appendEntryNote(profileId: string, workDate: string, line: string): Promise<void> {
+  const existing = await getEntryForDate(profileId, workDate).catch(() => null);
+  const prev = (existing?.notes ?? "").trim();
+  const notes = prev ? `${prev}\n${line}` : line;
+  await withNetworkRetry(async () => {
+    const { error } = await supabase
+      .from("timecard_entries")
+      .upsert({ profile_id: profileId, work_date: workDate, notes }, { onConflict: "profile_id,work_date" });
+    if (error) {
+      console.error("appendEntryNote error:", error.message);
+      throw new Error(error.message);
+    }
+  });
+}
+
 /** Delete a day's entry for the caller's profile. */
 export async function deleteEntry(profileId: string, workDate: string): Promise<void> {
   const { error } = await supabase

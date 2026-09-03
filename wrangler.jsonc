@@ -10,7 +10,11 @@
   //                 from src/lib/server/nsaPartsSync.ts.
   //   "*/5 * * * *" every 5 minutes — runAttendanceAlertCheck() from
   //                 src/lib/server/attendanceAlerts.ts (missing clock-in/out
-  //                 grace-period notifications).
+  //                 grace-period notifications) AND
+  //                 runTechnicianForcedCheckout() from
+  //                 src/lib/server/technicianForcedCheckout.ts (force a
+  //                 Time Out for technicians still clocked in past their
+  //                 local midnight, stamped with their last ticket time).
   "triggers": {
     "crons": ["0 * * * *", "*/5 * * * *"]
   },
