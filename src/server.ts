@@ -221,6 +221,17 @@ export default {
           (error) => console.error("attendanceAlerts failed:", error),
         ),
       );
+      // Force-clock-out technicians who never clocked out — resolved per
+      // technician in their own timezone, so this fires within ~5 min of
+      // their local midnight (see technicianForcedCheckout.ts).
+      ctx.waitUntil(
+        import("./lib/server/technicianForcedCheckout").then(
+          ({ runTechnicianForcedCheckout }) => runTechnicianForcedCheckout(merged),
+        ).then(
+          (result) => console.log("technicianForcedCheckout:", JSON.stringify(result)),
+          (error) => console.error("technicianForcedCheckout failed:", error),
+        ),
+      );
       return;
     }
 

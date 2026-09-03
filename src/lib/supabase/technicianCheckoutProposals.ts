@@ -9,7 +9,8 @@
  * approveCheckoutProposal). See migration 0208 for the full RLS story.
  */
 import { supabase } from "./client";
-import { getEntryForDate, saveEntry } from "./timecards";
+import { getEntryForDate, saveEntry, savePunch, appendEntryNote } from "./timecards";
+import { HOME_AUTO_CHECKOUT_RADIUS_MILES } from "@/lib/mapEngine";
 
 export type CheckoutProposalSource = "branch" | "home";
 export type CheckoutProposalStatus = "pending" | "approved" | "dismissed";
@@ -68,6 +69,38 @@ export async function upsertMyCheckoutProposal(input: {
     { onConflict: "profile_id,work_date" }
   );
   if (error) throw new Error(error.message);
+}
+
+/**
+ * Automatic technician clock-out on arriving home (inside the
+ * HOME_AUTO_CHECKOUT_RADIUS_MILES geofence — a 1-mile diameter). Unlike the
+ * branch path, this does NOT wait for a SuperAdmin/Finance reviewer: it
+ * writes the technician's real timecard_entries.check_out directly, stamped
+ * with the moment they crossed into the circle (`checkOut`), and leaves an
+ * audit note. Deliberately NOT routed through technician_checkout_proposals
+ * — that table is the review queue, and an auto-applied home checkout needs
+ * no review. check_out is written with savePunch (single-column upsert) so
+ * a stale local view can't clobber check_in / meal punches.
+ *
+ * Called from TechnicianLocationTracker.tsx, as the technician themselves —
+ * same self-punch RLS path as the mobile Time Out button. If GPS never
+ * fires (tab closed, permission denied), the 11:59 PM server sweep
+ * (technicianForcedCheckout.ts) closes the shift instead.
+ */
+export async function autoClockOutAtHome(input: {
+  profileId: string;
+  workDate: string;
+  /** "HH:MM:SS" in the technician's own schedule timezone. */
+  checkOut: string;
+  lastTicketNo: string | null;
+}): Promise<void> {
+  await savePunch(input.profileId, input.workDate, "checkOut", input.checkOut);
+  const ctx = input.lastTicketNo ? ` last ticket ${input.lastTicketNo};` : "";
+  await appendEntryNote(
+    input.profileId,
+    input.workDate,
+    `[Auto clock-out ${input.checkOut} — arrived home (within ${HOME_AUTO_CHECKOUT_RADIUS_MILES * 2} mi);${ctx} system]`
+  ).catch((e) => console.error("autoClockOutAtHome: note write failed (clock-out already saved):", e));
 }
 
 /**

@@ -540,6 +540,19 @@ export const ON_SITE_CHECKIN_MANUAL_OVERRIDE_MAX_MILES = 3;
  */
 export const CHECKOUT_PROPOSAL_RADIUS_MILES = 1;
 
+/**
+ * Home-arrival geofence for the AUTOMATIC technician clock-out (not the
+ * branch proposal above) — a 1-mile *diameter*, i.e. a 0.5-mile radius,
+ * around the technician's own home address. Tighter than the branch radius
+ * on purpose: entering it clocks the technician straight out (no reviewer
+ * approval), with the recorded Time Out being the moment they crossed into
+ * the circle. Branch arrival stays a review-first proposal because a
+ * technician can legitimately be at the branch mid-day (parts, paperwork).
+ * See TechnicianLocationTracker.tsx and technicianForcedCheckout.ts (the
+ * 11:59 PM server-side fallback for when GPS never fired).
+ */
+export const HOME_AUTO_CHECKOUT_RADIUS_MILES = 0.5;
+
 export function formatDuration(seconds: number): string {
   const mins = Math.round(seconds / 60);
   if (mins < 60) return `${mins} min`;
