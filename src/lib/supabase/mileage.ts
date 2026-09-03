@@ -166,7 +166,18 @@ const ENTRY_COLUMNS =
 // queried all-time, no date range. Page through in chunks of 1000 instead.
 const PAGE_SIZE = 1000;
 
-/** All mileage entries for the caller's company (RLS-scoped), newest first. */
+/**
+ * All mileage entries for the caller's company (RLS-scoped), newest first.
+ *
+ * work_date alone isn't a unique sort key — plenty of rows share the same
+ * date — so range()-based paging on it alone lets Postgres resolve ties
+ * differently across the two separate page queries, silently duplicating
+ * some rows and dropping others across the page boundary (confirmed live:
+ * 52 duplicated + 52 different rows missing out of 2,603 real rows once the
+ * table grew past PAGE_SIZE). id as a secondary sort key makes the order
+ * — and therefore the paging — deterministic. Same fix already applied to
+ * getCompanyTickets() in tickets.ts for the identical reason.
+ */
 export async function getMileageEntries(): Promise<MileageEntry[]> {
   const all: MileageEntry[] = [];
   for (let from = 0; ; from += PAGE_SIZE) {
@@ -174,6 +185,7 @@ export async function getMileageEntries(): Promise<MileageEntry[]> {
       .from("mileage_entries")
       .select(ENTRY_COLUMNS)
       .order("work_date", { ascending: false })
+      .order("id", { ascending: true })
       .range(from, from + PAGE_SIZE - 1);
     if (error) {
       console.error("getMileageEntries error:", error.message);
@@ -431,6 +443,22 @@ export interface MileageSyncResult {
  * way a matched technician's are — just keyed by their raw ticket text
  * instead of a profileId.
  */
+// Module-level (not per-caller) in-flight guard. Two overlapping runs used
+// to both snapshot "which tickets already have a mileage_entries row"
+// before either had written anything, then both attempt the same INSERT —
+// the DB's unique index (idx_mileage_entries_ticket_dedup) correctly
+// rejects the second with a 409/23505 (already caught below as a no-op
+// skip), but the raw failed request still shows up in the browser console/
+// network panel, which is what actually prompted this guard. The most
+// common trigger isn't two genuinely different sync requests — it's
+// AccountingDashboard.tsx's "auto-sync when the Mileage tab opens" effect
+// firing twice for the same page load (e.g. React StrictMode's deliberate
+// dev-only double-effect-invoke, or the component remounting while an
+// earlier run's async work is still in flight and un-cancellable). A
+// second call while one is already running just returns immediately
+// instead of starting a competing pass.
+let syncInFlight = false;
+
 export async function syncMileageFromTickets(input: {
   technicians: { profileId: string; fullName: string; branch: string; phone?: string; email?: string; homeAddress?: string }[];
   /** Called after each technician-day finishes recomputing (route lookups
@@ -447,6 +475,26 @@ export async function syncMileageFromTickets(input: {
   signal?: AbortSignal;
 }): Promise<MileageSyncResult> {
   const result: MileageSyncResult = { created: 0, skipped: 0, errors: [], unmatchedTechnicians: [], recalculatedDays: 0, stopped: false };
+  if (syncInFlight) {
+    result.errors.push("Another sync is already running — try again once it finishes.");
+    return result;
+  }
+  syncInFlight = true;
+  try {
+    return await syncMileageFromTicketsInner(input, result);
+  } finally {
+    syncInFlight = false;
+  }
+}
+
+async function syncMileageFromTicketsInner(
+  input: {
+    technicians: { profileId: string; fullName: string; branch: string; phone?: string; email?: string; homeAddress?: string }[];
+    onProgress?: (done: number, total: number) => void;
+    signal?: AbortSignal;
+  },
+  result: MileageSyncResult
+): Promise<MileageSyncResult> {
   const techByNormalizedName = new Map(
     input.technicians.filter((t) => t.fullName.trim()).map((t) => [t.fullName.trim().toLowerCase(), t])
   );
@@ -469,11 +517,28 @@ export async function syncMileageFromTickets(input: {
       }
       return { data: all, error: null };
     })(),
-    supabase
-      .from("mileage_entries")
-      .select("id, ticket_id, total_mileage, leg_mileage, work_date, profile_id, technician_name")
-      .eq("source", "auto")
-      .not("ticket_id", "is", null),
+    // Unbounded before this fix — Supabase's default 1000-row cap silently
+    // truncated it once source=auto rows passed that count (confirmed live:
+    // 1,603 of 2,603 real rows missing). Every ticket whose real row fell
+    // past the cap then looked "not yet synced" to the code below, which
+    // re-attempted an INSERT that collided with the row that was there all
+    // along — a 409 per ticket, not a rare race. Paginated the same way the
+    // tickets fetch above already is.
+    (async () => {
+      const all: any[] = [];
+      for (let from = 0; ; from += PAGE_SIZE) {
+        const { data, error } = await supabase
+          .from("mileage_entries")
+          .select("id, ticket_id, total_mileage, leg_mileage, work_date, profile_id, technician_name")
+          .eq("source", "auto")
+          .not("ticket_id", "is", null)
+          .range(from, from + PAGE_SIZE - 1);
+        if (error) return { data: null, error };
+        all.push(...(data ?? []));
+        if (!data || data.length < PAGE_SIZE) break;
+      }
+      return { data: all, error: null };
+    })(),
     getCompanyMapProvider(),
   ]);
   if (ticketsErr) {
