@@ -82,7 +82,7 @@ import {
   type TechCategoryOverride,
 } from "@/lib/supabase/techPayroll";
 import { TechActivityReportModal } from "@/components/TechActivityReportModal";
-import { getMileageEntries, softDeleteMileageEntry, restoreMileageEntry, syncMileageFromTickets, setMileageEntryPayrollExcluded, reconcileMileageNoPhotoHolds, mileageEffectiveTotal, type MileageEntry } from "@/lib/supabase/mileage";
+import { getMileageEntries, softDeleteMileageEntry, restoreMileageEntry, syncMileageFromTickets, setMileageEntryPayrollExcluded, reconcileMileageNoPhotoHolds, mileageEffectiveTotal, resetMileageRouteConfirmation, type MileageEntry } from "@/lib/supabase/mileage";
 import { MileageDayRouteModal } from "@/components/MileageDayRouteModal";
 import { FlashTechCalendarPage } from "@/components/FlashTechCalendarPage";
 import { ExpenseTrackingPage } from "@/components/ExpenseTrackingPage";
@@ -797,6 +797,14 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
         if (dispute?.ticketNo && dispute.disputedStartTime && dispute.disputedEndTime) {
           await setTicketOnsiteCheckIn(dispute.ticketNo, "arrived", dispute.disputedStartTime);
           await setTicketOnsiteCheckIn(dispute.ticketNo, "done", dispute.disputedEndTime);
+          // The corrected time can move this ticket earlier/later in its
+          // day's real visit order (even make it the new last stop, moving
+          // who owes the drive-home leg) — invalidate that day's mileage
+          // route-order confirmation so the next Mileage sync re-chains it
+          // against the corrected time instead of skipping it as settled.
+          await resetMileageRouteConfirmation(dispute.ticketNo).catch((err) =>
+            console.error("Failed to invalidate mileage route order after dispute approval:", err)
+          );
         }
       }
       await updateEmployeeRequestStatus(id, status, myProfileId, ticketTimeDisputeNote[id]);
@@ -2706,19 +2714,16 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
     mileageSyncAbortRef.current?.abort();
   };
 
-  // Auto-runs the sync (all technicians, all-time — no date bound by
-  // default) the first time the Mileage tab is actually opened — so every
-  // assigned ticket's mileage just shows up without anyone having to press
-  // Sync. Only fires once per page load (via the ref) and waits for
-  // mileageTechnicians to actually be populated, rather than running on
-  // every tab switch or racing the initial fetch.
-  const autoSyncedMileageRef = useRef(false);
-  useEffect(() => {
-    if (activeTab !== "mileage" || autoSyncedMileageRef.current || mileageTechnicians.length === 0) return;
-    autoSyncedMileageRef.current = true;
-    void handleSyncMileage();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, mileageTechnicians.length]);
+  // NOT auto-run on tab open (removed — was a full company-wide, all-time
+  // rescan every single time anyone opened this tab, the main source of the
+  // RAM/CPU/traffic cost this was flagged for). Each ticket's mileage now
+  // keeps itself current on its own the moment a real On-Site Check-In
+  // event happens (see mileage.ts's syncMileageForTicketDay, wired into
+  // tickets.ts's setTicketOnsiteCheckIn) — no page-load batch scan needed
+  // to "catch it up." The manual Sync button below still exists as an
+  // explicit, occasional safety net (e.g. after a bulk ServicePower import,
+  // or to backfill days from before this event-driven path existed) —
+  // never auto-fires.
 
   // Photos modal — fetches on demand, only for the one ticket just clicked,
   // not for every row up front (the Mileage table has no pagination and can
