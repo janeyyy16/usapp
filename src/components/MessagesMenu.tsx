@@ -30,6 +30,7 @@ import {
 import { getCompanyUsers, getMyProfileId, type ProfileRow } from "@/lib/supabase/users";
 import { supabase } from "@/lib/supabase/client";
 import { playNotifySound } from "@/lib/notifySound";
+import { isTabVisible, onTabVisible } from "@/lib/pageVisibility";
 
 interface ThreadPreview {
   id: string;
@@ -161,11 +162,14 @@ export function MessagesMenu() {
         };
       });
 
-      // Sort: unread threads first, then most recent activity.
+      // Sort by most recent activity only — sorting unread-count-first used
+      // to put an older thread with more unread messages above a genuinely
+      // newer one, which read as random/out-of-order rather than "latest
+      // first" (the badge already shows unread count, so it doesn't need
+      // to win the sort too).
       const all = [...channelPreviews, ...dmPreviews]
         .filter((p) => p.lastMessage || p.unread > 0 || p.kind === "channel")
         .sort((a, b) => {
-          if (a.unread !== b.unread) return b.unread - a.unread;
           const at = a.lastMessage?.created_at ?? "";
           const bt = b.lastMessage?.created_at ?? "";
           return bt.localeCompare(at);
@@ -235,10 +239,11 @@ export function MessagesMenu() {
         playNotifySound();
       }
     });
-    const poll = window.setInterval(async () => {
+    const pollTick = async () => {
       // Cheap "did anything new arrive?" check — peek at the latest message in
       // the company (RLS scopes this to my company) and beep if its timestamp
       // is newer than what we've seen.
+      if (!isTabVisible()) return;
       try {
         const { data } = await supabase
           .from("messages")
@@ -255,12 +260,17 @@ export function MessagesMenu() {
           if (!isFirstScan && top.sender_id !== profileId) playNotifySound();
         }
       } catch { /* ignore */ }
-    }, 20000);
+    };
+    const poll = window.setInterval(pollTick, 20000);
+    // Catches up immediately on refocus instead of waiting out the rest of
+    // the interval — see pageVisibility.ts.
+    const unsubVisible = onTabVisible(pollTick);
     const onChanged = () => { debouncedRefresh(); };
     window.addEventListener("ahs:unread-changed", onChanged);
     return () => {
       unsub();
       window.clearInterval(poll);
+      unsubVisible();
       if (debounceTimer) window.clearTimeout(debounceTimer);
       window.removeEventListener("ahs:unread-changed", onChanged);
     };
