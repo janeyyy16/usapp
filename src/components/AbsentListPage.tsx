@@ -21,7 +21,7 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useSmartBack } from "@/hooks/useSmartBack";
-import { ChevronLeft, Pencil, Check, Loader2, Filter, CalendarDays, ListChecks, ClipboardList } from "lucide-react";
+import { ChevronLeft, Pencil, Check, Loader2, Filter, CalendarDays, ListChecks } from "lucide-react";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 import { useAuth } from "@/lib/auth";
 import { ROLE_LABELS } from "@/lib/roleLabels";
@@ -30,7 +30,6 @@ import { getCompanyTimecardEntries, getProfileIdByFirebaseUid, type CompanyTimec
 import { getAttendanceNotes, upsertAttendanceNote, upsertAttendanceHrNote, type AttendanceNoteRow } from "@/lib/supabase/attendanceNotes";
 import { getCompanyPtoRequests, type PtoRequestRow } from "@/lib/supabase/pto";
 import { HrCalendarTab } from "@/components/HrCalendarTab";
-import { TicketAttendanceTab } from "@/components/TicketAttendanceTab";
 
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
@@ -79,12 +78,8 @@ export function AbsentListPage({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef
   const [myProfileId, setMyProfileId] = useState<string | null>(null);
   // Time Off Calendar moved in here from HR & Recruitment Dashboard's own
   // sidebar — they're both "who's out and why" tools, so it's a toggle on
-  // this page now rather than a separate module tab. Ticket Attendance is
-  // the same self-contained tab Accounting Dashboard and Attendance
-  // Monitoring already mount (TicketAttendanceTab.tsx takes no props and
-  // fetches its own data), added as a third view so HR can check on-site
-  // check-ins without leaving this page.
-  const [view, setView] = useState<"list" | "calendar" | "ticketAttendance">("list");
+  // this page now rather than a separate module tab.
+  const [view, setView] = useState<"list" | "calendar">("list");
   const [dateFrom, setDateFrom] = useState(todayISO());
   const [dateTo, setDateTo] = useState(todayISO());
   const [search, setSearch] = useState("");
@@ -510,20 +505,11 @@ export function AbsentListPage({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef
           >
             <CalendarDays className="h-3.5 w-3.5" /> Time Off Calendar
           </button>
-          <button
-            type="button"
-            onClick={() => setView("ticketAttendance")}
-            className={`btn text-sm px-3 py-1.5 inline-flex items-center gap-1.5 ${view === "ticketAttendance" ? "bg-primary/20 text-primary" : ""}`}
-          >
-            <ClipboardList className="h-3.5 w-3.5" /> Ticket Attendance
-          </button>
         </div>
 
         {view === "calendar" && (
           <HrCalendarTab employees={calendarEmployees} myProfileId={myProfileId} myDisplayName={displayName} />
         )}
-
-        {view === "ticketAttendance" && <TicketAttendanceTab />}
 
         {view === "list" && (
         <div className="panel">
