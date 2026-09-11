@@ -61,11 +61,13 @@ import {
   type OnboardingDocumentColumn,
   type OnboardingGroupKey,
 } from "@/lib/supabase/onboardingDocumentColumns";
-import { uploadCoeCertificate, uploadWarningForm, uploadPromotionForm, uploadActionPlanForm, uploadTerminationForm, uploadW8benForm, uploadW4Form, uploadW4RForm, uploadI9Form, uploadWageAckForm, uploadCarIqAgreementForm, uploadVehicleAgreementForm, uploadEmployeeConfidentialityForm, uploadMealRestBreakForm, uploadPtoAckForm, uploadPartsResponsibilityForm, uploadMileageFuelForm, uploadLocationConsentForm, uploadDamageForm, uploadContractorDataForm, uploadDirectDepositForm, uploadSubstanceScreeningForm, uploadFlashTechnicianTravelForm, uploadContractorAddendumForm, uploadMasterW2AgreementForm, uploadSignableDocumentSignature, refreshStorageAuthToken } from "@/lib/firebase/storage";
+import { uploadCoeCertificate, uploadWarningForm, uploadPromotionForm, uploadActionPlanForm, uploadTerminationForm, uploadW8benForm, uploadW4Form, uploadW4RForm, uploadI9Form, uploadWageAckForm, uploadCarIqAgreementForm, uploadVehicleAgreementForm, uploadEmployeeConfidentialityForm, uploadMealRestBreakForm, uploadPtoAckForm, uploadPartsResponsibilityForm, uploadMileageFuelForm, uploadLocationConsentForm, uploadDamageForm, uploadContractorDataForm, uploadDirectDepositForm, uploadSubstanceScreeningForm, uploadFlashTechnicianTravelForm, uploadContractorAddendumForm, uploadMasterW2AgreementForm, uploadMasterW2OfficeAgreementForm, uploadMasterPhContractorAgreementForm, uploadSignableDocumentSignature, refreshStorageAuthToken } from "@/lib/firebase/storage";
 import { captureHtmlToPdfBlob, captureHtmlPagesToPdfBlob, loadAssetDataUrl as loadImageDataUrl } from "@/lib/pdfCapture";
 import { downloadSignableDocumentPdf } from "@/lib/downloadSignableDocumentPdf";
 import { useSortableSearchTable } from "@/hooks/useSortableSearchTable";
 import { masterW2AgreementStyles, buildMasterW2AgreementBodyMarkup, type MasterW2AgreementFormData } from "@/lib/masterW2AgreementFormTemplate";
+import { masterW2OfficeAgreementStyles, buildMasterW2OfficeAgreementBodyMarkup, type MasterW2OfficeAgreementFormData } from "@/lib/masterW2OfficeAgreementFormTemplate";
+import { masterPhContractorAgreementStyles, buildMasterPhContractorAgreementBodyMarkup, type MasterPhContractorAgreementFormData } from "@/lib/masterPhContractorAgreementFormTemplate";
 import { getTechnicianIdDocumentUrl } from "@/lib/supabase/technicianIdDocuments";
 import {
   createSignableDocument,
@@ -178,6 +180,28 @@ function formatDateOnlyLong(isoDate: string): string {
  */
 function isAwaitingEmployerStep(doc: { status: string; recipientSlot: string }): boolean {
   return (doc.status === "signed" && doc.recipientSlot === "employee") || (doc.status === "pending_signature" && doc.recipientSlot === "hr_staff");
+}
+
+/**
+ * Form W-4/I-9/Direct Deposit Authorization/W-8BEN each have exactly one
+ * underlying document type and Sent History list, reused by BOTH the
+ * legacy "Automated Forms" group's own tab and the "New Automation Forms"
+ * group's tabs (New Technician/New Office/PH Staff) — rather than
+ * duplicating four already-working send/sign flows per group. Without a
+ * way to tell them apart, every send showed up in every group's Sent
+ * History table, which reads as "old forms leaking into new" (and vice
+ * versa) — the two are supposed to stay separate lists. `formSource` is
+ * stamped into formData at send time (see handleSendW4/handleSendI9/
+ * handleSendDirectDeposit/handleSendW8ben's `activeTab === "new…"` check)
+ * and survives every later formData rewrite, since every fill page seeds
+ * its form state from the existing formData and spreads that whole state
+ * back out on submit (untyped extra keys ride along even though the
+ * page's own FormData type doesn't declare them) — see e.g.
+ * FillI9Page.tsx's `setForm((prev) => ({ ...prev, ...existing }))` /
+ * `finalData = { ...form, ... }`.
+ */
+function isNewAutomationDoc(doc: { formData: Record<string, any> }): boolean {
+  return doc.formData?.formSource === "new_automation";
 }
 
 // Certificate of Employment's editable body — the prose paragraphs between
@@ -356,6 +380,33 @@ const PH_ONBOARDING_DOCS = [
   "Employee Off Days Agreement",
   "W-8BEN",
 ];
+
+// "New Onboarding Documents" — the same paperwork tracker, but split into 4
+// audience groups instead of 3: Branch Manager and above (Branch Manager,
+// Senior Branch Manager, Technical Assistant Director, Technical Director)
+// is carved out of the old catch-all into its own group, Technician Staff
+// and Philippines Staff carry over unchanged, and Office Staff US is what's
+// left of the old catch-all. Kept as an entirely separate group-key space
+// (TECHNICIAN_STAFF/BRANCH_MANAGER_UP/OFFICE_STAFF_US/PHILIPPINES_STAFF vs
+// the original TECHNICIAN/PARTS_MANAGER/PH) so this tab's custom columns
+// never mix with the original Onboarding Documents tab's, even where the
+// audience overlaps. Unlike the original tab, none of these 4 groups start
+// with a hardcoded default document list — every column here is added from
+// scratch via "+ Add Column", per department, once HR defines it.
+const BRANCH_MANAGER_AND_UP_ROLES = new Set(["BRANCH_MANAGER", "SENIOR_BRANCH_MANAGER", "TECHNICAL_ASSISTANT_DIRECTOR", "TECHNICAL_DIRECTOR"]);
+
+// Display label per OnboardingGroupKey — covers both tabs' group keys, used
+// by the shared "Add Column" dialog so it reads correctly regardless of
+// which tab opened it.
+const ONBOARDING_GROUP_KEY_LABELS: Record<OnboardingGroupKey, string> = {
+  TECHNICIAN: "Technician",
+  PARTS_MANAGER: "Parts Manager",
+  PH: "Philippines",
+  TECHNICIAN_STAFF: "Technician Staff",
+  BRANCH_MANAGER_UP: "Branch Manager & Above",
+  OFFICE_STAFF_US: "Office Staff US",
+  PHILIPPINES_STAFF: "Philippines Staff",
+};
 
 /**
  * Onboarding Documents checklist columns that mean the exact same document
@@ -922,7 +973,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   // Reviews, the Approved log, the department trend chart, and the full
   // Employee Directory all on top of each other, forcing a long scroll to
   // reach anything below Hiring.
-  const [activeTab, setActiveTab] = useState<"hiring" | "warnings" | "masterList" | "leaders" | "jotform" | "jotformDocuments" | "customForms" | "onboarding" | "hiringReports" | "report" | "coe" | "warningForm" | "promotionForm" | "actionPlanForm" | "terminationForm" | "employeeRequestManager" | "w8ben" | "i9" | "wageAck" | "carIqAgreement" | "vehicleAgreement" | "vehicleUseAgreement" | "employeeConfidentiality" | "mealRestBreak" | "ptoAck" | "partsResponsibility" | "mileageFuel" | "locationConsent" | "damage" | "contractorData" | "contractorDataUs" | "directDeposit" | "substanceScreening" | "flashTechnicianTravel" | "contractorAddendum" | "combineForms" | "employerQueue" | "ndaForm" | "calendar" | "interviewCalendar" | "masterW2Agreement">(paperworksOnly ? "combineForms" : "hiring");
+  const [activeTab, setActiveTab] = useState<"hiring" | "warnings" | "masterList" | "leaders" | "jotform" | "jotformDocuments" | "customForms" | "onboarding" | "hiringReports" | "report" | "coe" | "warningForm" | "promotionForm" | "actionPlanForm" | "terminationForm" | "employeeRequestManager" | "w8ben" | "i9" | "wageAck" | "carIqAgreement" | "vehicleAgreement" | "vehicleUseAgreement" | "employeeConfidentiality" | "mealRestBreak" | "ptoAck" | "partsResponsibility" | "mileageFuel" | "locationConsent" | "damage" | "contractorData" | "contractorDataUs" | "directDeposit" | "substanceScreening" | "flashTechnicianTravel" | "contractorAddendum" | "combineForms" | "employerQueue" | "ndaForm" | "calendar" | "interviewCalendar" | "masterW2Agreement" | "newW4" | "masterW2OfficeAgreement" | "newW8ben" | "masterPhContractorAgreement" | "newI9" | "newDirectDeposit" | "newCombineForms" | "newOnboardingDocuments">(paperworksOnly ? "combineForms" : "hiring");
   const [openCategory, setOpenCategory] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // Which floating-sidebar section headers (Automated Forms/Generate
@@ -1884,6 +1935,8 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     vehicle_use_agreement: "vehicleUseAgreement",
     contractor_addendum: "contractorAddendum",
     master_w2_agreement: "masterW2Agreement",
+    master_w2_office_agreement: "masterW2OfficeAgreement",
+    master_ph_contractor_agreement: "masterPhContractorAgreement",
   };
 
   // Forms popup — checkbox list of every SignableDocumentType, letting HR
@@ -2873,8 +2926,14 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     }
   };
   useEffect(() => {
-    if (activeTab === "w8ben" || activeTab === "jotformDocuments" || activeTab === "combineForms") void loadSentW8benForms();
+    if (activeTab === "w8ben" || activeTab === "newW8ben" || activeTab === "jotformDocuments" || activeTab === "combineForms") void loadSentW8benForms();
   }, [activeTab]);
+  // Which bucket of sentW8benForms the CURRENTLY OPEN tab should show — see
+  // isNewAutomationDoc's doc comment.
+  const visibleW8benForms = useMemo(
+    () => sentW8benForms.filter((d) => (activeTab === "newW8ben" ? isNewAutomationDoc(d) : !isNewAutomationDoc(d))),
+    [sentW8benForms, activeTab]
+  );
 
   const [w8RecipientId, setW8RecipientId] = useState("");
   const [w8RecipientSearch, setW8RecipientSearch] = useState("");
@@ -2955,7 +3014,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
 
       const doc = await createSignableDocument({
         documentType: "w8ben",
-        formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
+        formData: { employeeId: recipient.id, employeeName: recipient.name, ...(activeTab === "newW8ben" ? { formSource: "new_automation" } : {}) } as unknown as Record<string, any>,
         recipientId: w8RecipientId,
         recipientSlot: "employee",
         pdfUrl: "",
@@ -2997,7 +3056,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const name = w8ExternalName.trim() || "External Recipient";
       const doc = await createSignableDocument({
         documentType: "w8ben",
-        formData: { employeeId: "", employeeName: name } as unknown as Record<string, any>,
+        formData: { employeeId: "", employeeName: name, ...(activeTab === "newW8ben" ? { formSource: "new_automation" } : {}) } as unknown as Record<string, any>,
         recipientName: name,
         recipientSlot: "employee",
         pdfUrl: "",
@@ -3069,6 +3128,16 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   // ── W-4 — same pattern as W-8BEN above: HR just picks a recipient, the
   // recipient fills in everything themselves on FillW4Page.tsx. ──
   const [w8FormType, setW8FormType] = useState<"w8ben" | "w4" | "w9" | "w4r">("w8ben");
+  // "newW4" (New Technician Forms / New Office Forms) and "newW8ben" (PH
+  // Staff) each reuse the exact same send/sent-history block their
+  // respective sub-tab already has on the combined "w8ben" tab — just
+  // pinned to one form type and without the W-8BEN/W-9/W-4/W-4R switcher,
+  // so there's only one flow per form type to maintain instead of a second
+  // copy per column that links to it.
+  useEffect(() => {
+    if (activeTab === "newW4") setW8FormType("w4");
+    if (activeTab === "newW8ben") setW8FormType("w8ben");
+  }, [activeTab]);
   const [sentW4Forms, setSentW4Forms] = useState<SignableDocument[]>([]);
   const loadSentW4Forms = async () => {
     try {
@@ -3078,8 +3147,14 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     }
   };
   useEffect(() => {
-    if (activeTab === "w8ben" || activeTab === "jotformDocuments" || activeTab === "combineForms") void loadSentW4Forms();
+    if (activeTab === "w8ben" || activeTab === "newW4" || activeTab === "jotformDocuments" || activeTab === "combineForms") void loadSentW4Forms();
   }, [activeTab]);
+  // Which bucket of sentW4Forms the CURRENTLY OPEN tab should show — see
+  // isNewAutomationDoc's doc comment.
+  const visibleW4Forms = useMemo(
+    () => sentW4Forms.filter((d) => (activeTab === "newW4" ? isNewAutomationDoc(d) : !isNewAutomationDoc(d))),
+    [sentW4Forms, activeTab]
+  );
 
   const [w4RecipientId, setW4RecipientId] = useState("");
   const [w4RecipientSearch, setW4RecipientSearch] = useState("");
@@ -3193,7 +3268,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
 
       const doc = await createSignableDocument({
         documentType: "w4",
-        formData: { employeeId: recipient.id } as unknown as Record<string, any>,
+        formData: { employeeId: recipient.id, ...(activeTab === "newW4" ? { formSource: "new_automation" } : {}) } as unknown as Record<string, any>,
         recipientId: w4RecipientId,
         recipientSlot: "employee",
         pdfUrl: "",
@@ -3231,7 +3306,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const name = w4ExternalName.trim() || "External Recipient";
       const doc = await createSignableDocument({
         documentType: "w4",
-        formData: { employeeId: "" } as unknown as Record<string, any>,
+        formData: { employeeId: "", ...(activeTab === "newW4" ? { formSource: "new_automation" } : {}) } as unknown as Record<string, any>,
         recipientName: name,
         recipientSlot: "employee",
         pdfUrl: "",
@@ -3731,12 +3806,26 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     }
   };
   useEffect(() => {
-    if (activeTab === "i9" || activeTab === "jotformDocuments" || activeTab === "combineForms") void loadSentI9Forms();
+    if (activeTab === "i9" || activeTab === "newI9" || activeTab === "jotformDocuments" || activeTab === "combineForms") void loadSentI9Forms();
   }, [activeTab]);
   // Section 1 done, nobody has claimed Section 2 yet — feeds the "Form I-9" sidebar tab's count badge.
-  const sentI9AwaitingSection2Count = useMemo(
-    () => sentI9Forms.filter(isAwaitingEmployerStep).length,
+  // Split old (legacy Automated Forms) vs new (New Automation Forms) — see
+  // isNewAutomationDoc's doc comment for why sentI9Forms itself is one
+  // shared list but each group's badge must only count its own bucket.
+  const sentI9AwaitingSection2CountOld = useMemo(
+    () => sentI9Forms.filter((d) => !isNewAutomationDoc(d) && isAwaitingEmployerStep(d)).length,
     [sentI9Forms]
+  );
+  const sentI9AwaitingSection2CountNew = useMemo(
+    () => sentI9Forms.filter((d) => isNewAutomationDoc(d) && isAwaitingEmployerStep(d)).length,
+    [sentI9Forms]
+  );
+  // Which bucket of sentI9Forms the CURRENTLY OPEN tab should show — "i9"
+  // (legacy) sees only untagged docs, "newI9" sees only formSource
+  // "new_automation" docs.
+  const visibleI9Forms = useMemo(
+    () => sentI9Forms.filter((d) => (activeTab === "newI9" ? isNewAutomationDoc(d) : !isNewAutomationDoc(d))),
+    [sentI9Forms, activeTab]
   );
 
   const [i9RecipientId, setI9RecipientId] = useState("");
@@ -3838,7 +3927,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
 
       const doc = await createSignableDocument({
         documentType: "i9",
-        formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
+        formData: { employeeId: recipient.id, employeeName: recipient.name, ...(activeTab === "newI9" ? { formSource: "new_automation" } : {}) } as unknown as Record<string, any>,
         recipientId: i9RecipientId,
         recipientSlot: "employee",
         pdfUrl: "",
@@ -3876,7 +3965,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const name = i9ExternalName.trim() || "External Recipient";
       const doc = await createSignableDocument({
         documentType: "i9",
-        formData: { employeeId: "", employeeName: name } as unknown as Record<string, any>,
+        formData: { employeeId: "", employeeName: name, ...(activeTab === "newI9" ? { formSource: "new_automation" } : {}) } as unknown as Record<string, any>,
         recipientName: name,
         recipientSlot: "employee",
         pdfUrl: "",
@@ -4193,6 +4282,580 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       setMasterW2AgreementEmployerError(err instanceof Error ? err.message : "Failed to save signature.");
     } finally {
       setMasterW2AgreementEmployerSaving(false);
+    }
+  };
+
+  // ── Master W-2 Office Agreement — same two-party HTML-captured flow as
+  // Master W-2 Technician Agreement above, for office/logistics staff
+  // instead of field technicians (see masterW2OfficeAgreementFormTemplate.ts's
+  // header comment for how the document itself differs). No license/SSN
+  // photo capture — that's specific to the Technician version. ──
+  const [sentMasterW2OfficeAgreementForms, setSentMasterW2OfficeAgreementForms] = useState<SignableDocument[]>([]);
+  const loadSentMasterW2OfficeAgreementForms = async () => {
+    try {
+      setSentMasterW2OfficeAgreementForms(await getSignableDocuments("master_w2_office_agreement"));
+    } catch (err) {
+      console.error("Failed to load sent Master W-2 Office Agreement forms:", err);
+    }
+  };
+  useEffect(() => {
+    if (activeTab === "masterW2OfficeAgreement" || activeTab === "jotformDocuments" || activeTab === "combineForms" || activeTab === "employerQueue") void loadSentMasterW2OfficeAgreementForms();
+  }, [activeTab]);
+  const sentMasterW2OfficeAgreementAwaitingEmployerCount = useMemo(
+    () => sentMasterW2OfficeAgreementForms.filter(isAwaitingEmployerStep).length,
+    [sentMasterW2OfficeAgreementForms]
+  );
+
+  type MasterW2OfficeAgreementSortColumn = "employee" | "branch" | "sentBy" | "status" | "sent";
+  const masterW2OfficeAgreementStatusLabel = (doc: SignableDocument): string =>
+    doc.status === "confirmed" ? "Completed"
+      : isAwaitingEmployerStep(doc) ? "Awaiting Employer Signature"
+      : doc.status === "cancelled" ? "Cancelled"
+      : "Awaiting Employee";
+  const {
+    search: masterW2OfficeAgreementSentSearch,
+    setSearch: setMasterW2OfficeAgreementSentSearch,
+    sortColumn: masterW2OfficeAgreementSentSortColumn,
+    sortDir: masterW2OfficeAgreementSentSortDir,
+    handleSort: handleMasterW2OfficeAgreementSentSort,
+    filterOptionsFor: masterW2OfficeAgreementFilterOptionsFor,
+    toggleFilterValue: masterW2OfficeAgreementToggleFilterValue,
+    clearColumnFilter: masterW2OfficeAgreementClearColumnFilter,
+    isColumnFiltered: masterW2OfficeAgreementIsColumnFiltered,
+    isValueChecked: masterW2OfficeAgreementIsValueChecked,
+    rows: sortedSentMasterW2OfficeAgreementForms,
+  } = useSortableSearchTable<SignableDocument, MasterW2OfficeAgreementSortColumn>(
+    sentMasterW2OfficeAgreementForms,
+    (doc, q) => {
+      const data = doc.formData as Partial<MasterW2OfficeAgreementFormData>;
+      const employeeName = (data.employeeName || doc.recipientName || "").toLowerCase();
+      const branch = (data.branch || "").toLowerCase();
+      return employeeName.includes(q) || branch.includes(q);
+    },
+    (doc, column) => {
+      const data = doc.formData as Partial<MasterW2OfficeAgreementFormData>;
+      switch (column) {
+        case "employee": return (data.employeeName || doc.recipientName || "").toLowerCase();
+        case "branch": return (data.branch || "").toLowerCase();
+        case "sentBy": return (doc.createdByName ?? "").toLowerCase();
+        case "status": return masterW2OfficeAgreementStatusLabel(doc).toLowerCase();
+        case "sent": return new Date(doc.createdAt).getTime();
+      }
+    },
+    (doc, column) => {
+      const data = doc.formData as Partial<MasterW2OfficeAgreementFormData>;
+      switch (column) {
+        case "branch": return data.branch || "—";
+        case "sentBy": return doc.createdByName ?? "—";
+        case "status": return masterW2OfficeAgreementStatusLabel(doc);
+        default: return "";
+      }
+    }
+  );
+
+  const [masterW2OfficeAgreementRecipientId, setMasterW2OfficeAgreementRecipientId] = useState("");
+  const [masterW2OfficeAgreementRecipientSearch, setMasterW2OfficeAgreementRecipientSearch] = useState("");
+  const [masterW2OfficeAgreementRecipientDropdownOpen, setMasterW2OfficeAgreementRecipientDropdownOpen] = useState(false);
+  const [masterW2OfficeAgreementSending, setMasterW2OfficeAgreementSending] = useState(false);
+  const [masterW2OfficeAgreementSendError, setMasterW2OfficeAgreementSendError] = useState<string | null>(null);
+  const [masterW2OfficeAgreementActionBusyId, setMasterW2OfficeAgreementActionBusyId] = useState<string | null>(null);
+  const [masterW2OfficeAgreementActionError, setMasterW2OfficeAgreementActionError] = useState<string | null>(null);
+  const [masterW2OfficeAgreementDocPreview, setMasterW2OfficeAgreementDocPreview] = useState<SignableDocument | null>(null);
+  const [masterW2OfficeAgreementPreviewExpanded, setMasterW2OfficeAgreementPreviewExpanded] = useState(false);
+  const [masterW2OfficeAgreementPreviewPdfUrl, setMasterW2OfficeAgreementPreviewPdfUrl] = useState<string | null>(null);
+  const [masterW2OfficeAgreementPreviewLoading, setMasterW2OfficeAgreementPreviewLoading] = useState(false);
+  const filteredMasterW2OfficeAgreementRecipients = useMemo(
+    () => employees.filter((e) => e.status === "active" && e.name.toLowerCase().includes(masterW2OfficeAgreementRecipientSearch.toLowerCase())),
+    [employees, masterW2OfficeAgreementRecipientSearch]
+  );
+
+  const buildMasterW2OfficeAgreementPreviewData = (employeeName: string): MasterW2OfficeAgreementFormData => {
+    const [firstName = "", ...rest] = employeeName.trim().split(/\s+/).filter(Boolean);
+    const lastName = rest.length ? rest[rest.length - 1] : "";
+    const middleName = rest.length > 1 ? rest.slice(0, -1).join(" ") : "";
+    return {
+      employeeId: "",
+      employeeName,
+      firstName,
+      middleName,
+      lastName,
+      branch: "",
+      effectiveDate: "",
+      addressStreet: "",
+      addressCity: "",
+      addressState: "",
+      addressZip: "",
+      phone: "",
+      email: "",
+      licensePhotoPath: "",
+      ssnCardPhotoPath: "",
+      employeeDateSigned: "",
+      employeeSignatureDataUrl: "",
+      employerDateSigned: "",
+      employerSignatureDataUrl: "",
+    };
+  };
+
+  /** Toggles the inline collapsible preview panel — collapsing just hides it (and revokes the blob URL); expanding (re)builds a fresh blank-filled sample from the currently-selected recipient's name. HTML-captured (not a pdf-lib fill like the other types' own preview), same technique as the document itself. */
+  const toggleMasterW2OfficeAgreementPreview = async () => {
+    if (masterW2OfficeAgreementPreviewExpanded) {
+      setMasterW2OfficeAgreementPreviewExpanded(false);
+      if (masterW2OfficeAgreementPreviewPdfUrl) URL.revokeObjectURL(masterW2OfficeAgreementPreviewPdfUrl);
+      setMasterW2OfficeAgreementPreviewPdfUrl(null);
+      return;
+    }
+    setMasterW2OfficeAgreementSendError(null);
+    setMasterW2OfficeAgreementPreviewExpanded(true);
+    setMasterW2OfficeAgreementPreviewLoading(true);
+    try {
+      const recipientName = employees.find((e) => e.id === masterW2OfficeAgreementRecipientId)?.name || "";
+      const logo = masterW2OfficeAgreementLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      const pdfBlob = await captureHtmlToPdfBlob(buildMasterW2OfficeAgreementBodyMarkup(buildMasterW2OfficeAgreementPreviewData(recipientName), logo), masterW2OfficeAgreementStyles);
+      const url = URL.createObjectURL(pdfBlob);
+      setMasterW2OfficeAgreementPreviewPdfUrl(url);
+    } catch (err) {
+      setMasterW2OfficeAgreementSendError(err instanceof Error ? err.message : "Failed to build preview.");
+    } finally {
+      setMasterW2OfficeAgreementPreviewLoading(false);
+    }
+  };
+
+  const handleSendMasterW2OfficeAgreement = async () => {
+    if (!masterW2OfficeAgreementRecipientId || !uid) return;
+    setMasterW2OfficeAgreementSending(true);
+    setMasterW2OfficeAgreementSendError(null);
+    try {
+      const recipient = employees.find((e) => e.id === masterW2OfficeAgreementRecipientId);
+      if (!recipient) throw new Error("Select a recipient first.");
+
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["master_w2_office_agreement"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Master W-2 Office Agreement on file. Send another one anyway?`)) {
+        return;
+      }
+
+      const doc = await createSignableDocument({
+        documentType: "master_w2_office_agreement",
+        formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
+        recipientId: masterW2OfficeAgreementRecipientId,
+        recipientSlot: "employee",
+        pdfUrl: "",
+      });
+
+      const myProfileId = await getMyProfileId(uid);
+      if (!myProfileId) throw new Error("Could not resolve your profile.");
+      const thread = await getOrCreateDmThread(myProfileId, masterW2OfficeAgreementRecipientId);
+      const fillLink = `${getAppUrl()}/fill-master-w2-office-agreement/${doc.id}`;
+      await sendMessage({
+        dmThreadId: thread.id,
+        senderId: myProfileId,
+        senderName: displayName || "HR",
+        body: `📋 Please complete the Master W-2 Office & Logistics Comprehensive Policy, Conduct & Agreement: ${fillLink}`,
+      });
+
+      void logActivity({ action: "master_w2_office_agreement_sent", targetType: "employee", targetId: recipient.id, targetLabel: recipient.name });
+
+      setMasterW2OfficeAgreementRecipientId("");
+      setMasterW2OfficeAgreementRecipientSearch("");
+      await loadSentMasterW2OfficeAgreementForms();
+    } catch (err) {
+      setMasterW2OfficeAgreementSendError(err instanceof Error ? err.message : "Failed to send request.");
+    } finally {
+      setMasterW2OfficeAgreementSending(false);
+    }
+  };
+
+  const handleCopyMasterW2OfficeAgreementLink = async (doc: SignableDocument) => {
+    try {
+      await navigator.clipboard.writeText(`${getAppUrl()}/fill-master-w2-office-agreement/${doc.id}`);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  const handleDownloadMasterW2OfficeAgreementPdf = async (doc: SignableDocument) => {
+    if (!doc.pdfUrl) return;
+    const name = (doc.formData as Partial<MasterW2OfficeAgreementFormData>).employeeName || doc.recipientName || "master-w2-office-agreement";
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Master W-2 Office Agreement - ${name}.pdf`);
+  };
+
+  const handleReopenMasterW2OfficeAgreementEmployer = async (doc: SignableDocument) => {
+    if (!window.confirm("Re-open this for a new employer signature? The employee's signature stays as-is.")) return;
+    setMasterW2OfficeAgreementActionBusyId(doc.id);
+    setMasterW2OfficeAgreementActionError(null);
+    try {
+      await reopenEmployerSignature(doc.id);
+      await loadSentMasterW2OfficeAgreementForms();
+    } catch (err) {
+      setMasterW2OfficeAgreementActionError(err instanceof Error ? err.message : "Failed to reopen for re-signing.");
+    } finally {
+      setMasterW2OfficeAgreementActionBusyId(null);
+    }
+  };
+
+  const handleDeleteMasterW2OfficeAgreement = async (doc: SignableDocument) => {
+    if (!window.confirm("Permanently delete this Master W-2 Office Agreement request?")) return;
+    setMasterW2OfficeAgreementActionBusyId(doc.id);
+    setMasterW2OfficeAgreementActionError(null);
+    try {
+      await deleteSignableDocument(doc.id);
+      await loadSentMasterW2OfficeAgreementForms();
+    } catch (err) {
+      setMasterW2OfficeAgreementActionError(err instanceof Error ? err.message : "Failed to delete.");
+    } finally {
+      setMasterW2OfficeAgreementActionBusyId(null);
+    }
+  };
+
+  // ── Complete Employer Signature — a plain signature pad (no fields to
+  // review), reassigns the document to the current HR user first so the
+  // RLS update policy allows it (same "claim" pattern Wage Ack's own dialog
+  // uses), then regenerates the whole PDF fresh with both signatures. ──
+  const [masterW2OfficeAgreementEmployerDialog, setMasterW2OfficeAgreementEmployerDialog] = useState<SignableDocument | null>(null);
+  const [masterW2OfficeAgreementEmployerSaving, setMasterW2OfficeAgreementEmployerSaving] = useState(false);
+  const [masterW2OfficeAgreementEmployerError, setMasterW2OfficeAgreementEmployerError] = useState<string | null>(null);
+  const masterW2OfficeAgreementEmployerSigPad = useSignaturePad({ width: 400, height: 120 });
+  const [masterW2OfficeAgreementLogoDataUrl, setMasterW2OfficeAgreementLogoDataUrl] = useState("");
+
+  const handleOpenMasterW2OfficeAgreementEmployerDialog = (doc: SignableDocument) => {
+    setMasterW2OfficeAgreementEmployerDialog(doc);
+    setMasterW2OfficeAgreementEmployerError(null);
+    if (!masterW2OfficeAgreementLogoDataUrl) {
+      loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")).then(setMasterW2OfficeAgreementLogoDataUrl).catch(() => {});
+    }
+  };
+
+  const handleSaveMasterW2OfficeAgreementEmployerSignature = async () => {
+    if (!masterW2OfficeAgreementEmployerDialog || !uid) return;
+    if (!masterW2OfficeAgreementEmployerSigPad.hasContent()) {
+      setMasterW2OfficeAgreementEmployerError("Please add your signature.");
+      return;
+    }
+    setMasterW2OfficeAgreementEmployerSaving(true);
+    setMasterW2OfficeAgreementEmployerError(null);
+    try {
+      const myProfileId = await getMyProfileId(uid);
+      if (!myProfileId) throw new Error("Could not resolve your profile.");
+
+      await reassignSignableDocument(masterW2OfficeAgreementEmployerDialog.id, { recipientId: myProfileId, recipientName: displayName || "HR" }, "hr_staff");
+
+      const existing = masterW2OfficeAgreementEmployerDialog.formData as MasterW2OfficeAgreementFormData;
+      const dataUrl = masterW2OfficeAgreementEmployerSigPad.toDataURL();
+      if (!dataUrl) {
+        setMasterW2OfficeAgreementEmployerError("Please add your signature.");
+        return;
+      }
+      await refreshStorageAuthToken();
+      const signatureUrl = await uploadSignableDocumentSignature(masterW2OfficeAgreementEmployerDialog.companyId, masterW2OfficeAgreementEmployerDialog.id, "hr_staff", dataUrl);
+      const signedAt = new Date().toISOString();
+
+      const merged: MasterW2OfficeAgreementFormData = { ...existing, employerSignatureDataUrl: dataUrl, employerDateSigned: signedAt };
+
+      const logo = masterW2OfficeAgreementLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      const pdfBlob = await captureHtmlToPdfBlob(buildMasterW2OfficeAgreementBodyMarkup(merged, logo), masterW2OfficeAgreementStyles);
+      const pdfUrl = await uploadMasterW2OfficeAgreementForm(masterW2OfficeAgreementEmployerDialog.companyId, existing.employeeName || "master-w2-office-agreement", pdfBlob);
+
+      const entry = { name: displayName || "HR", url: signatureUrl, signedAt };
+      await signDocument(masterW2OfficeAgreementEmployerDialog.id, "hr_staff", entry, pdfUrl, merged as unknown as Record<string, any>);
+      await confirmSignableDocument(masterW2OfficeAgreementEmployerDialog.id, null);
+
+      void logActivity({ action: "master_w2_office_agreement_employer_signed", targetType: "employee", targetLabel: existing.employeeName || "" });
+      setMasterW2OfficeAgreementEmployerDialog(null);
+      await loadSentMasterW2OfficeAgreementForms();
+    } catch (err) {
+      setMasterW2OfficeAgreementEmployerError(err instanceof Error ? err.message : "Failed to save signature.");
+    } finally {
+      setMasterW2OfficeAgreementEmployerSaving(false);
+    }
+  };
+
+  // ── Master PH Contractor Agreement — same two-party HTML-captured flow
+  // as the two Master W-2 agreements above, for PH staff engaged as
+  // independent contractors rather than W-2 employees (see
+  // masterPhContractorAgreementFormTemplate.ts's header comment for how the
+  // document itself differs — nationality/marital/spouse fields instead of
+  // a branch, no wage/equipment/substance-screening sections). No
+  // license/SSN photo capture. ──
+  const [sentMasterPhContractorAgreementForms, setSentMasterPhContractorAgreementForms] = useState<SignableDocument[]>([]);
+  const loadSentMasterPhContractorAgreementForms = async () => {
+    try {
+      setSentMasterPhContractorAgreementForms(await getSignableDocuments("master_ph_contractor_agreement"));
+    } catch (err) {
+      console.error("Failed to load sent Master PH Contractor Agreement forms:", err);
+    }
+  };
+  useEffect(() => {
+    if (activeTab === "masterPhContractorAgreement" || activeTab === "jotformDocuments" || activeTab === "combineForms" || activeTab === "employerQueue") void loadSentMasterPhContractorAgreementForms();
+  }, [activeTab]);
+  const sentMasterPhContractorAgreementAwaitingEmployerCount = useMemo(
+    () => sentMasterPhContractorAgreementForms.filter(isAwaitingEmployerStep).length,
+    [sentMasterPhContractorAgreementForms]
+  );
+
+  type MasterPhContractorAgreementSortColumn = "employee" | "nationality" | "sentBy" | "status" | "sent";
+  const masterPhContractorAgreementStatusLabel = (doc: SignableDocument): string =>
+    doc.status === "confirmed" ? "Completed"
+      : isAwaitingEmployerStep(doc) ? "Awaiting Employer Signature"
+      : doc.status === "cancelled" ? "Cancelled"
+      : "Awaiting Contractor";
+  const {
+    search: masterPhContractorAgreementSentSearch,
+    setSearch: setMasterPhContractorAgreementSentSearch,
+    sortColumn: masterPhContractorAgreementSentSortColumn,
+    sortDir: masterPhContractorAgreementSentSortDir,
+    handleSort: handleMasterPhContractorAgreementSentSort,
+    filterOptionsFor: masterPhContractorAgreementFilterOptionsFor,
+    toggleFilterValue: masterPhContractorAgreementToggleFilterValue,
+    clearColumnFilter: masterPhContractorAgreementClearColumnFilter,
+    isColumnFiltered: masterPhContractorAgreementIsColumnFiltered,
+    isValueChecked: masterPhContractorAgreementIsValueChecked,
+    rows: sortedSentMasterPhContractorAgreementForms,
+  } = useSortableSearchTable<SignableDocument, MasterPhContractorAgreementSortColumn>(
+    sentMasterPhContractorAgreementForms,
+    (doc, q) => {
+      const data = doc.formData as Partial<MasterPhContractorAgreementFormData>;
+      const employeeName = (data.employeeName || doc.recipientName || "").toLowerCase();
+      const nationality = (data.nationality || "").toLowerCase();
+      return employeeName.includes(q) || nationality.includes(q);
+    },
+    (doc, column) => {
+      const data = doc.formData as Partial<MasterPhContractorAgreementFormData>;
+      switch (column) {
+        case "employee": return (data.employeeName || doc.recipientName || "").toLowerCase();
+        case "nationality": return (data.nationality || "").toLowerCase();
+        case "sentBy": return (doc.createdByName ?? "").toLowerCase();
+        case "status": return masterPhContractorAgreementStatusLabel(doc).toLowerCase();
+        case "sent": return new Date(doc.createdAt).getTime();
+      }
+    },
+    (doc, column) => {
+      const data = doc.formData as Partial<MasterPhContractorAgreementFormData>;
+      switch (column) {
+        case "nationality": return data.nationality || "—";
+        case "sentBy": return doc.createdByName ?? "—";
+        case "status": return masterPhContractorAgreementStatusLabel(doc);
+        default: return "";
+      }
+    }
+  );
+
+  const [masterPhContractorAgreementRecipientId, setMasterPhContractorAgreementRecipientId] = useState("");
+  const [masterPhContractorAgreementRecipientSearch, setMasterPhContractorAgreementRecipientSearch] = useState("");
+  const [masterPhContractorAgreementRecipientDropdownOpen, setMasterPhContractorAgreementRecipientDropdownOpen] = useState(false);
+  const [masterPhContractorAgreementSending, setMasterPhContractorAgreementSending] = useState(false);
+  const [masterPhContractorAgreementSendError, setMasterPhContractorAgreementSendError] = useState<string | null>(null);
+  const [masterPhContractorAgreementActionBusyId, setMasterPhContractorAgreementActionBusyId] = useState<string | null>(null);
+  const [masterPhContractorAgreementActionError, setMasterPhContractorAgreementActionError] = useState<string | null>(null);
+  const [masterPhContractorAgreementDocPreview, setMasterPhContractorAgreementDocPreview] = useState<SignableDocument | null>(null);
+  const [masterPhContractorAgreementPreviewExpanded, setMasterPhContractorAgreementPreviewExpanded] = useState(false);
+  const [masterPhContractorAgreementPreviewPdfUrl, setMasterPhContractorAgreementPreviewPdfUrl] = useState<string | null>(null);
+  const [masterPhContractorAgreementPreviewLoading, setMasterPhContractorAgreementPreviewLoading] = useState(false);
+  const filteredMasterPhContractorAgreementRecipients = useMemo(
+    () => employees.filter((e) => e.status === "active" && e.name.toLowerCase().includes(masterPhContractorAgreementRecipientSearch.toLowerCase())),
+    [employees, masterPhContractorAgreementRecipientSearch]
+  );
+
+  const buildMasterPhContractorAgreementPreviewData = (employeeName: string): MasterPhContractorAgreementFormData => {
+    const [firstName = "", ...rest] = employeeName.trim().split(/\s+/).filter(Boolean);
+    const lastName = rest.length ? rest[rest.length - 1] : "";
+    const middleName = rest.length > 1 ? rest.slice(0, -1).join(" ") : "";
+    return {
+      employeeId: "",
+      employeeName,
+      firstName,
+      middleName,
+      lastName,
+      nationality: "",
+      nationalityOther: "",
+      addressStreet: "",
+      addressCity: "",
+      addressState: "",
+      addressZip: "",
+      addressCountry: "",
+      phone: "",
+      otherPhone: "",
+      email: "",
+      dateOfBirth: "",
+      startDate: "",
+      maritalStatus: "",
+      spouseName: "",
+      spouseEmployer: "",
+      governmentIdPhotoPath: "",
+      contractorDateSigned: "",
+      contractorSignatureDataUrl: "",
+      employerDateSigned: "",
+      employerSignatureDataUrl: "",
+    };
+  };
+
+  /** Toggles the inline collapsible preview panel — collapsing just hides it (and revokes the blob URL); expanding (re)builds a fresh blank-filled sample from the currently-selected recipient's name. HTML-captured (not a pdf-lib fill like the other types' own preview), same technique as the document itself. */
+  const toggleMasterPhContractorAgreementPreview = async () => {
+    if (masterPhContractorAgreementPreviewExpanded) {
+      setMasterPhContractorAgreementPreviewExpanded(false);
+      if (masterPhContractorAgreementPreviewPdfUrl) URL.revokeObjectURL(masterPhContractorAgreementPreviewPdfUrl);
+      setMasterPhContractorAgreementPreviewPdfUrl(null);
+      return;
+    }
+    setMasterPhContractorAgreementSendError(null);
+    setMasterPhContractorAgreementPreviewExpanded(true);
+    setMasterPhContractorAgreementPreviewLoading(true);
+    try {
+      const recipientName = employees.find((e) => e.id === masterPhContractorAgreementRecipientId)?.name || "";
+      const logo = masterPhContractorAgreementLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      const pdfBlob = await captureHtmlToPdfBlob(buildMasterPhContractorAgreementBodyMarkup(buildMasterPhContractorAgreementPreviewData(recipientName), logo), masterPhContractorAgreementStyles);
+      const url = URL.createObjectURL(pdfBlob);
+      setMasterPhContractorAgreementPreviewPdfUrl(url);
+    } catch (err) {
+      setMasterPhContractorAgreementSendError(err instanceof Error ? err.message : "Failed to build preview.");
+    } finally {
+      setMasterPhContractorAgreementPreviewLoading(false);
+    }
+  };
+
+  const handleSendMasterPhContractorAgreement = async () => {
+    if (!masterPhContractorAgreementRecipientId || !uid) return;
+    setMasterPhContractorAgreementSending(true);
+    setMasterPhContractorAgreementSendError(null);
+    try {
+      const recipient = employees.find((e) => e.id === masterPhContractorAgreementRecipientId);
+      if (!recipient) throw new Error("Select a recipient first.");
+
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["master_ph_contractor_agreement"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Master PH Contractor Agreement on file. Send another one anyway?`)) {
+        return;
+      }
+
+      const doc = await createSignableDocument({
+        documentType: "master_ph_contractor_agreement",
+        formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
+        recipientId: masterPhContractorAgreementRecipientId,
+        recipientSlot: "employee",
+        pdfUrl: "",
+      });
+
+      const myProfileId = await getMyProfileId(uid);
+      if (!myProfileId) throw new Error("Could not resolve your profile.");
+      const thread = await getOrCreateDmThread(myProfileId, masterPhContractorAgreementRecipientId);
+      const fillLink = `${getAppUrl()}/fill-master-ph-contractor-agreement/${doc.id}`;
+      await sendMessage({
+        dmThreadId: thread.id,
+        senderId: myProfileId,
+        senderName: displayName || "HR",
+        body: `📋 Please complete the Master Philippines Independent Contractor Comprehensive Agreement: ${fillLink}`,
+      });
+
+      void logActivity({ action: "master_ph_contractor_agreement_sent", targetType: "employee", targetId: recipient.id, targetLabel: recipient.name });
+
+      setMasterPhContractorAgreementRecipientId("");
+      setMasterPhContractorAgreementRecipientSearch("");
+      await loadSentMasterPhContractorAgreementForms();
+    } catch (err) {
+      setMasterPhContractorAgreementSendError(err instanceof Error ? err.message : "Failed to send request.");
+    } finally {
+      setMasterPhContractorAgreementSending(false);
+    }
+  };
+
+  const handleCopyMasterPhContractorAgreementLink = async (doc: SignableDocument) => {
+    try {
+      await navigator.clipboard.writeText(`${getAppUrl()}/fill-master-ph-contractor-agreement/${doc.id}`);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  const handleDownloadMasterPhContractorAgreementPdf = async (doc: SignableDocument) => {
+    if (!doc.pdfUrl) return;
+    const name = (doc.formData as Partial<MasterPhContractorAgreementFormData>).employeeName || doc.recipientName || "master-ph-contractor-agreement";
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Master PH Contractor Agreement - ${name}.pdf`);
+  };
+
+  const handleReopenMasterPhContractorAgreementEmployer = async (doc: SignableDocument) => {
+    if (!window.confirm("Re-open this for a new employer signature? The contractor's signature stays as-is.")) return;
+    setMasterPhContractorAgreementActionBusyId(doc.id);
+    setMasterPhContractorAgreementActionError(null);
+    try {
+      await reopenEmployerSignature(doc.id);
+      await loadSentMasterPhContractorAgreementForms();
+    } catch (err) {
+      setMasterPhContractorAgreementActionError(err instanceof Error ? err.message : "Failed to reopen for re-signing.");
+    } finally {
+      setMasterPhContractorAgreementActionBusyId(null);
+    }
+  };
+
+  const handleDeleteMasterPhContractorAgreement = async (doc: SignableDocument) => {
+    if (!window.confirm("Permanently delete this Master PH Contractor Agreement request?")) return;
+    setMasterPhContractorAgreementActionBusyId(doc.id);
+    setMasterPhContractorAgreementActionError(null);
+    try {
+      await deleteSignableDocument(doc.id);
+      await loadSentMasterPhContractorAgreementForms();
+    } catch (err) {
+      setMasterPhContractorAgreementActionError(err instanceof Error ? err.message : "Failed to delete.");
+    } finally {
+      setMasterPhContractorAgreementActionBusyId(null);
+    }
+  };
+
+  // ── Complete Employer Signature — a plain signature pad (no fields to
+  // review), reassigns the document to the current HR user first so the
+  // RLS update policy allows it (same "claim" pattern Wage Ack's own dialog
+  // uses), then regenerates the whole PDF fresh with both signatures. ──
+  const [masterPhContractorAgreementEmployerDialog, setMasterPhContractorAgreementEmployerDialog] = useState<SignableDocument | null>(null);
+  const [masterPhContractorAgreementEmployerSaving, setMasterPhContractorAgreementEmployerSaving] = useState(false);
+  const [masterPhContractorAgreementEmployerError, setMasterPhContractorAgreementEmployerError] = useState<string | null>(null);
+  const masterPhContractorAgreementEmployerSigPad = useSignaturePad({ width: 400, height: 120 });
+  const [masterPhContractorAgreementLogoDataUrl, setMasterPhContractorAgreementLogoDataUrl] = useState("");
+
+  const handleOpenMasterPhContractorAgreementEmployerDialog = (doc: SignableDocument) => {
+    setMasterPhContractorAgreementEmployerDialog(doc);
+    setMasterPhContractorAgreementEmployerError(null);
+    if (!masterPhContractorAgreementLogoDataUrl) {
+      loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")).then(setMasterPhContractorAgreementLogoDataUrl).catch(() => {});
+    }
+  };
+
+  const handleSaveMasterPhContractorAgreementEmployerSignature = async () => {
+    if (!masterPhContractorAgreementEmployerDialog || !uid) return;
+    if (!masterPhContractorAgreementEmployerSigPad.hasContent()) {
+      setMasterPhContractorAgreementEmployerError("Please add your signature.");
+      return;
+    }
+    setMasterPhContractorAgreementEmployerSaving(true);
+    setMasterPhContractorAgreementEmployerError(null);
+    try {
+      const myProfileId = await getMyProfileId(uid);
+      if (!myProfileId) throw new Error("Could not resolve your profile.");
+
+      await reassignSignableDocument(masterPhContractorAgreementEmployerDialog.id, { recipientId: myProfileId, recipientName: displayName || "HR" }, "hr_staff");
+
+      const existing = masterPhContractorAgreementEmployerDialog.formData as MasterPhContractorAgreementFormData;
+      const dataUrl = masterPhContractorAgreementEmployerSigPad.toDataURL();
+      if (!dataUrl) {
+        setMasterPhContractorAgreementEmployerError("Please add your signature.");
+        return;
+      }
+      await refreshStorageAuthToken();
+      const signatureUrl = await uploadSignableDocumentSignature(masterPhContractorAgreementEmployerDialog.companyId, masterPhContractorAgreementEmployerDialog.id, "hr_staff", dataUrl);
+      const signedAt = new Date().toISOString();
+
+      const merged: MasterPhContractorAgreementFormData = { ...existing, employerSignatureDataUrl: dataUrl, employerDateSigned: signedAt };
+
+      const logo = masterPhContractorAgreementLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      const pdfBlob = await captureHtmlToPdfBlob(buildMasterPhContractorAgreementBodyMarkup(merged, logo), masterPhContractorAgreementStyles);
+      const pdfUrl = await uploadMasterPhContractorAgreementForm(masterPhContractorAgreementEmployerDialog.companyId, existing.employeeName || "master-ph-contractor-agreement", pdfBlob);
+
+      const entry = { name: displayName || "HR", url: signatureUrl, signedAt };
+      await signDocument(masterPhContractorAgreementEmployerDialog.id, "hr_staff", entry, pdfUrl, merged as unknown as Record<string, any>);
+      await confirmSignableDocument(masterPhContractorAgreementEmployerDialog.id, null);
+
+      void logActivity({ action: "master_ph_contractor_agreement_employer_signed", targetType: "employee", targetLabel: existing.employeeName || "" });
+      setMasterPhContractorAgreementEmployerDialog(null);
+      await loadSentMasterPhContractorAgreementForms();
+    } catch (err) {
+      setMasterPhContractorAgreementEmployerError(err instanceof Error ? err.message : "Failed to save signature.");
+    } finally {
+      setMasterPhContractorAgreementEmployerSaving(false);
     }
   };
 
@@ -8220,8 +8883,14 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     }
   };
   useEffect(() => {
-    if (activeTab === "directDeposit" || activeTab === "jotformDocuments" || activeTab === "combineForms") void loadSentDirectDepositForms();
+    if (activeTab === "directDeposit" || activeTab === "newDirectDeposit" || activeTab === "jotformDocuments" || activeTab === "combineForms") void loadSentDirectDepositForms();
   }, [activeTab]);
+  // Which bucket of sentDirectDepositForms the CURRENTLY OPEN tab should
+  // show — see isNewAutomationDoc's doc comment.
+  const visibleDirectDepositForms = useMemo(
+    () => sentDirectDepositForms.filter((d) => (activeTab === "newDirectDeposit" ? isNewAutomationDoc(d) : !isNewAutomationDoc(d))),
+    [sentDirectDepositForms, activeTab]
+  );
 
   const [directDepositRecipientId, setDirectDepositRecipientId] = useState("");
   const [directDepositRecipientSearch, setDirectDepositRecipientSearch] = useState("");
@@ -8302,7 +8971,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
 
       const doc = await createSignableDocument({
         documentType: "direct_deposit",
-        formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
+        formData: { employeeId: recipient.id, employeeName: recipient.name, ...(activeTab === "newDirectDeposit" ? { formSource: "new_automation" } : {}) } as unknown as Record<string, any>,
         recipientId: directDepositRecipientId,
         recipientSlot: "employee",
         pdfUrl: "",
@@ -8339,7 +9008,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const name = directDepositExternalName.trim() || "External Recipient";
       const doc = await createSignableDocument({
         documentType: "direct_deposit",
-        formData: { employeeId: "", employeeName: name } as unknown as Record<string, any>,
+        formData: { employeeId: "", employeeName: name, ...(activeTab === "newDirectDeposit" ? { formSource: "new_automation" } : {}) } as unknown as Record<string, any>,
         recipientName: name,
         recipientSlot: "employee",
         pdfUrl: "",
@@ -8659,6 +9328,42 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     { type: "w9", label: "Form W-9" },
   ];
 
+  // "newCombineForms" (New Automation Forms' own Bulk Form Send) groups —
+  // mirrors the New Technician Forms/New Office Forms (US)/PH Staff
+  // columns exactly, instead of the old 20-item breakdown above. w4/i9/
+  // direct_deposit/w8ben are the same shared document types as their old
+  // counterparts — handleGenerateCombinedForms tags them formSource:
+  // "new_automation" when generated from this tab so they land in the
+  // right Sent History bucket (see isNewAutomationDoc's doc comment).
+  const NEW_TECHNICIAN_BULK_FORM_TYPES: { type: SignableDocumentType; label: string }[] = [
+    { type: "master_w2_agreement", label: "Master W-2 Technician Agreement" },
+    { type: "w4", label: "Form W-4" },
+    { type: "i9", label: "Form I-9 (Employment Eligibility)" },
+    { type: "direct_deposit", label: "Direct Deposit Authorization" },
+  ];
+  const NEW_OFFICE_BULK_FORM_TYPES: { type: SignableDocumentType; label: string }[] = [
+    { type: "master_w2_office_agreement", label: "Master W-2 Office Agreement" },
+    { type: "w4", label: "Form W-4" },
+    { type: "i9", label: "Form I-9 (Employment Eligibility)" },
+    { type: "direct_deposit", label: "Direct Deposit Authorization" },
+  ];
+  const NEW_PH_BULK_FORM_TYPES: { type: SignableDocumentType; label: string }[] = [
+    { type: "master_ph_contractor_agreement", label: "Master PH Contractor Agreement" },
+    { type: "w8ben", label: "Form W-8BEN" },
+    { type: "direct_deposit", label: "Direct Deposit Authorization" },
+  ];
+  // Matches newAutomationFormsManagementTabs (BM, SBS, Tech Director, Tech
+  // Assistant Director Forms) — Contractor Addendum and W-9 don't have
+  // their own standalone "new" tab (w9 is a shortcut into the shared
+  // combined W-8/9/4/4R tab, Contractor Addendum reuses its one existing
+  // tab as-is), but both are still real SignableDocumentTypes the same way
+  // every other bulk-sendable type here is.
+  const NEW_MANAGEMENT_BULK_FORM_TYPES: { type: SignableDocumentType; label: string }[] = [
+    { type: "contractor_addendum", label: "Master Independent Contractor Subcontractor Agreement Addendum" },
+    { type: "w9", label: "Form W-9" },
+    { type: "direct_deposit", label: "Direct Deposit Authorization" },
+  ];
+
   const [combineFormsRecipientId, setCombineFormsRecipientId] = useState("");
   const [combineFormsRecipientSearch, setCombineFormsRecipientSearch] = useState("");
   const [combineFormsRecipientDropdownOpen, setCombineFormsRecipientDropdownOpen] = useState(false);
@@ -8691,7 +9396,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleSendAllSelected = async () => {
     if (!formsDialog) return;
     const bulkSendableTypes = new Set<SignableDocumentType>(
-      [...GENERAL_FORM_TYPES, ...TECHNICIAN_FORM_TYPES, ...MANAGEMENT_FORM_TYPES].map((f) => f.type)
+      [...GENERAL_FORM_TYPES, ...TECHNICIAN_FORM_TYPES, ...MANAGEMENT_FORM_TYPES, ...NEW_TECHNICIAN_BULK_FORM_TYPES, ...NEW_OFFICE_BULK_FORM_TYPES, ...NEW_PH_BULK_FORM_TYPES, ...NEW_MANAGEMENT_BULK_FORM_TYPES].map((f) => f.type)
     );
     const toSend = Array.from(formsDialog.selected).filter((t) => bulkSendableTypes.has(t));
     if (toSend.length === 0) {
@@ -8746,7 +9451,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
         const alreadySent = await getExistingActiveDocumentTypes(recipient.id, Array.from(selectedFormTypes));
         if (alreadySent.length > 0) {
           const labelByType = new Map(
-            [...GENERAL_FORM_TYPES, ...TECHNICIAN_FORM_TYPES, ...MANAGEMENT_FORM_TYPES].map((f) => [f.type, f.label])
+            [...GENERAL_FORM_TYPES, ...TECHNICIAN_FORM_TYPES, ...MANAGEMENT_FORM_TYPES, ...NEW_TECHNICIAN_BULK_FORM_TYPES, ...NEW_OFFICE_BULK_FORM_TYPES, ...NEW_PH_BULK_FORM_TYPES, ...NEW_MANAGEMENT_BULK_FORM_TYPES].map((f) => [f.type, f.label])
           );
           const names = alreadySent.map((t) => labelByType.get(t) ?? t).join(", ");
           if (!window.confirm(`${recipient.name} already has these forms on file: ${names}.\n\nSend them again anyway?`)) {
@@ -8754,20 +9459,26 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
           }
         }
       }
+      // "newCombineForms" is New Automation Forms' own Bulk Form Send — see
+      // isNewAutomationDoc's doc comment for why w4/i9/direct_deposit/w8ben
+      // (shared document types with the old group) need this tag to land in
+      // the right Sent History bucket. Harmless on the other types here
+      // (master_w2_agreement etc.), which don't read formSource at all.
+      const formSourceTag = activeTab === "newCombineForms" ? { formSource: "new_automation" } : {};
       const docs = await Promise.all(
         Array.from(selectedFormTypes).map((type) =>
           createSignableDocument(
             recipient
               ? {
                   documentType: type,
-                  formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
+                  formData: { employeeId: recipient.id, employeeName: recipient.name, ...formSourceTag } as unknown as Record<string, any>,
                   recipientId: recipient.id,
                   recipientSlot: "employee",
                   pdfUrl: "",
                 }
               : {
                   documentType: type,
-                  formData: { employeeId: "", employeeName: externalName } as unknown as Record<string, any>,
+                  formData: { employeeId: "", employeeName: externalName, ...formSourceTag } as unknown as Record<string, any>,
                   recipientName: externalName,
                   recipientSlot: "employee",
                   pdfUrl: "",
@@ -11672,6 +12383,106 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     return q ? byGroup.filter((e) => e.name.toLowerCase().includes(q)) : byGroup;
   }, [employees, onboardingGroup, onboardingSearch]);
 
+  // ── New Onboarding Documents: same grid/drill-in mechanics as Onboarding
+  // Documents above, split into 4 audience groups instead of 3 — see
+  // BRANCH_MANAGER_AND_UP_ROLES above for why. Fully separate state from
+  // the original tab so the two evolve independently;
+  // customOnboardingColumns/addColumnGroup/handleAdd-/RemoveOnboardingColumn
+  // above are shared (same table, distinct group_key values — see
+  // OnboardingGroupKey). ──
+  type NewOnboardingGroupKey = "TECHNICIAN_STAFF" | "BRANCH_MANAGER_UP" | "OFFICE_STAFF_US" | "PHILIPPINES_STAFF";
+  const [newOnboardingGroup, setNewOnboardingGroup] = useState<NewOnboardingGroupKey>("TECHNICIAN_STAFF");
+  const [newOnboardingSearch, setNewOnboardingSearch] = useState("");
+  const [newOnboardingSelectedEmployee, setNewOnboardingSelectedEmployee] = useState<{ id: string; name: string; docList: string[] } | null>(null);
+
+  // No hardcoded defaults here (unlike the original Onboarding Documents
+  // tab) — every group starts with zero columns; HR adds each department's
+  // real document list from scratch via "+ Add Column" going forward.
+  const newOnboardingDocsForGroup = (groupKey: NewOnboardingGroupKey) =>
+    customOnboardingColumns.filter((c) => c.groupKey === groupKey).map((c) => c.label);
+
+  // Primary or extra role, same pile-up semantics isOnboardingTechnician
+  // above already uses. Checked BEFORE isOnboardingTechnician below — some
+  // employees hold both a management role (Branch Manager/Senior Branch
+  // Manager/Technical Director/Technical Assistant Director) AND Technician
+  // as extra roles, and the higher position wins for this grouping, unlike
+  // the original Onboarding Documents tab's Technician-first precedence.
+  const isBranchManagerAndUp = (employee: { position: string; extraRoles: string[] }) =>
+    [employee.position, ...employee.extraRoles].some((r) => BRANCH_MANAGER_AND_UP_ROLES.has(normalizeRole(r)));
+
+  // The "Role" column on the Branch Manager & Above panel — the specific
+  // qualifying role (Branch Manager vs Senior Branch Manager vs Technical
+  // Director vs Technical Assistant Director), not just `employee.position`,
+  // since someone can land in this group via an extra role while their
+  // primary position is something else (e.g. Technician).
+  const branchManagerRoleLabelForEmployee = (employee: { position: string; extraRoles: string[] }): string => {
+    const match = [employee.position, ...employee.extraRoles].find((r) => BRANCH_MANAGER_AND_UP_ROLES.has(normalizeRole(r)));
+    const role = match ?? employee.position;
+    return ROLE_LABELS[normalizeRole(role)] ?? role;
+  };
+
+  const getNewOnboardingDocListForEmployee = (employee: { country: string; position: string; extraRoles: string[] }) =>
+    newOnboardingDocsForGroup(
+      employee.country === "PH" ? "PHILIPPINES_STAFF"
+      : isBranchManagerAndUp(employee) ? "BRANCH_MANAGER_UP"
+      : isOnboardingTechnician(employee) ? "TECHNICIAN_STAFF"
+      : "OFFICE_STAFF_US"
+    );
+  const newOnboardingEmployees = useMemo(() => {
+    const activeOnly = employees.filter((e) => e.status === "active");
+    const byGroup =
+      newOnboardingGroup === "PHILIPPINES_STAFF" ? activeOnly.filter((e) => e.country === "PH")
+      : newOnboardingGroup === "BRANCH_MANAGER_UP" ? activeOnly.filter((e) => e.country === "US" && isBranchManagerAndUp(e))
+      : newOnboardingGroup === "TECHNICIAN_STAFF" ? activeOnly.filter((e) => e.country === "US" && !isBranchManagerAndUp(e) && isOnboardingTechnician(e))
+      : activeOnly.filter((e) => e.country === "US" && !isBranchManagerAndUp(e) && !isOnboardingTechnician(e));
+    const q = newOnboardingSearch.trim().toLowerCase();
+    return q ? byGroup.filter((e) => e.name.toLowerCase().includes(q)) : byGroup;
+  }, [employees, newOnboardingGroup, newOnboardingSearch]);
+
+  // Same "already e-signed" merge onboardingDocCategoriesByProfile/
+  // onboardingSignedLabelsByProfile do below for the original tab — kept as
+  // its own state/effect (rather than widening that one's guard) so a
+  // future divergence in either tab's document set doesn't require
+  // untangling a shared fetch.
+  const [newOnboardingDocCategoriesByProfile, setNewOnboardingDocCategoriesByProfile] = useState<Map<string, Set<string>>>(new Map());
+  const [newOnboardingSignedLabelsByProfile, setNewOnboardingSignedLabelsByProfile] = useState<Map<string, Set<string>>>(new Map());
+  useEffect(() => {
+    if (activeTab !== "newOnboardingDocuments" || newOnboardingEmployees.length === 0) return;
+    let cancelled = false;
+    const employeeIds = newOnboardingEmployees.map((e) => e.id);
+    const mappedTypes = Array.from(new Set(Object.values(ONBOARDING_COLUMN_TO_DOCUMENT_TYPE)));
+    const labelsByType = new Map<SignableDocumentType, string[]>();
+    for (const [label, type] of Object.entries(ONBOARDING_COLUMN_TO_DOCUMENT_TYPE)) {
+      const arr = labelsByType.get(type) ?? [];
+      arr.push(label);
+      labelsByType.set(type, arr);
+    }
+    Promise.all([
+      getOnboardingDocumentCategoriesByProfileIds(employeeIds),
+      getCompletedDocumentTypesByRecipientIds(employeeIds, mappedTypes),
+    ])
+      .then(([fileMap, signedMap]) => {
+        if (cancelled) return;
+        const signedLabelMap = new Map<string, Set<string>>();
+        for (const [profileId, types] of signedMap) {
+          const fileSet = fileMap.get(profileId) ?? new Set<string>();
+          const signedSet = new Set<string>();
+          for (const type of types) {
+            for (const label of labelsByType.get(type) ?? []) {
+              fileSet.add(label);
+              signedSet.add(label);
+            }
+          }
+          fileMap.set(profileId, fileSet);
+          signedLabelMap.set(profileId, signedSet);
+        }
+        setNewOnboardingDocCategoriesByProfile(fileMap);
+        setNewOnboardingSignedLabelsByProfile(signedLabelMap);
+      })
+      .catch((err) => console.error("Failed to load new onboarding document status:", err));
+    return () => { cancelled = true; };
+  }, [activeTab, newOnboardingEmployees]);
+
   // Restores which applicant's Onboarding Documents page was open (if any)
   // from the URL's ?profileId= — only once, as soon as employees has
   // loaded, using the same frozen initial search params as the tab restore
@@ -11720,10 +12531,12 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   ]);
 
   // Custom columns are company-wide (not filtered by the currently visible
-  // employee list), so just load them once when the tab is first opened.
+  // employee list), so just load them once when either tab is first opened
+  // — one fetch covers all 7 group keys (both tabs), since
+  // getOnboardingDocumentColumns() isn't filtered by group.
   const customOnboardingColumnsLoadedRef = useRef(false);
   useEffect(() => {
-    if (activeTab !== "onboarding" || customOnboardingColumnsLoadedRef.current) return;
+    if ((activeTab !== "onboarding" && activeTab !== "newOnboardingDocuments") || customOnboardingColumnsLoadedRef.current) return;
     customOnboardingColumnsLoadedRef.current = true;
     getOnboardingDocumentColumns()
       .then(setCustomOnboardingColumns)
@@ -12522,7 +13335,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     { key: "customForms", label: "Custom Forms", count: newCustomFormSubmissionsCount, icon: FileText },
     { key: "promotionForm", label: "Employee Promotion / Role Change", count: 0, icon: FileText },
     { key: "warningForm", label: "Employee Warning Form", count: 0, icon: FileText },
-    { key: "i9", label: "Form I-9 (Employment Eligibility)", count: sentI9AwaitingSection2Count, icon: FileCheck },
+    { key: "i9", label: "Form I-9 (Employment Eligibility)", count: sentI9AwaitingSection2CountOld, icon: FileCheck },
     { key: "actionPlanForm", label: "Manager's Action Plan Form", count: 0, icon: FileText },
     { key: "terminationForm", label: "Termination Notice Form", count: 0, icon: FileText },
     { key: "w8ben", label: "W-8 / W-9 / W-4 / W-4R Forms", count: 0, icon: Landmark },
@@ -12533,9 +13346,17 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   // Form/Termination Notice Form/W-8ben — those 4 live directly under New
   // Technician Forms instead (see newAutomationFormsTechnicianTabs below),
   // so listing them here too would just be a duplicate.
-  const newAutomationFormsGeneralTabs = automatedFormsGeneralTabs.filter(
-    (t) => !["i9", "actionPlanForm", "terminationForm", "w8ben"].includes(t.key)
-  );
+  // "combineForms" (Bulk Form Send) gets its own distinct tab here rather
+  // than being reused as-is — the old one's checkbox list is the legacy
+  // 20-item breakdown (11 individual technician forms, etc.); this one
+  // needs to show only the new consolidated form types (Master W-2
+  // Technician/Office Agreement, Master PH Contractor Agreement, W-4, I-9,
+  // Direct Deposit, W-8BEN), grouped by New Technician/New Office/PH Staff
+  // — see the "newCombineForms" render block below.
+  const newAutomationFormsGeneralTabs: NavTabDef[] = [
+    ...automatedFormsGeneralTabs.filter((t) => !["i9", "actionPlanForm", "terminationForm", "w8ben", "combineForms"].includes(t.key)),
+    { key: "newCombineForms", label: "Bulk Form Send", count: 0, icon: Link2 },
+  ];
 
   const automatedFormsTechnicianTabs = [
     { key: "wageAck", label: "Acknowledgment of Wage", count: sentWageAckAwaitingEmployerCount, icon: FileCheck },
@@ -12563,24 +13384,54 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   // both places per the explicit ask to keep General available here too.
   const newAutomationFormsTechnicianTabs = [
     { key: "masterW2Agreement", label: "Master W-2 Technician Agreement", count: sentMasterW2AgreementAwaitingEmployerCount, icon: FileCheck },
-    { key: "w8ben", label: "W-8 / W-9 / W-4 / W-4R Forms", count: 0, icon: Landmark },
-    { key: "i9", label: "Form I-9 (Employment Eligibility)", count: sentI9AwaitingSection2Count, icon: FileCheck },
-    { key: "directDeposit", label: "Direct Deposit Authorization", count: 0, icon: FileCheck },
+    { key: "newW4", label: "Form W-4", count: 0, icon: Landmark },
+    { key: "newI9", label: "Form I-9 (Employment Eligibility)", count: sentI9AwaitingSection2CountNew, icon: FileCheck },
+    { key: "newDirectDeposit", label: "Direct Deposit Authorization", count: 0, icon: FileCheck },
+  ] as const;
+
+  // "New Office Forms (US)" — the office/logistics counterpart to New
+  // Technician Forms above: Master W-2 Office Agreement is its own document
+  // (different content — see masterW2OfficeAgreementFormTemplate.ts), while
+  // Form W-4/I-9/Direct Deposit are the exact same shared tab keys reused
+  // from New Technician Forms (there's only one W-4/I-9/Direct Deposit flow
+  // regardless of which column links to it).
+  const newAutomationFormsOfficeTabs = [
+    { key: "masterW2OfficeAgreement", label: "Master W-2 Office Agreement", count: sentMasterW2OfficeAgreementAwaitingEmployerCount, icon: FileCheck },
+    { key: "newW4", label: "Form W-4", count: 0, icon: Landmark },
+    { key: "newI9", label: "Form I-9 (Employment Eligibility)", count: sentI9AwaitingSection2CountNew, icon: FileCheck },
+    { key: "newDirectDeposit", label: "Direct Deposit Authorization", count: 0, icon: FileCheck },
+  ] as const;
+
+  // "PH Staff" — the Philippines-contractor counterpart to New Technician/
+  // New Office Forms: Master PH Contractor Agreement is its own document
+  // (independent-contractor relationship, not W-2 — see
+  // masterPhContractorAgreementFormTemplate.ts), Form W-8BEN is the same
+  // shared tab reused from the combined "w8ben" tab (pinned via "newW8ben",
+  // same trick "newW4" uses for W-4), and Direct Deposit is the same shared
+  // tab reused from New Technician/New Office Forms.
+  const newAutomationFormsPhTabs = [
+    { key: "masterPhContractorAgreement", label: "Master PH Contractor Agreement", count: sentMasterPhContractorAgreementAwaitingEmployerCount, icon: FileCheck },
+    { key: "newW8ben", label: "Form W-8BEN", count: 0, icon: Landmark },
+    { key: "newDirectDeposit", label: "Direct Deposit Authorization", count: 0, icon: FileCheck },
   ] as const;
 
   // "New Automation Forms"'s management-tier column — Branch Manager/Senior
-  // Branch Manager/Technical Assistant Director/Technical Director forms,
-  // reusing the same contractorAddendum/directDeposit tabs already built for
-  // the "Automated Forms" group's own management column
-  // (automatedFormsManagementTabs) rather than duplicating their content.
-  // "w9" isn't a real tab of its own — clicking it jumps straight into the
+  // Branch Manager/Technical Director/Technical Assistant Director forms.
+  // Direct Deposit reuses "newDirectDeposit" (not the old group's plain
+  // "directDeposit") so it lands in the same new/old-separated bucket as
+  // every other New Automation Forms column — see isNewAutomationDoc's doc
+  // comment. Contractor Addendum reuses its one existing tab/Sent History
+  // list as-is (no new/old split for it yet — its multi-signer "Send to
+  // Next Signer" chain is a bigger change than this pass covers). "w9"
+  // isn't a real tab of its own — clicking it jumps straight into the
   // combined W-8/9/4/4R tab with w8FormType pre-set to "w9" (see
-  // renderSidebarTabButton/renderDropdownTabButton's special case below) so
-  // Form W-9 is reachable directly from here instead of only via that picker.
+  // goToTab/renderSidebarTabButton/renderDropdownTabButton's special case
+  // below) so Form W-9 is reachable directly from here instead of only via
+  // that picker.
   const newAutomationFormsManagementTabs = [
     { key: "contractorAddendum", label: "Master Independent Contractor Subcontractor Agreement Addendum", count: 0, icon: FileText },
     { key: "w9", label: "Form W-9", count: 0, icon: Landmark },
-    { key: "directDeposit", label: "Direct Deposit Authorization", count: 0, icon: FileCheck },
+    { key: "newDirectDeposit", label: "Direct Deposit Authorization", count: 0, icon: FileCheck },
   ] as const;
 
   // Management-tier forms (Branch Manager / Senior Branch Manager /
@@ -12628,12 +13479,32 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     ...(paperworksOnly && companyId === "COMP001" ? [{
       group: "New Automation Forms",
       icon: Paperclip,
-      tabs: [...newAutomationFormsGeneralTabs, ...newAutomationFormsTechnicianTabs, ...newAutomationFormsManagementTabs],
+      tabs: [...newAutomationFormsGeneralTabs, ...newAutomationFormsTechnicianTabs, ...newAutomationFormsOfficeTabs, ...newAutomationFormsPhTabs, ...newAutomationFormsManagementTabs],
       columns: [
         { label: "General", tabs: newAutomationFormsGeneralTabs },
         { label: "New Technician Forms", tabs: newAutomationFormsTechnicianTabs },
+        { label: "New Office Forms (US)", tabs: newAutomationFormsOfficeTabs },
+        { label: "PH Staff", tabs: newAutomationFormsPhTabs },
         { label: "BM, SBS, Tech Director, Tech Assistant Director Forms", tabs: newAutomationFormsManagementTabs },
       ],
+    }] : []),
+    // Onboarding Documents — moved here from HR & Recruitment Dashboard's
+    // own "People Operations" group, since it's the same "paperwork on
+    // file" concern as the rest of this module. "New Onboarding Documents"
+    // sits alongside it as an empty placeholder tab for a reworked version
+    // to be built out separately later — deliberately not wired to
+    // anything yet. Not restricted to companyId === "COMP001" like the two
+    // groups above (those forms are AH Solutions-specific) — Onboarding
+    // Documents was available to every company before this move, and stays
+    // that way, just relocated.
+    ...(paperworksOnly ? [{
+      group: "Onboarding",
+      icon: Paperclip,
+      tabs: [
+        { key: "onboarding", label: "Onboarding Documents", count: 0, icon: Paperclip },
+        { key: "newOnboardingDocuments", label: "New Onboarding Documents", count: 0, icon: Paperclip },
+      ] as const,
+      columns: undefined,
     }] : []),
     ...(!paperworksOnly ? [
       {
@@ -12652,7 +13523,6 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
           { key: "leaders", label: "Leaders", count: leadersRoster.length, icon: UserCheck },
           { key: "employeeRequestManager", label: "Employee Request Manager", count: requestManagerPendingCount, icon: ClipboardList },
           { key: "hiring", label: "Hiring", count: visibleCandidates.length, icon: Users },
-          { key: "onboarding", label: "Onboarding Documents", count: 0, icon: Paperclip },
           { key: "warnings", label: "Warnings & Mistakes", count: isHrOrAdmin ? pendingNotes.length : 0, icon: AlertTriangle },
         ] as const,
         columns: undefined,
@@ -12682,6 +13552,13 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   // one-click target from the "BM, SBS, Tech Director, Tech Assistant
   // Director Forms" column instead of only reachable via the picker itself.
   const goToTab = (key: string) => {
+    // Bulk Form Send's old/new tabs share one selectedFormTypes Set —
+    // clear it on manual navigation into either so a hidden selection from
+    // the other tab's (differently-shaped) checkbox list can't silently
+    // ride along into a generated bundle. Doesn't touch the Forms popup's
+    // "Send All Selected" bridge, which sets its own preselection via
+    // setActiveTab directly, not through this button.
+    if (key === "combineForms" || key === "newCombineForms") setSelectedFormTypes(new Set());
     if (key === "w9") {
       setActiveTab("w8ben");
       setW8FormType("w9");
@@ -12773,7 +13650,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
               </button>
               {!collapsed && (
                 section.columns ? (
-                  <div className="grid grid-cols-3 gap-x-4 gap-y-1 pl-2 border-l border-white/10 ml-4">
+                  <div className={`grid ${section.columns.length >= 5 ? "grid-cols-5" : section.columns.length === 4 ? "grid-cols-4" : "grid-cols-3"} gap-x-4 gap-y-1 pl-2 border-l border-white/10 ml-4`}>
                     {section.columns.map((col) => (
                       <div key={col.label} className="flex flex-col gap-0.5">
                         <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide px-2.5 pt-1 pb-0.5">{col.label}</p>
@@ -13034,9 +13911,9 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                 {isOpen && (
                   <>
                     <div className="fixed inset-0 z-10" onClick={() => setOpenCategory(null)} />
-                    <div className={`absolute top-full left-0 mt-1 z-20 rounded-md border border-white/10 bg-slate-900 shadow-xl py-1 ${section.columns ? "w-[min(95vw,780px)]" : "min-w-[220px]"}`}>
+                    <div className={`absolute top-full left-0 mt-1 z-20 rounded-md border border-white/10 bg-slate-900 shadow-xl py-1 ${section.columns ? (section.columns.length >= 5 ? "w-[min(95vw,1180px)]" : section.columns.length === 4 ? "w-[min(95vw,980px)]" : "w-[min(95vw,780px)]") : "min-w-[220px]"}`}>
                       {section.columns ? (
-                        <div className="grid grid-cols-3 gap-x-1">
+                        <div className={`grid ${section.columns.length >= 5 ? "grid-cols-5" : section.columns.length === 4 ? "grid-cols-4" : "grid-cols-3"} gap-x-1`}>
                           {section.columns.map((col) => (
                             <div key={col.label} className="flex flex-col py-1">
                               <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide px-3.5 pt-1 pb-1">{col.label}</p>
@@ -14878,7 +15755,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       )}
 
       {/* ── Combine Forms — pick a technician, check off which forms they need, and generate all of them at once behind one link that opens as a Next-through wizard with a completion timeline (SignBundlePage.tsx) ── */}
-      {activeTab === "combineForms" && (
+      {(activeTab === "combineForms" || activeTab === "newCombineForms") && (
       <div className="panel p-0 overflow-hidden">
         <div className="px-4 py-4 border-b border-white/10">
           <h2 className="font-semibold text-sm flex items-center gap-1.5"><Link2 className="h-4 w-4 text-blue-300" /> Bulk Form Send</h2>
@@ -14933,6 +15810,8 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
           <p className="text-[10px] text-muted-foreground">Optional — only used by "Copy Link Instead" below, which works even with no name at all.</p>
         </div>
 
+        {activeTab === "combineForms" && (
+        <>
         <div className="px-4 pt-4">
           <h3 className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">General</h3>
         </div>
@@ -15022,6 +15901,132 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
             );
           })}
         </div>
+        </>
+        )}
+
+        {activeTab === "newCombineForms" && (
+        <>
+        <div className="px-4 pt-4">
+          <h3 className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">New Technician Forms</h3>
+        </div>
+        <div className="p-4 pt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 border-b border-white/10">
+          {NEW_TECHNICIAN_BULK_FORM_TYPES.map(({ type, label }) => {
+            const checked = selectedFormTypes.has(type);
+            const urgent = ROUTE_REQUIRED_DOCUMENT_TYPES.includes(type);
+            return (
+              <label
+                key={type}
+                className={`flex items-start gap-2.5 rounded-lg border p-3 cursor-pointer transition-colors ${
+                  checked
+                    ? "border-primary/50 bg-primary/10"
+                    : urgent
+                    ? "border-red-500/40 bg-red-500/20 hover:bg-red-500/30"
+                    : "border-white/10 bg-white/5 hover:bg-white/10"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => toggleFormTypeSelected(type)}
+                  className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                />
+                <span className="text-sm font-medium">{label}</span>
+              </label>
+            );
+          })}
+        </div>
+
+        <div className="px-4 pt-4">
+          <h3 className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">New Office Forms (US)</h3>
+        </div>
+        <div className="p-4 pt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 border-b border-white/10">
+          {NEW_OFFICE_BULK_FORM_TYPES.map(({ type, label }) => {
+            const checked = selectedFormTypes.has(type);
+            const urgent = ROUTE_REQUIRED_DOCUMENT_TYPES.includes(type);
+            return (
+              <label
+                key={type}
+                className={`flex items-start gap-2.5 rounded-lg border p-3 cursor-pointer transition-colors ${
+                  checked
+                    ? "border-primary/50 bg-primary/10"
+                    : urgent
+                    ? "border-red-500/40 bg-red-500/20 hover:bg-red-500/30"
+                    : "border-white/10 bg-white/5 hover:bg-white/10"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => toggleFormTypeSelected(type)}
+                  className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                />
+                <span className="text-sm font-medium">{label}</span>
+              </label>
+            );
+          })}
+        </div>
+
+        <div className="px-4 pt-4">
+          <h3 className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">PH Staff</h3>
+        </div>
+        <div className="p-4 pt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 border-b border-white/10">
+          {NEW_PH_BULK_FORM_TYPES.map(({ type, label }) => {
+            const checked = selectedFormTypes.has(type);
+            const urgent = ROUTE_REQUIRED_DOCUMENT_TYPES.includes(type);
+            return (
+              <label
+                key={type}
+                className={`flex items-start gap-2.5 rounded-lg border p-3 cursor-pointer transition-colors ${
+                  checked
+                    ? "border-primary/50 bg-primary/10"
+                    : urgent
+                    ? "border-red-500/40 bg-red-500/20 hover:bg-red-500/30"
+                    : "border-white/10 bg-white/5 hover:bg-white/10"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => toggleFormTypeSelected(type)}
+                  className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                />
+                <span className="text-sm font-medium">{label}</span>
+              </label>
+            );
+          })}
+        </div>
+
+        <div className="px-4 pt-4">
+          <h3 className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">BM, SBS, Tech Director, Tech Assistant Director Forms</h3>
+        </div>
+        <div className="p-4 pt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {NEW_MANAGEMENT_BULK_FORM_TYPES.map(({ type, label }) => {
+            const checked = selectedFormTypes.has(type);
+            const urgent = ROUTE_REQUIRED_DOCUMENT_TYPES.includes(type);
+            return (
+              <label
+                key={type}
+                className={`flex items-start gap-2.5 rounded-lg border p-3 cursor-pointer transition-colors ${
+                  checked
+                    ? "border-primary/50 bg-primary/10"
+                    : urgent
+                    ? "border-red-500/40 bg-red-500/20 hover:bg-red-500/30"
+                    : "border-white/10 bg-white/5 hover:bg-white/10"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => toggleFormTypeSelected(type)}
+                  className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                />
+                <span className="text-sm font-medium">{label}</span>
+              </label>
+            );
+          })}
+        </div>
+        </>
+        )}
 
         <div className="px-4 py-4 border-t border-white/10 flex flex-wrap items-center gap-3">
           <button
@@ -15710,6 +16715,139 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       </div>
       )}
 
+      {/* ── New Onboarding Documents — same grid/drill-in as Onboarding Documents above, split into 4 audience groups instead of 3. ── */}
+      {activeTab === "newOnboardingDocuments" && newOnboardingSelectedEmployee && (
+        <OnboardingApplicantDocuments
+          companyId={companyId ?? ""}
+          profileId={newOnboardingSelectedEmployee.id}
+          profileName={newOnboardingSelectedEmployee.name}
+          categories={newOnboardingSelectedEmployee.docList}
+          onBack={() => setNewOnboardingSelectedEmployee(null)}
+        />
+      )}
+      {activeTab === "newOnboardingDocuments" && !newOnboardingSelectedEmployee && (
+      <div className="panel p-0 overflow-hidden">
+        <div className="px-4 py-4 border-b border-white/10 flex justify-between items-center">
+          <div>
+            <h2 className="font-semibold text-sm">New Onboarding Documents</h2>
+            <p className="text-[10px] text-muted-foreground mt-0.5">Click a cell to toggle whether that document has been collected.</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="flex rounded-md overflow-hidden border border-white/15 h-7.5">
+              <button type="button" onClick={() => setNewOnboardingGroup("TECHNICIAN_STAFF")} className={`px-4 text-xs font-medium transition-colors ${newOnboardingGroup === "TECHNICIAN_STAFF" ? "bg-blue-600 text-white" : "bg-transparent text-muted-foreground hover:text-foreground hover:bg-white/5"}`}>Technician Staff</button>
+              <button type="button" onClick={() => setNewOnboardingGroup("BRANCH_MANAGER_UP")} className={`px-4 text-xs font-medium transition-colors border-l border-white/15 ${newOnboardingGroup === "BRANCH_MANAGER_UP" ? "bg-blue-600 text-white" : "bg-transparent text-muted-foreground hover:text-foreground hover:bg-white/5"}`}>Branch Manager &amp; Above</button>
+              <button type="button" onClick={() => setNewOnboardingGroup("OFFICE_STAFF_US")} className={`px-4 text-xs font-medium transition-colors border-l border-white/15 ${newOnboardingGroup === "OFFICE_STAFF_US" ? "bg-blue-600 text-white" : "bg-transparent text-muted-foreground hover:text-foreground hover:bg-white/5"}`}>Office Staff US</button>
+              <button type="button" onClick={() => setNewOnboardingGroup("PHILIPPINES_STAFF")} className={`px-4 text-xs font-medium transition-colors border-l border-white/15 ${newOnboardingGroup === "PHILIPPINES_STAFF" ? "bg-blue-600 text-white" : "bg-transparent text-muted-foreground hover:text-foreground hover:bg-white/5"}`}>Philippines Staff</button>
+            </div>
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+              <input
+                type="text"
+                value={newOnboardingSearch}
+                onChange={(e) => setNewOnboardingSearch(e.target.value)}
+                placeholder="Search name…"
+                className="glass-input text-xs py-1.5 pl-8 pr-3 rounded-md w-40 h-7.5"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => { setAddColumnGroup(newOnboardingGroup); setNewColumnLabel(""); setAddColumnError(null); }}
+              className="btn text-xs px-3 py-1.5 h-7.5 flex items-center gap-1"
+            >
+              <Plus className="h-3.5 w-3.5" /> Add Column
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <table className="w-full table-fixed text-xs">
+            <thead>
+              <tr className="border-b border-white/10 bg-white/5">
+                <th className="px-1.5 py-2 text-left text-[10px] text-muted-foreground uppercase w-[9%]">Name</th>
+                {newOnboardingGroup === "BRANCH_MANAGER_UP" && (
+                  <th className="px-1.5 py-2 text-left text-[10px] text-muted-foreground uppercase w-[9%]">Role</th>
+                )}
+                <th className="px-1.5 py-2 text-left text-[10px] text-muted-foreground uppercase w-[7%]">{newOnboardingGroup === "PHILIPPINES_STAFF" ? "Dept." : "Branch"}</th>
+                {newOnboardingDocsForGroup(newOnboardingGroup).map((doc) => {
+                  const customCol = customOnboardingColumns.find((c) => c.groupKey === newOnboardingGroup && c.label === doc);
+                  const urgent = URGENT_ONBOARDING_COLUMN_LABELS.has(doc);
+                  return (
+                    <th
+                      key={doc}
+                      className={`px-1 py-2 text-center text-[9px] leading-tight uppercase break-words ${
+                        urgent ? "bg-red-500/20 text-red-200" : "text-muted-foreground"
+                      }`}
+                    >
+                      {doc}
+                      {customCol && (
+                        <button
+                          type="button"
+                          onClick={() => void handleRemoveOnboardingColumn(customCol)}
+                          title="Remove this column"
+                          className="ml-1 text-muted-foreground hover:text-red-300 normal-case"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {newOnboardingEmployees.length === 0 ? (
+                <tr><td colSpan={(newOnboardingGroup === "BRANCH_MANAGER_UP" ? 3 : 2) + newOnboardingDocsForGroup(newOnboardingGroup).length} className="px-3 py-6 text-center text-muted-foreground text-xs">{employeesLoading ? "Loading employees…" : `No ${newOnboardingGroup === "TECHNICIAN_STAFF" ? "Technician Staff" : newOnboardingGroup === "BRANCH_MANAGER_UP" ? "Branch Manager & Above" : newOnboardingGroup === "OFFICE_STAFF_US" ? "Office Staff US" : "Philippines Staff"} employees found.`}</td></tr>
+              ) : (
+                newOnboardingEmployees.map((employee) => (
+                  <tr key={employee.id} className="border-b border-white/5 hover:bg-white/5">
+                    <td className="px-1.5 py-1.5 font-medium truncate" title={employee.name}>
+                      <button
+                        type="button"
+                        onClick={() => setNewOnboardingSelectedEmployee({ id: employee.id, name: employee.name, docList: getNewOnboardingDocListForEmployee(employee) })}
+                        className="text-blue-300 hover:text-blue-200 hover:underline truncate text-left"
+                      >
+                        {employee.name}
+                      </button>
+                    </td>
+                    {newOnboardingGroup === "BRANCH_MANAGER_UP" && (
+                      <td className="px-1.5 py-1.5 text-muted-foreground truncate" title={branchManagerRoleLabelForEmployee(employee)}>
+                        {branchManagerRoleLabelForEmployee(employee)}
+                      </td>
+                    )}
+                    <td className="px-1.5 py-1.5 text-muted-foreground truncate" title={newOnboardingGroup === "PHILIPPINES_STAFF" ? (ROLE_LABELS[normalizeRole(employee.position)] ?? employee.position) : employee.branch}>
+                      {(newOnboardingGroup === "PHILIPPINES_STAFF" ? (ROLE_LABELS[normalizeRole(employee.position)] ?? employee.position) : employee.branch) || "—"}
+                    </td>
+                    {newOnboardingDocsForGroup(newOnboardingGroup).map((doc) => {
+                      const done = !!newOnboardingDocCategoriesByProfile.get(employee.id)?.has(doc);
+                      const viaSignature = !!newOnboardingSignedLabelsByProfile.get(employee.id)?.has(doc);
+                      return (
+                        <td key={doc} className="px-0.5 py-0.5 text-center">
+                          <button
+                            type="button"
+                            title={
+                              viaSignature
+                                ? `${doc} — already e-signed through the app; click to file a copy too if you have one`
+                                : done
+                                ? `${doc} is filed — click to view`
+                                : `${doc} is missing — click to upload or link it`
+                            }
+                            onClick={() => setNewOnboardingSelectedEmployee({ id: employee.id, name: employee.name, docList: getNewOnboardingDocListForEmployee(employee) })}
+                            className={`w-full px-1 py-1.5 rounded text-[9px] font-bold transition-colors ${done ? "bg-green-500/20 text-green-300 hover:bg-green-500/30" : "bg-red-500/20 text-red-300 hover:bg-red-500/30"}`}
+                          >
+                            {done ? "YES" : "NO"}
+                          </button>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      )}
+
       {/* Add Column dialog — new document category for the group open when the button was clicked, works exactly like the built-in columns once saved (free-text category, matched the same way on the checklist grid and the per-employee Documents page). */}
       {addColumnGroup && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setAddColumnGroup(null)}>
@@ -15718,7 +16856,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
             <p className="text-sm text-muted-foreground mb-4">
               New document column for{" "}
               <span className="font-semibold text-white">
-                {addColumnGroup === "PH" ? "Philippines" : addColumnGroup === "TECHNICIAN" ? "Technician" : "Parts Manager"}
+                {ONBOARDING_GROUP_KEY_LABELS[addColumnGroup]}
               </span>
               . It works exactly like the others — upload or link a file for it from each employee's Documents page.
             </p>
@@ -17414,8 +18552,9 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       </>
       )}
 
-      {activeTab === "w8ben" && (
+      {(activeTab === "w8ben" || activeTab === "newW4" || activeTab === "newW8ben") && (
       <>
+      {activeTab === "w8ben" && (
       <div className="flex gap-2 mt-4">
         {(["w8ben", "w4", "w9", "w4r"] as const).map((ft) => (
           <button
@@ -17430,6 +18569,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
           </button>
         ))}
       </div>
+      )}
 
       {w8FormType === "w8ben" && (
       <>
@@ -17570,10 +18710,10 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
               </tr>
             </thead>
             <tbody>
-              {sentW8benForms.length === 0 ? (
+              {visibleW8benForms.length === 0 ? (
                 <tr><td colSpan={5} className="px-4 py-8 text-center text-muted-foreground text-sm">No W-8BEN requests sent yet.</td></tr>
               ) : (
-                sentW8benForms.map((doc) => {
+                visibleW8benForms.map((doc) => {
                   const data = doc.formData as Partial<W8benFormData>;
                   const recipient = employees.find((e) => e.id === doc.recipientId);
                   const busy = w8ActionBusyId === doc.id;
@@ -17772,10 +18912,10 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
               </tr>
             </thead>
             <tbody>
-              {sentW4Forms.length === 0 ? (
+              {visibleW4Forms.length === 0 ? (
                 <tr><td colSpan={5} className="px-4 py-8 text-center text-muted-foreground text-sm">No W-4 requests sent yet.</td></tr>
               ) : (
-                sentW4Forms.map((doc) => {
+                visibleW4Forms.map((doc) => {
                   const data = doc.formData as Partial<W4FormData>;
                   const recipient = employees.find((e) => e.id === doc.recipientId);
                   const employeeName = `${data.firstNameMiddleInitial ?? ""} ${data.lastName ?? ""}`.trim();
@@ -18249,7 +19389,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       </>
       )}
 
-      {activeTab === "i9" && (
+      {(activeTab === "i9" || activeTab === "newI9") && (
       <>
       <div className="panel p-0 overflow-visible mt-4 relative z-20">
         <div className="px-4 py-4 border-b border-white/10">
@@ -18388,10 +19528,10 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
               </tr>
             </thead>
             <tbody>
-              {sentI9Forms.length === 0 ? (
+              {visibleI9Forms.length === 0 ? (
                 <tr><td colSpan={5} className="px-4 py-8 text-center text-muted-foreground text-sm">No I-9 requests sent yet.</td></tr>
               ) : (
-                sentI9Forms.map((doc) => {
+                visibleI9Forms.map((doc) => {
                   const data = doc.formData as Partial<I9FormData>;
                   const recipient = employees.find((e) => e.id === doc.recipientId);
                   const busy = i9ActionBusyId === doc.id;
@@ -20943,6 +22083,620 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
         </div>
       )}
 
+      {activeTab === "masterW2OfficeAgreement" && (
+      <>
+      <div className="panel p-0 overflow-visible mt-4 relative z-20">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Send Master W-2 Office Agreement Request</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Pick a teammate — they'll get a link to fill in their info and sign. Once they submit, it lands back here for HR to add the employer signature. Covers wage/overtime, multi-state compliance, equipment & data security, conduct & substance screening, property damage, confidentiality, and at-will employment in one document.</p>
+        </div>
+        <div className="p-4 flex flex-col md:flex-row gap-6">
+          <div className="flex flex-col gap-3 w-full md:max-w-sm md:shrink-0">
+            <div className="flex flex-col gap-1 relative">
+              <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recipient (AHS teammate)</label>
+              <input
+                type="text"
+                value={masterW2OfficeAgreementRecipientSearch}
+                onChange={(e) => { setMasterW2OfficeAgreementRecipientSearch(e.target.value); setMasterW2OfficeAgreementRecipientId(""); setMasterW2OfficeAgreementRecipientDropdownOpen(true); }}
+                onFocus={() => setMasterW2OfficeAgreementRecipientDropdownOpen(true)}
+                onBlur={() => setTimeout(() => setMasterW2OfficeAgreementRecipientDropdownOpen(false), 150)}
+                placeholder="Search a teammate…"
+                className="glass-input text-sm py-1.5 px-3 rounded-md"
+              />
+              {masterW2OfficeAgreementRecipientDropdownOpen && (
+                <div className="absolute z-50 top-full mt-1 w-full max-h-96 overflow-y-auto rounded-md border border-white/15 bg-slate-900 shadow-2xl">
+                  {filteredMasterW2OfficeAgreementRecipients.length === 0 ? (
+                    <p className="px-3 py-2 text-xs text-muted-foreground">No matching teammates.</p>
+                  ) : (
+                    filteredMasterW2OfficeAgreementRecipients.map((e) => (
+                      <button
+                        key={e.id}
+                        type="button"
+                        onMouseDown={(ev) => ev.preventDefault()}
+                        onClick={() => {
+                          setMasterW2OfficeAgreementRecipientId(e.id);
+                          setMasterW2OfficeAgreementRecipientSearch(`${e.name} — ${ROLE_LABELS[normalizeRole(e.position)] ?? e.position}`);
+                          setMasterW2OfficeAgreementRecipientDropdownOpen(false);
+                        }}
+                        className={`w-full text-left px-3 py-2 text-sm hover:bg-white/10 ${masterW2OfficeAgreementRecipientId === e.id ? "bg-blue-500/20 text-blue-300" : ""}`}
+                      >
+                        {e.name} <span className="text-muted-foreground text-xs">— {ROLE_LABELS[normalizeRole(e.position)] ?? e.position}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+
+            {masterW2OfficeAgreementSendError && (
+              <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{masterW2OfficeAgreementSendError}</p>
+            )}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={toggleMasterW2OfficeAgreementPreview}
+                className="btn text-sm px-4 py-2 flex items-center gap-1.5"
+              >
+                Preview <ChevronDown className={`h-3.5 w-3.5 transition-transform ${masterW2OfficeAgreementPreviewExpanded ? "rotate-180" : ""}`} />
+              </button>
+              <button
+                onClick={handleSendMasterW2OfficeAgreement}
+                disabled={!masterW2OfficeAgreementRecipientId || masterW2OfficeAgreementSending}
+                className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
+              >
+                {masterW2OfficeAgreementSending ? "Sending…" : "Send Request"}
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 min-w-0">
+            {masterW2OfficeAgreementPreviewExpanded ? (
+              <div className="border border-white/10 rounded-md overflow-hidden bg-white/5 h-full" style={{ minHeight: 560 }}>
+                {masterW2OfficeAgreementPreviewLoading || !masterW2OfficeAgreementPreviewPdfUrl ? (
+                  <div className="h-full flex items-center justify-center text-sm text-muted-foreground" style={{ minHeight: 560 }}>Loading preview…</div>
+                ) : (
+                  <iframe src={masterW2OfficeAgreementPreviewPdfUrl} title="Master W-2 Office Agreement Preview" className="w-full border-0" style={{ height: 560 }} />
+                )}
+              </div>
+            ) : (
+              <div className="border border-dashed border-white/15 rounded-md flex items-center justify-center text-sm text-muted-foreground" style={{ minHeight: 560 }}>
+                Click "Preview" to see the document here.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="panel p-0 overflow-hidden mt-4">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Sent Master W-2 Office Agreement Forms</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Track completion status. "Awaiting Employer Signature" means the employee finished — add your signature to finalize.</p>
+        </div>
+        <div className="px-4 py-3 border-b border-white/10 bg-white/5 flex flex-wrap items-end gap-3">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+            <input
+              type="text"
+              value={masterW2OfficeAgreementSentSearch}
+              onChange={(e) => setMasterW2OfficeAgreementSentSearch(e.target.value)}
+              placeholder="Name or branch…"
+              className="glass-input text-sm py-1.5 pl-8 pr-3 rounded-md w-56"
+            />
+          </div>
+          {masterW2OfficeAgreementSentSearch && (
+            <button onClick={() => setMasterW2OfficeAgreementSentSearch("")} className="btn text-sm px-3 py-1.5">Clear</button>
+          )}
+          <span className="text-xs text-muted-foreground mb-1.5 ml-auto">
+            {sortedSentMasterW2OfficeAgreementForms.length}{masterW2OfficeAgreementSentSearch ? ` of ${sentMasterW2OfficeAgreementForms.length}` : ""} forms
+          </span>
+        </div>
+        {masterW2OfficeAgreementActionError && (
+          <p className="mx-4 mt-3 text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{masterW2OfficeAgreementActionError}</p>
+        )}
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-white/10 bg-white/5">
+                <SortableTh column="employee" label="Employee" sortColumn={masterW2OfficeAgreementSentSortColumn} sortDir={masterW2OfficeAgreementSentSortDir} onSort={handleMasterW2OfficeAgreementSentSort} />
+                <FilterableTh
+                  column="branch" label="Branch"
+                  sortColumn={masterW2OfficeAgreementSentSortColumn} sortDir={masterW2OfficeAgreementSentSortDir} onSort={handleMasterW2OfficeAgreementSentSort}
+                  options={masterW2OfficeAgreementFilterOptionsFor("branch")}
+                  isChecked={(v) => masterW2OfficeAgreementIsValueChecked("branch", v)}
+                  onToggleValue={(v) => masterW2OfficeAgreementToggleFilterValue("branch", v)}
+                  onClear={() => masterW2OfficeAgreementClearColumnFilter("branch")}
+                  isFiltered={masterW2OfficeAgreementIsColumnFiltered("branch")}
+                />
+                <FilterableTh
+                  column="sentBy" label="Sent By"
+                  sortColumn={masterW2OfficeAgreementSentSortColumn} sortDir={masterW2OfficeAgreementSentSortDir} onSort={handleMasterW2OfficeAgreementSentSort}
+                  options={masterW2OfficeAgreementFilterOptionsFor("sentBy")}
+                  isChecked={(v) => masterW2OfficeAgreementIsValueChecked("sentBy", v)}
+                  onToggleValue={(v) => masterW2OfficeAgreementToggleFilterValue("sentBy", v)}
+                  onClear={() => masterW2OfficeAgreementClearColumnFilter("sentBy")}
+                  isFiltered={masterW2OfficeAgreementIsColumnFiltered("sentBy")}
+                />
+                <FilterableTh
+                  column="status" label="Status"
+                  sortColumn={masterW2OfficeAgreementSentSortColumn} sortDir={masterW2OfficeAgreementSentSortDir} onSort={handleMasterW2OfficeAgreementSentSort}
+                  options={masterW2OfficeAgreementFilterOptionsFor("status")}
+                  isChecked={(v) => masterW2OfficeAgreementIsValueChecked("status", v)}
+                  onToggleValue={(v) => masterW2OfficeAgreementToggleFilterValue("status", v)}
+                  onClear={() => masterW2OfficeAgreementClearColumnFilter("status")}
+                  isFiltered={masterW2OfficeAgreementIsColumnFiltered("status")}
+                />
+                <SortableTh column="sent" label="Sent" sortColumn={masterW2OfficeAgreementSentSortColumn} sortDir={masterW2OfficeAgreementSentSortDir} onSort={handleMasterW2OfficeAgreementSentSort} />
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">ID Documents</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedSentMasterW2OfficeAgreementForms.length === 0 ? (
+                <tr><td colSpan={7} className="px-4 py-8 text-center text-muted-foreground text-sm">{sentMasterW2OfficeAgreementForms.length === 0 ? "No requests sent yet." : "No forms match this search/filter."}</td></tr>
+              ) : (
+                sortedSentMasterW2OfficeAgreementForms.map((doc) => {
+                  const data = doc.formData as Partial<MasterW2OfficeAgreementFormData>;
+                  const recipient = employees.find((e) => e.id === doc.recipientId);
+                  const busy = masterW2OfficeAgreementActionBusyId === doc.id;
+                  const awaitingEmployer = isAwaitingEmployerStep(doc);
+                  return (
+                    <tr key={doc.id} className="border-b border-white/5 hover:bg-white/5">
+                      <td className="px-4 py-3 font-medium">
+                        {doc.pdfUrl ? (
+                          <button type="button" onClick={() => setMasterW2OfficeAgreementDocPreview(doc)} className="text-blue-300 hover:text-blue-200 hover:underline text-left">
+                            {data.employeeName || recipient?.name || doc.recipientName || "—"}
+                          </button>
+                        ) : (
+                          data.employeeName || recipient?.name || doc.recipientName || "—"
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-muted-foreground">{data.branch || "—"}</td>
+                      <td className="px-4 py-3 text-muted-foreground">{doc.createdByName ?? "—"}</td>
+                      <td className="px-4 py-3">
+                        <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                          doc.status === "confirmed" ? "bg-green-500/20 text-green-300"
+                          : awaitingEmployer ? "bg-orange-500/20 text-orange-300"
+                          : doc.status === "cancelled" ? "bg-slate-500/20 text-slate-400"
+                          : "bg-yellow-500/20 text-yellow-300"
+                        }`}>
+                          {masterW2OfficeAgreementStatusLabel(doc)}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{new Date(doc.createdAt).toLocaleDateString()}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {data.licensePhotoPath && (
+                            <button
+                              type="button"
+                              onClick={() => getTechnicianIdDocumentUrl(data.licensePhotoPath!).then((url) => window.open(url, "_blank", "noopener,noreferrer")).catch((err) => setMasterW2OfficeAgreementActionError(err instanceof Error ? err.message : "Failed to open license photo."))}
+                              className="text-blue-300 hover:text-blue-200 underline text-xs"
+                            >
+                              License
+                            </button>
+                          )}
+                          {data.ssnCardPhotoPath && (
+                            <button
+                              type="button"
+                              onClick={() => getTechnicianIdDocumentUrl(data.ssnCardPhotoPath!).then((url) => window.open(url, "_blank", "noopener,noreferrer")).catch((err) => setMasterW2OfficeAgreementActionError(err instanceof Error ? err.message : "Failed to open SSN card photo."))}
+                              className="text-blue-300 hover:text-blue-200 underline text-xs"
+                            >
+                              SSN Card
+                            </button>
+                          )}
+                          {!data.licensePhotoPath && !data.ssnCardPhotoPath && <span className="text-muted-foreground text-xs">—</span>}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {doc.status === "pending_signature" && doc.recipientSlot === "employee" && (
+                            <button type="button" onClick={() => handleCopyMasterW2OfficeAgreementLink(doc)} className="btn text-[10px] px-2 py-1">
+                              Copy Link
+                            </button>
+                          )}
+                          {awaitingEmployer && (
+                            <>
+                              <button type="button" onClick={() => handleOpenMasterW2OfficeAgreementEmployerDialog(doc)} className="btn text-[10px] px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white">
+                                Add Employer Signature →
+                              </button>
+                              <button type="button" onClick={() => handleOpenEmployerReassign(doc)} className="btn text-[10px] px-2 py-1">
+                                Send to Employer
+                              </button>
+                            </>
+                          )}
+                          {doc.pdfUrl && (
+                            <button type="button" onClick={() => handleDownloadMasterW2OfficeAgreementPdf(doc)} className="text-blue-300 hover:text-blue-200 underline text-xs">
+                              Download PDF
+                            </button>
+                          )}
+                          {doc.status === "confirmed" && (
+                            <button type="button" onClick={() => handleReopenMasterW2OfficeAgreementEmployer(doc)} className="btn text-[10px] px-2 py-1" title="Redo the employer signature — keeps the employee's original signature">
+                              Re-sign
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => handleDeleteMasterW2OfficeAgreement(doc)}
+                            title="Permanently delete this request"
+                            className="text-muted-foreground hover:text-red-300 disabled:opacity-50"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      </>
+      )}
+
+      {masterW2OfficeAgreementEmployerDialog && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-800 border border-white/10 rounded-lg p-6 max-w-sm w-full">
+            <h3 className="text-lg font-bold mb-2">Add Employer Signature</h3>
+            <p className="text-sm text-muted-foreground mb-4">
+              Employer representative signature for{" "}
+              <span className="font-semibold text-white">{(masterW2OfficeAgreementEmployerDialog.formData as Partial<MasterW2OfficeAgreementFormData>).employeeName || "—"}</span>'s
+              Master W-2 Office &amp; Logistics Comprehensive Policy, Conduct &amp; Agreement.
+            </p>
+
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2 block">Add your signature</label>
+            <canvas
+              {...masterW2OfficeAgreementEmployerSigPad.canvasProps}
+              className={`bg-white rounded-md border border-white/15 w-full ${masterW2OfficeAgreementEmployerSigPad.canvasProps.className}`}
+            />
+            <div className="flex justify-center mt-2">
+              <SignaturePadControls pad={masterW2OfficeAgreementEmployerSigPad} />
+            </div>
+
+            {masterW2OfficeAgreementEmployerError && (
+              <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2 mt-3">{masterW2OfficeAgreementEmployerError}</p>
+            )}
+            <div className="flex gap-2 justify-end mt-4">
+              <button onClick={() => setMasterW2OfficeAgreementEmployerDialog(null)} className="btn text-sm px-4 py-2">Cancel</button>
+              <button
+                onClick={handleSaveMasterW2OfficeAgreementEmployerSignature}
+                disabled={masterW2OfficeAgreementEmployerSaving}
+                className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
+              >
+                {masterW2OfficeAgreementEmployerSaving ? "Saving…" : "Complete & Sign"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Master W-2 Office Agreement Sent History PDF preview — same inline-frame pattern used for the other Sent History tables */}
+      {masterW2OfficeAgreementDocPreview && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setMasterW2OfficeAgreementDocPreview(null)}>
+          <div className="bg-slate-900 border border-white/10 rounded-lg shadow-2xl w-full max-w-6xl h-[92vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold">{(masterW2OfficeAgreementDocPreview.formData as Partial<MasterW2OfficeAgreementFormData>).employeeName || "—"}</p>
+                <p className="text-[10px] text-muted-foreground">
+                  {masterW2OfficeAgreementDocPreview.status === "confirmed" ? "Completed" : "Submitted"} {new Date(masterW2OfficeAgreementDocPreview.signedAt ?? masterW2OfficeAgreementDocPreview.createdAt).toLocaleString()}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {masterW2OfficeAgreementDocPreview.pdfUrl && (
+                  <a href={masterW2OfficeAgreementDocPreview.pdfUrl} target="_blank" rel="noopener noreferrer" className="btn text-xs px-2.5 py-1.5 flex items-center gap-1"><Download className="h-3 w-3" /> Download</a>
+                )}
+                <button type="button" onClick={() => setMasterW2OfficeAgreementDocPreview(null)} className="btn text-xs px-2.5 py-1.5">Close</button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-hidden bg-slate-950">
+              {masterW2OfficeAgreementDocPreview.pdfUrl && <iframe src={masterW2OfficeAgreementDocPreview.pdfUrl} title="Master W-2 Office Agreement" className="w-full h-full min-h-[70vh] border-0" />}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === "masterPhContractorAgreement" && (
+      <>
+      <div className="panel p-0 overflow-visible mt-4 relative z-20">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Send Master PH Contractor Agreement Request</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Pick a teammate — they'll get a link to fill in their info and sign. Once they submit, it lands back here for HR to add the employer signature. Covers the independent-contractor relationship, confidentiality/NDA, the PH off-days & leave policy, and governing law/e-signature terms in one document.</p>
+        </div>
+        <div className="p-4 flex flex-col md:flex-row gap-6">
+          <div className="flex flex-col gap-3 w-full md:max-w-sm md:shrink-0">
+            <div className="flex flex-col gap-1 relative">
+              <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recipient (AHS teammate)</label>
+              <input
+                type="text"
+                value={masterPhContractorAgreementRecipientSearch}
+                onChange={(e) => { setMasterPhContractorAgreementRecipientSearch(e.target.value); setMasterPhContractorAgreementRecipientId(""); setMasterPhContractorAgreementRecipientDropdownOpen(true); }}
+                onFocus={() => setMasterPhContractorAgreementRecipientDropdownOpen(true)}
+                onBlur={() => setTimeout(() => setMasterPhContractorAgreementRecipientDropdownOpen(false), 150)}
+                placeholder="Search a teammate…"
+                className="glass-input text-sm py-1.5 px-3 rounded-md"
+              />
+              {masterPhContractorAgreementRecipientDropdownOpen && (
+                <div className="absolute z-50 top-full mt-1 w-full max-h-96 overflow-y-auto rounded-md border border-white/15 bg-slate-900 shadow-2xl">
+                  {filteredMasterPhContractorAgreementRecipients.length === 0 ? (
+                    <p className="px-3 py-2 text-xs text-muted-foreground">No matching teammates.</p>
+                  ) : (
+                    filteredMasterPhContractorAgreementRecipients.map((e) => (
+                      <button
+                        key={e.id}
+                        type="button"
+                        onMouseDown={(ev) => ev.preventDefault()}
+                        onClick={() => {
+                          setMasterPhContractorAgreementRecipientId(e.id);
+                          setMasterPhContractorAgreementRecipientSearch(`${e.name} — ${ROLE_LABELS[normalizeRole(e.position)] ?? e.position}`);
+                          setMasterPhContractorAgreementRecipientDropdownOpen(false);
+                        }}
+                        className={`w-full text-left px-3 py-2 text-sm hover:bg-white/10 ${masterPhContractorAgreementRecipientId === e.id ? "bg-blue-500/20 text-blue-300" : ""}`}
+                      >
+                        {e.name} <span className="text-muted-foreground text-xs">— {ROLE_LABELS[normalizeRole(e.position)] ?? e.position}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+
+            {masterPhContractorAgreementSendError && (
+              <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{masterPhContractorAgreementSendError}</p>
+            )}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={toggleMasterPhContractorAgreementPreview}
+                className="btn text-sm px-4 py-2 flex items-center gap-1.5"
+              >
+                Preview <ChevronDown className={`h-3.5 w-3.5 transition-transform ${masterPhContractorAgreementPreviewExpanded ? "rotate-180" : ""}`} />
+              </button>
+              <button
+                onClick={handleSendMasterPhContractorAgreement}
+                disabled={!masterPhContractorAgreementRecipientId || masterPhContractorAgreementSending}
+                className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
+              >
+                {masterPhContractorAgreementSending ? "Sending…" : "Send Request"}
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 min-w-0">
+            {masterPhContractorAgreementPreviewExpanded ? (
+              <div className="border border-white/10 rounded-md overflow-hidden bg-white/5 h-full" style={{ minHeight: 560 }}>
+                {masterPhContractorAgreementPreviewLoading || !masterPhContractorAgreementPreviewPdfUrl ? (
+                  <div className="h-full flex items-center justify-center text-sm text-muted-foreground" style={{ minHeight: 560 }}>Loading preview…</div>
+                ) : (
+                  <iframe src={masterPhContractorAgreementPreviewPdfUrl} title="Master PH Contractor Agreement Preview" className="w-full border-0" style={{ height: 560 }} />
+                )}
+              </div>
+            ) : (
+              <div className="border border-dashed border-white/15 rounded-md flex items-center justify-center text-sm text-muted-foreground" style={{ minHeight: 560 }}>
+                Click "Preview" to see the document here.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="panel p-0 overflow-hidden mt-4">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Sent Master PH Contractor Agreement Forms</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Track completion status. "Awaiting Employer Signature" means the contractor finished — add your signature to finalize.</p>
+        </div>
+        <div className="px-4 py-3 border-b border-white/10 bg-white/5 flex flex-wrap items-end gap-3">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+            <input
+              type="text"
+              value={masterPhContractorAgreementSentSearch}
+              onChange={(e) => setMasterPhContractorAgreementSentSearch(e.target.value)}
+              placeholder="Name or nationality…"
+              className="glass-input text-sm py-1.5 pl-8 pr-3 rounded-md w-56"
+            />
+          </div>
+          {masterPhContractorAgreementSentSearch && (
+            <button onClick={() => setMasterPhContractorAgreementSentSearch("")} className="btn text-sm px-3 py-1.5">Clear</button>
+          )}
+          <span className="text-xs text-muted-foreground mb-1.5 ml-auto">
+            {sortedSentMasterPhContractorAgreementForms.length}{masterPhContractorAgreementSentSearch ? ` of ${sentMasterPhContractorAgreementForms.length}` : ""} forms
+          </span>
+        </div>
+        {masterPhContractorAgreementActionError && (
+          <p className="mx-4 mt-3 text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{masterPhContractorAgreementActionError}</p>
+        )}
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-white/10 bg-white/5">
+                <SortableTh column="employee" label="Employee" sortColumn={masterPhContractorAgreementSentSortColumn} sortDir={masterPhContractorAgreementSentSortDir} onSort={handleMasterPhContractorAgreementSentSort} />
+                <FilterableTh
+                  column="nationality" label="Nationality"
+                  sortColumn={masterPhContractorAgreementSentSortColumn} sortDir={masterPhContractorAgreementSentSortDir} onSort={handleMasterPhContractorAgreementSentSort}
+                  options={masterPhContractorAgreementFilterOptionsFor("nationality")}
+                  isChecked={(v) => masterPhContractorAgreementIsValueChecked("nationality", v)}
+                  onToggleValue={(v) => masterPhContractorAgreementToggleFilterValue("nationality", v)}
+                  onClear={() => masterPhContractorAgreementClearColumnFilter("nationality")}
+                  isFiltered={masterPhContractorAgreementIsColumnFiltered("nationality")}
+                />
+                <FilterableTh
+                  column="sentBy" label="Sent By"
+                  sortColumn={masterPhContractorAgreementSentSortColumn} sortDir={masterPhContractorAgreementSentSortDir} onSort={handleMasterPhContractorAgreementSentSort}
+                  options={masterPhContractorAgreementFilterOptionsFor("sentBy")}
+                  isChecked={(v) => masterPhContractorAgreementIsValueChecked("sentBy", v)}
+                  onToggleValue={(v) => masterPhContractorAgreementToggleFilterValue("sentBy", v)}
+                  onClear={() => masterPhContractorAgreementClearColumnFilter("sentBy")}
+                  isFiltered={masterPhContractorAgreementIsColumnFiltered("sentBy")}
+                />
+                <FilterableTh
+                  column="status" label="Status"
+                  sortColumn={masterPhContractorAgreementSentSortColumn} sortDir={masterPhContractorAgreementSentSortDir} onSort={handleMasterPhContractorAgreementSentSort}
+                  options={masterPhContractorAgreementFilterOptionsFor("status")}
+                  isChecked={(v) => masterPhContractorAgreementIsValueChecked("status", v)}
+                  onToggleValue={(v) => masterPhContractorAgreementToggleFilterValue("status", v)}
+                  onClear={() => masterPhContractorAgreementClearColumnFilter("status")}
+                  isFiltered={masterPhContractorAgreementIsColumnFiltered("status")}
+                />
+                <SortableTh column="sent" label="Sent" sortColumn={masterPhContractorAgreementSentSortColumn} sortDir={masterPhContractorAgreementSentSortDir} onSort={handleMasterPhContractorAgreementSentSort} />
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">ID Document</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedSentMasterPhContractorAgreementForms.length === 0 ? (
+                <tr><td colSpan={7} className="px-4 py-8 text-center text-muted-foreground text-sm">{sentMasterPhContractorAgreementForms.length === 0 ? "No requests sent yet." : "No forms match this search/filter."}</td></tr>
+              ) : (
+                sortedSentMasterPhContractorAgreementForms.map((doc) => {
+                  const data = doc.formData as Partial<MasterPhContractorAgreementFormData>;
+                  const recipient = employees.find((e) => e.id === doc.recipientId);
+                  const busy = masterPhContractorAgreementActionBusyId === doc.id;
+                  const awaitingEmployer = isAwaitingEmployerStep(doc);
+                  return (
+                    <tr key={doc.id} className="border-b border-white/5 hover:bg-white/5">
+                      <td className="px-4 py-3 font-medium">
+                        {doc.pdfUrl ? (
+                          <button type="button" onClick={() => setMasterPhContractorAgreementDocPreview(doc)} className="text-blue-300 hover:text-blue-200 hover:underline text-left">
+                            {data.employeeName || recipient?.name || doc.recipientName || "—"}
+                          </button>
+                        ) : (
+                          data.employeeName || recipient?.name || doc.recipientName || "—"
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-muted-foreground">{data.nationality || "—"}</td>
+                      <td className="px-4 py-3 text-muted-foreground">{doc.createdByName ?? "—"}</td>
+                      <td className="px-4 py-3">
+                        <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                          doc.status === "confirmed" ? "bg-green-500/20 text-green-300"
+                          : awaitingEmployer ? "bg-orange-500/20 text-orange-300"
+                          : doc.status === "cancelled" ? "bg-slate-500/20 text-slate-400"
+                          : "bg-yellow-500/20 text-yellow-300"
+                        }`}>
+                          {masterPhContractorAgreementStatusLabel(doc)}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{new Date(doc.createdAt).toLocaleDateString()}</td>
+                      <td className="px-4 py-3">
+                        {data.governmentIdPhotoPath ? (
+                          <button
+                            type="button"
+                            onClick={() => getTechnicianIdDocumentUrl(data.governmentIdPhotoPath!).then((url) => window.open(url, "_blank", "noopener,noreferrer")).catch((err) => setMasterPhContractorAgreementActionError(err instanceof Error ? err.message : "Failed to open ID photo."))}
+                            className="text-blue-300 hover:text-blue-200 underline text-xs"
+                          >
+                            View ID
+                          </button>
+                        ) : (
+                          <span className="text-muted-foreground text-xs">—</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {doc.status === "pending_signature" && doc.recipientSlot === "employee" && (
+                            <button type="button" onClick={() => handleCopyMasterPhContractorAgreementLink(doc)} className="btn text-[10px] px-2 py-1">
+                              Copy Link
+                            </button>
+                          )}
+                          {awaitingEmployer && (
+                            <>
+                              <button type="button" onClick={() => handleOpenMasterPhContractorAgreementEmployerDialog(doc)} className="btn text-[10px] px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white">
+                                Add Employer Signature →
+                              </button>
+                              <button type="button" onClick={() => handleOpenEmployerReassign(doc)} className="btn text-[10px] px-2 py-1">
+                                Send to Employer
+                              </button>
+                            </>
+                          )}
+                          {doc.pdfUrl && (
+                            <button type="button" onClick={() => handleDownloadMasterPhContractorAgreementPdf(doc)} className="text-blue-300 hover:text-blue-200 underline text-xs">
+                              Download PDF
+                            </button>
+                          )}
+                          {doc.status === "confirmed" && (
+                            <button type="button" onClick={() => handleReopenMasterPhContractorAgreementEmployer(doc)} className="btn text-[10px] px-2 py-1" title="Redo the employer signature — keeps the contractor's original signature">
+                              Re-sign
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => handleDeleteMasterPhContractorAgreement(doc)}
+                            title="Permanently delete this request"
+                            className="text-muted-foreground hover:text-red-300 disabled:opacity-50"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      </>
+      )}
+
+      {masterPhContractorAgreementEmployerDialog && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-800 border border-white/10 rounded-lg p-6 max-w-sm w-full">
+            <h3 className="text-lg font-bold mb-2">Add Employer Signature</h3>
+            <p className="text-sm text-muted-foreground mb-4">
+              Employer representative signature for{" "}
+              <span className="font-semibold text-white">{(masterPhContractorAgreementEmployerDialog.formData as Partial<MasterPhContractorAgreementFormData>).employeeName || "—"}</span>'s
+              Master Philippines Independent Contractor Comprehensive Agreement.
+            </p>
+
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2 block">Add your signature</label>
+            <canvas
+              {...masterPhContractorAgreementEmployerSigPad.canvasProps}
+              className={`bg-white rounded-md border border-white/15 w-full ${masterPhContractorAgreementEmployerSigPad.canvasProps.className}`}
+            />
+            <div className="flex justify-center mt-2">
+              <SignaturePadControls pad={masterPhContractorAgreementEmployerSigPad} />
+            </div>
+
+            {masterPhContractorAgreementEmployerError && (
+              <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2 mt-3">{masterPhContractorAgreementEmployerError}</p>
+            )}
+            <div className="flex gap-2 justify-end mt-4">
+              <button onClick={() => setMasterPhContractorAgreementEmployerDialog(null)} className="btn text-sm px-4 py-2">Cancel</button>
+              <button
+                onClick={handleSaveMasterPhContractorAgreementEmployerSignature}
+                disabled={masterPhContractorAgreementEmployerSaving}
+                className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
+              >
+                {masterPhContractorAgreementEmployerSaving ? "Saving…" : "Complete & Sign"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Master PH Contractor Agreement Sent History PDF preview — same inline-frame pattern used for the other Sent History tables */}
+      {masterPhContractorAgreementDocPreview && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setMasterPhContractorAgreementDocPreview(null)}>
+          <div className="bg-slate-900 border border-white/10 rounded-lg shadow-2xl w-full max-w-6xl h-[92vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold">{(masterPhContractorAgreementDocPreview.formData as Partial<MasterPhContractorAgreementFormData>).employeeName || "—"}</p>
+                <p className="text-[10px] text-muted-foreground">
+                  {masterPhContractorAgreementDocPreview.status === "confirmed" ? "Completed" : "Submitted"} {new Date(masterPhContractorAgreementDocPreview.signedAt ?? masterPhContractorAgreementDocPreview.createdAt).toLocaleString()}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {masterPhContractorAgreementDocPreview.pdfUrl && (
+                  <a href={masterPhContractorAgreementDocPreview.pdfUrl} target="_blank" rel="noopener noreferrer" className="btn text-xs px-2.5 py-1.5 flex items-center gap-1"><Download className="h-3 w-3" /> Download</a>
+                )}
+                <button type="button" onClick={() => setMasterPhContractorAgreementDocPreview(null)} className="btn text-xs px-2.5 py-1.5">Close</button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-hidden bg-slate-950">
+              {masterPhContractorAgreementDocPreview.pdfUrl && <iframe src={masterPhContractorAgreementDocPreview.pdfUrl} title="Master PH Contractor Agreement" className="w-full h-full min-h-[70vh] border-0" />}
+            </div>
+          </div>
+        </div>
+      )}
+
       {activeTab === "flashTechnicianTravel" && (
       <>
       <div className="panel p-0 overflow-visible mt-4 relative z-20">
@@ -22562,7 +24316,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       </>
       )}
 
-      {activeTab === "directDeposit" && (
+      {(activeTab === "directDeposit" || activeTab === "newDirectDeposit") && (
       <>
       <div className="panel p-0 overflow-visible mt-4 relative z-20">
         <div className="px-4 py-4 border-b border-white/10">
@@ -22702,10 +24456,10 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
               </tr>
             </thead>
             <tbody>
-              {sentDirectDepositForms.length === 0 ? (
+              {visibleDirectDepositForms.length === 0 ? (
                 <tr><td colSpan={6} className="px-4 py-8 text-center text-muted-foreground text-sm">No requests sent yet.</td></tr>
               ) : (
-                sentDirectDepositForms.map((doc) => {
+                visibleDirectDepositForms.map((doc) => {
                   const data = doc.formData as Partial<DirectDepositFormData>;
                   const recipient = employees.find((e) => e.id === doc.recipientId);
                   const busy = directDepositActionBusyId === doc.id;
