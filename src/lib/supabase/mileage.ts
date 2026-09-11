@@ -97,7 +97,7 @@ export interface MileageEntry {
   deleteReason: string | null;
   /** This ticket's OWN leg of the day's route — distance from the previous
    *  stop (or the branch, for the day's first stop) to this one, and ONLY
-   *  that leg (see homeLegMileage below, migration 0221, for the day's final
+   *  that leg (see homeLegMileage below, migration 0237, for the day's final
    *  drive home — never folded in here). Purely a display breakdown of
    *  totalMileage/mileageEffectiveTotal (which stays the shared day total
    *  payroll reads, unaffected by this) — summing every entry's legMileage
@@ -109,7 +109,7 @@ export interface MileageEntry {
   legMileage: number | null;
   /** The day's final "drive home" (or back-to-branch) distance — set ONLY
    *  on the day's actual last stop's row, null on every earlier stop.
-   *  Migration 0221: previously this was silently folded into that last
+   *  Migration 0237: previously this was silently folded into that last
    *  stop's own legMileage, which made a ticket that just happened to be
    *  scheduled last read as an inflated/wrong leg (confirmed live: a real
    *  7.5 mi leg showing as 43.6 mi with a 36.1 mi commute home baked in).
@@ -194,15 +194,24 @@ const PAGE_SIZE = 1000;
  * — and therefore the paging — deterministic. Same fix already applied to
  * getCompanyTickets() in tickets.ts for the identical reason.
  */
-export async function getMileageEntries(): Promise<MileageEntry[]> {
+/**
+ * @param branch When given, filters server-side to just that branch (an
+ *  `.eq("branch", branch)` on the query below) — used by AccountingDashboard's
+ *  Mileage tab so opening it doesn't have to pull every branch's entries just
+ *  to display one. Omit for the full company (still used by the background
+ *  no-photos payroll-hold reconciliation and the mileage report/CSV export,
+ *  which both need every branch regardless of what's on screen).
+ */
+export async function getMileageEntries(branch?: string): Promise<MileageEntry[]> {
   const all: MileageEntry[] = [];
   for (let from = 0; ; from += PAGE_SIZE) {
-    const { data, error } = await supabase
+    let query = supabase
       .from("mileage_entries")
       .select(ENTRY_COLUMNS)
       .order("work_date", { ascending: false })
-      .order("id", { ascending: true })
-      .range(from, from + PAGE_SIZE - 1);
+      .order("id", { ascending: true });
+    if (branch) query = query.eq("branch", branch);
+    const { data, error } = await query.range(from, from + PAGE_SIZE - 1);
     if (error) {
       console.error("getMileageEntries error:", error.message);
       return all;
@@ -950,7 +959,7 @@ async function syncMileageFromTicketsInner(
       const hasUnconfirmedArrivalOrder =
         tickets.some((t: any) => t.onsite_arrived_at) &&
         tickets.some((t) => (existingByTicketId.get(t.id)?.routeOrder ?? null) == null);
-      // One-time backfill for migration 0221 (home_leg_mileage): a day
+      // One-time backfill for migration 0237 (home_leg_mileage): a day
       // that's already order-confirmed (so hasUnconfirmedArrivalOrder above
       // won't catch it again) but has never had its drive-home distance
       // split out of leg_mileage — every existing row's home_leg_mileage is
@@ -1032,7 +1041,7 @@ async function processMileageDayGroup(
   // legMiles is index-aligned with orderedTickets/routeStops — ONLY this
   // ticket's own leg (previous stop -> this stop), null if it couldn't be
   // geocoded. The day's final drive-home distance is kept separate (see
-  // homeLegMileage below, migration 0221) rather than folded into
+  // homeLegMileage below, migration 0237) rather than folded into
   // whichever stop happens to be last. Purely a display breakdown;
   // roundedMiles (the day total) is still what payroll reads, unaffected
   // by either of these.
@@ -1309,7 +1318,7 @@ export async function recalculateMileageDayRoute(input: {
     const idx = orderIndexByTicketId.get(entry.ticketId);
     const legMiles = idx != null ? routeResult.legMiles[idx] : null;
     // Only the day's actual last stop carries the drive-home distance, on
-    // its own column — see homeLegMiles (migration 0221). Never folded into
+    // its own column — see homeLegMiles (migration 0237). Never folded into
     // leg_mileage, here or anywhere else it's computed.
     const homeLegMiles = idx === lastIdx ? routeResult.homeLegMiles : null;
     const { error } = await supabase

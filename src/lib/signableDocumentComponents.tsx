@@ -32,10 +32,14 @@ export const INTERNAL_SIGNABLE_DOCUMENT_COMPONENTS: Record<SignableDocumentType,
   location_consent: lazy(() => import("@/components/FillLocationConsentPage").then((m) => ({ default: m.FillLocationConsentPage }))),
   damage: lazy(() => import("@/components/FillDamagePage").then((m) => ({ default: m.FillDamagePage }))),
   contractor_data: lazy(() => import("@/components/FillContractorDataPage").then((m) => ({ default: m.FillContractorDataPage }))),
+  contractor_data_us: lazy(() => import("@/components/FillContractorDataUsPage").then((m) => ({ default: m.FillContractorDataUsPage }))),
   direct_deposit: lazy(() => import("@/components/FillDirectDepositPage").then((m) => ({ default: m.FillDirectDepositPage }))),
   substance_screening: lazy(() => import("@/components/FillSubstanceScreeningPage").then((m) => ({ default: m.FillSubstanceScreeningPage }))),
   flash_technician_travel: lazy(() => import("@/components/FillFlashTechnicianTravelPage").then((m) => ({ default: m.FillFlashTechnicianTravelPage }))),
+  nda_form: lazy(() => import("@/components/SignNdaFormPage").then((m) => ({ default: m.SignNdaFormPage }))),
+  vehicle_use_agreement: lazy(() => import("@/components/FillVehicleUseAgreementPage").then((m) => ({ default: m.FillVehicleUseAgreementPage }))),
   contractor_addendum: lazy(() => import("@/components/FillContractorAddendumPage").then((m) => ({ default: m.FillContractorAddendumPage }))),
+  master_w2_agreement: lazy(() => import("@/components/FillMasterW2AgreementPage").then((m) => ({ default: m.FillMasterW2AgreementPage }))),
 };
 
 export const EXTERNAL_SIGNABLE_DOCUMENT_COMPONENTS: Record<SignableDocumentType, ReturnType<typeof lazy>> = {
@@ -59,8 +63,15 @@ export const EXTERNAL_SIGNABLE_DOCUMENT_COMPONENTS: Record<SignableDocumentType,
   location_consent: lazy(() => import("@/components/ExternalFillLocationConsentPage").then((m) => ({ default: m.ExternalFillLocationConsentPage }))),
   damage: lazy(() => import("@/components/ExternalFillDamagePage").then((m) => ({ default: m.ExternalFillDamagePage }))),
   contractor_data: lazy(() => import("@/components/ExternalFillContractorDataPage").then((m) => ({ default: m.ExternalFillContractorDataPage }))),
+  contractor_data_us: lazy(() => import("@/components/ExternalFillContractorDataUsPage").then((m) => ({ default: m.ExternalFillContractorDataUsPage }))),
   direct_deposit: lazy(() => import("@/components/ExternalFillDirectDepositPage").then((m) => ({ default: m.ExternalFillDirectDepositPage }))),
   substance_screening: lazy(() => import("@/components/ExternalFillSubstanceScreeningPage").then((m) => ({ default: m.ExternalFillSubstanceScreeningPage }))),
   flash_technician_travel: lazy(() => import("@/components/ExternalFillFlashTechnicianTravelPage").then((m) => ({ default: m.ExternalFillFlashTechnicianTravelPage }))),
+  nda_form: lazy(() => import("@/components/ExternalSignNdaFormPage").then((m) => ({ default: m.ExternalSignNdaFormPage }))),
+  vehicle_use_agreement: lazy(() => import("@/components/ExternalFillVehicleUseAgreementPage").then((m) => ({ default: m.ExternalFillVehicleUseAgreementPage }))),
   contractor_addendum: lazy(() => import("@/components/ExternalFillContractorAddendumPage").then((m) => ({ default: m.ExternalFillContractorAddendumPage }))),
+  // No external (no-login) variant — see signableDocumentRegistry.ts's
+  // entry for why. Reuses the internal page, which just requires a login
+  // to actually load anything if ever reached from a no-login context.
+  master_w2_agreement: lazy(() => import("@/components/FillMasterW2AgreementPage").then((m) => ({ default: m.FillMasterW2AgreementPage }))),
 };

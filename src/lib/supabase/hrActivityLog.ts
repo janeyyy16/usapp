@@ -20,6 +20,8 @@ export const ACTIVITY_ACTION_LABELS: Record<string, string> = {
   coe_sent: "Sent Certificate of Employment",
   warning_form_sent: "Sent Employee Warning Form",
   warning_form_signed: "Signed Employee Warning Form",
+  nda_form_sent: "Sent Non-Disclosure Agreement",
+  nda_form_signed: "Signed Non-Disclosure Agreement",
   warning_form_confirmed: "Confirmed Employee Warning Form",
   warning_form_reverted: "Reverted Employee Warning Form",
   warning_form_cancelled: "Cancelled Employee Warning Form",
@@ -33,6 +35,9 @@ export const ACTIVITY_ACTION_LABELS: Record<string, string> = {
   wage_ack_sent: "Sent Acknowledgment of Wage",
   wage_ack_signed: "Signed Acknowledgment of Wage",
   wage_ack_employer_signed: "Completed Acknowledgment of Wage (employer signature)",
+  master_w2_agreement_sent: "Sent Master W-2 Technician Agreement",
+  master_w2_agreement_signed: "Signed Master W-2 Technician Agreement",
+  master_w2_agreement_employer_signed: "Completed Master W-2 Technician Agreement (employer signature)",
   car_iq_agreement_sent: "Sent Car IQ Technician Agreement",
   car_iq_agreement_signed: "Signed Car IQ Technician Agreement",
   vehicle_agreement_sent: "Sent Company Vehicle Use Agreement",
@@ -60,6 +65,10 @@ export const ACTIVITY_ACTION_LABELS: Record<string, string> = {
   damage_employer_signed: "Completed Damage, Part Loss, and Tool Penalty Commission Deduction Agreement (employer signature)",
   contractor_data_sent: "Sent Employee Data form",
   contractor_data_signed: "Submitted Employee Data form",
+  contractor_data_us_sent: "Sent Contractor Data (US) form",
+  contractor_data_us_signed: "Submitted Contractor Data (US) form",
+  vehicle_use_agreement_sent: "Sent Vehicle Use Agreement form",
+  vehicle_use_agreement_signed: "Submitted Vehicle Use Agreement form",
   contractor_addendum_sent: "Sent Master Independent Contractor Subcontractor Agreement Addendum",
   contractor_addendum_signed: "Signed Master Independent Contractor Subcontractor Agreement Addendum",
   contractor_addendum_finalized: "Finalized Master Independent Contractor Subcontractor Agreement Addendum",
@@ -77,6 +86,8 @@ export const ACTIVITY_ACTION_LABELS: Record<string, string> = {
   part_daily_pickup_unmarked_picked_up: "Unmarked picked up",
   part_daily_collection_marked_collected: "Marked collected",
   part_daily_collection_unmarked_collected: "Unmarked collected",
+  technician_frozen: "Froze account",
+  technician_unfrozen: "Unfroze account",
 };
 
 export function activityActionLabel(action: string): string {

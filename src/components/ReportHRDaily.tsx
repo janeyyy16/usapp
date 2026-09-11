@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useRef, Fragment } from "react";
 import { Link, useSearch, useNavigate } from "@tanstack/react-router";
 import { useSmartBack } from "@/hooks/useSmartBack";
-import { ChevronLeft, ChevronDown, ChevronUp, ChevronRight, Plus, Trash2, AlertTriangle, CheckCircle, XCircle, Paperclip, Users, Clock, UserCheck, UserX, UserMinus, Search, Bell, Download, Forward, History, FileText, ClipboardList, Landmark, GripVertical, FileCheck, Link2, Copy } from "lucide-react";
+import { ChevronLeft, ChevronDown, ChevronUp, ChevronRight, Plus, Trash2, AlertTriangle, CheckCircle, XCircle, Paperclip, Users, Clock, UserCheck, UserX, UserMinus, Search, Bell, Download, Forward, History, FileText, ClipboardList, Landmark, GripVertical, FileCheck, Link2, Copy, Calendar, Check, Pencil, Filter, Columns3 } from "lucide-react";
 import { useSignaturePad } from "@/hooks/useSignaturePad";
 import { SignaturePadControls } from "@/components/SignaturePad";
 
@@ -19,7 +19,7 @@ import { LOCATIONS_DATA } from "@/lib/zipCoverage";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 import { useAuth } from "@/lib/auth";
 import { normalizeRole, ROLE_LABELS, isJotformHrRole, getRoleDepartmentBreakdown } from "@/lib/roleLabels";
-import { getCompanyUsers, getProfileEmployeeInfo, getEmployeeInfoByProfileIds, saveProfileEmployeeInfo, updateCompanyUser, getMyProfileId, type EmployeeInfo } from "@/lib/supabase/users";
+import { getCompanyUsers, getProfileEmployeeInfo, getEmployeeInfoByProfileIds, saveProfileEmployeeInfo, updateCompanyUser, getMyProfileId, getAccountCreatorsByEmail, type EmployeeInfo } from "@/lib/supabase/users";
 import { getOrCreateDmThread, sendMessage } from "@/lib/supabase/messaging";
 import { subscribeNotifications, markNotificationRead, deleteNotification, type AppNotification } from "@/lib/firebase/notifications";
 import {
@@ -28,7 +28,15 @@ import {
   getCandidateCvUrl,
   getCandidateCvUrlForForwarding,
   getCandidates,
+  getLatestStatusChanges,
+  logCandidateFieldEdit,
+  getLatestFieldEdits,
   updateCandidateStatus,
+  updateCandidateNotes,
+  updateCandidateScreeningNote,
+  updateCandidateInterviewerNote,
+  updateCandidateFields,
+  setCandidateOutreach,
   uploadCandidateCv,
   getEodHiringReport,
   getEomHiringReport,
@@ -38,6 +46,8 @@ import {
   type CandidateStatus,
   type EodHiringRow,
   type CvForwardDetail,
+  type StatusChange,
+  type FieldEdit,
 } from "@/lib/supabase/hrCandidates";
 import { getAllAgentNotes, getPendingAgentNotes, reviewAgentNote, addAgentNote, deleteAgentNote, type CsrAgentNote } from "@/lib/supabase/csrAgentNotes";
 import { parseBranchAccess, LOCATIONS } from "@/lib/locations";
@@ -51,11 +61,16 @@ import {
   type OnboardingDocumentColumn,
   type OnboardingGroupKey,
 } from "@/lib/supabase/onboardingDocumentColumns";
-import { uploadCoeCertificate, uploadWarningForm, uploadPromotionForm, uploadActionPlanForm, uploadTerminationForm, uploadW8benForm, uploadW4Form, uploadW4RForm, uploadI9Form, uploadWageAckForm, uploadCarIqAgreementForm, uploadVehicleAgreementForm, uploadEmployeeConfidentialityForm, uploadMealRestBreakForm, uploadPtoAckForm, uploadPartsResponsibilityForm, uploadMileageFuelForm, uploadLocationConsentForm, uploadDamageForm, uploadContractorDataForm, uploadDirectDepositForm, uploadSubstanceScreeningForm, uploadFlashTechnicianTravelForm, uploadContractorAddendumForm, uploadSignableDocumentSignature, refreshStorageAuthToken } from "@/lib/firebase/storage";
-import { captureHtmlToPdfBlob, loadAssetDataUrl as loadImageDataUrl } from "@/lib/pdfCapture";
+import { uploadCoeCertificate, uploadWarningForm, uploadPromotionForm, uploadActionPlanForm, uploadTerminationForm, uploadW8benForm, uploadW4Form, uploadW4RForm, uploadI9Form, uploadWageAckForm, uploadCarIqAgreementForm, uploadVehicleAgreementForm, uploadEmployeeConfidentialityForm, uploadMealRestBreakForm, uploadPtoAckForm, uploadPartsResponsibilityForm, uploadMileageFuelForm, uploadLocationConsentForm, uploadDamageForm, uploadContractorDataForm, uploadDirectDepositForm, uploadSubstanceScreeningForm, uploadFlashTechnicianTravelForm, uploadContractorAddendumForm, uploadMasterW2AgreementForm, uploadSignableDocumentSignature, refreshStorageAuthToken } from "@/lib/firebase/storage";
+import { captureHtmlToPdfBlob, captureHtmlPagesToPdfBlob, loadAssetDataUrl as loadImageDataUrl } from "@/lib/pdfCapture";
+import { downloadSignableDocumentPdf } from "@/lib/downloadSignableDocumentPdf";
+import { useSortableSearchTable } from "@/hooks/useSortableSearchTable";
+import { masterW2AgreementStyles, buildMasterW2AgreementBodyMarkup, type MasterW2AgreementFormData } from "@/lib/masterW2AgreementFormTemplate";
+import { getTechnicianIdDocumentUrl } from "@/lib/supabase/technicianIdDocuments";
 import {
   createSignableDocument,
   getSignableDocuments,
+  getAllSignableDocuments,
   confirmSignableDocument,
   cancelSignableDocument,
   deleteSignableDocument,
@@ -64,11 +79,16 @@ import {
   updateSignableDocumentPdfUrl,
   signDocument,
   ROUTE_REQUIRED_DOCUMENT_TYPES,
+  getCompletedDocumentTypesByRecipientIds,
+  getExistingActiveDocumentTypes,
   type SignableDocument,
   type SignableDocumentType,
   type SignatureSlot as DocSignatureSlot,
 } from "@/lib/supabase/signableDocuments";
+import { SIGNABLE_DOCUMENT_REGISTRY } from "@/lib/signableDocumentRegistry";
+import { getCandidateRequiredFormTypes, setCandidateRequiredFormTypes } from "@/lib/supabase/candidateRequiredForms";
 import { buildWarningFormBodyMarkup, buildWarnNoteText, warningFormStyles, type WarningFormData, type SignatureSlot } from "@/lib/warningFormTemplate";
+import { buildNdaFormPages, ndaFormStyles, type NdaFormData } from "@/lib/ndaFormTemplate";
 import { buildWarningFormDocxBlob } from "@/lib/warningFormDocx";
 import { buildPromotionFormBodyMarkup, promotionFormStyles, type PromotionFormData, type PromotionSignatureSlot } from "@/lib/promotionFormTemplate";
 import { buildPromotionFormDocxBlob } from "@/lib/promotionFormDocx";
@@ -109,6 +129,8 @@ import { fillLocationConsentPdf } from "@/lib/locationConsentPdfFill";
 import type { DamageFormData } from "@/lib/damageFormTemplate";
 import { fillDamagePdf } from "@/lib/damagePdfFill";
 import { buildContractorDataBodyMarkup, contractorDataStyles, BLANK_EMERGENCY_CONTACT, type ContractorDataFormData } from "@/lib/contractorDataFormTemplate";
+import { buildContractorDataUsBodyMarkup, contractorDataUsStyles, BLANK_EMERGENCY_CONTACT_US, type ContractorDataUsFormData } from "@/lib/contractorDataUsFormTemplate";
+import { buildVehicleUseAgreementBodyMarkup, vehicleUseAgreementStyles, type VehicleUseAgreementFormData } from "@/lib/vehicleUseAgreementFormTemplate";
 import { buildDirectDepositBodyMarkup, directDepositStyles, type DirectDepositFormData } from "@/lib/directDepositFormTemplate";
 import type { I9FormData } from "@/lib/i9FormTemplate";
 import { fillI9Pdf } from "@/lib/i9PdfFill";
@@ -116,6 +138,7 @@ import type { SubstanceScreeningFormData } from "@/lib/substanceScreeningFormTem
 import { fillSubstanceScreeningPdf } from "@/lib/substanceScreeningPdfFill";
 import { logActivity, getActivityLog, activityActionLabel, type HrActivityLogEntry } from "@/lib/supabase/hrActivityLog";
 import { HrActivityLogPanel } from "@/components/HrActivityLogPage";
+import { InterviewCalendarTab, type InterviewCalendarCandidate } from "@/components/InterviewCalendarTab";
 import { subscribeTableChanges } from "@/lib/supabase/realtime";
 import { getCompanyPtoRequests, ptoYearWindow, ptoDaysUsed, sickYearWindow, sickDaysUsed, reviewPtoStage, canReviewPtoStage, type PtoRequestRow, type PtoType, type PtoStage } from "@/lib/supabase/pto";
 import { getCompanyTimecardEntries, calcWorkedHours, hoursDiff, type CompanyTimecardEntry } from "@/lib/supabase/timecards";
@@ -202,29 +225,47 @@ const BRANCH_MANAGER_ROLES = new Set(["BRANCH_MANAGER", "SENIOR_BRANCH_MANAGER"]
 
 const CANDIDATE_STATUS_LABEL: Record<CandidateStatus, string> = {
   applied: "Applied",
+  phone_screening: "Phone Screening",
   interviewing: "Interviewing",
   selected: "Selected",
   training: "Training",
-  on_hold: "On Hold",
   hired: "Hired",
   rejected: "Rejected",
+  withdrawn: "Withdrawn",
+  cancelled: "Cancelled",
 };
 const CANDIDATE_STATUS_COLOR: Record<CandidateStatus, string> = {
   applied: "bg-blue-500/20 text-blue-300",
+  phone_screening: "bg-indigo-500/20 text-indigo-300",
   interviewing: "bg-yellow-500/20 text-yellow-300",
   selected: "bg-purple-500/20 text-purple-300",
   training: "bg-cyan-500/20 text-cyan-300",
-  on_hold: "bg-slate-500/20 text-slate-300",
   hired: "bg-green-500/20 text-green-300",
   rejected: "bg-red-500/20 text-red-300",
+  withdrawn: "bg-slate-500/20 text-slate-300",
+  cancelled: "bg-slate-500/20 text-slate-400",
 };
+/** Just the text-color class from CANDIDATE_STATUS_COLOR (no background) — for status-tinted text that sits on the page's own panel, not inside the badge itself (e.g. the "Changed by" line under the Status dropdown). */
+function candidateStatusTextColor(status: CandidateStatus): string {
+  return CANDIDATE_STATUS_COLOR[status].split(" ").find((c) => c.startsWith("text-")) ?? "text-muted-foreground";
+}
+/** "14:30" -> "2:30 PM" — interview_time is stored as plain 24h "HH:MM" text (0228), formatted for display wherever it's shown. */
+function formatHHMM(hhmm: string): string {
+  const [h, m] = hhmm.split(":").map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return hhmm;
+  const period = h >= 12 ? "PM" : "AM";
+  const hour12 = h % 12 || 12;
+  return `${hour12}:${String(m).padStart(2, "0")} ${period}`;
+}
 // Statuses that require an accompanying date when selected — interview
-// date for Interviewing, training start date for Training — see
-// hr_update_candidate_status() in 0047_hr_hiring_reports.sql, which is
-// what actually persists these dates alongside the status transition.
+// date for Interviewing, training start date for Training, withdraw date
+// for Withdrawn — see hr_update_candidate_status() in
+// 0048_hr_hiring_reports.sql / 0221_hr_candidates_status_update.sql, which
+// is what actually persists these dates alongside the status transition.
 const STATUS_REQUIRES_DATE: Partial<Record<CandidateStatus, string>> = {
   interviewing: "Interview date",
   training: "Training start date",
+  withdrawn: "Withdraw date",
 };
 
 type EmploymentStatus = "active" | "inactive" | "terminated" | "resigned";
@@ -316,6 +357,49 @@ const PH_ONBOARDING_DOCS = [
   "W-8BEN",
 ];
 
+/**
+ * Onboarding Documents checklist columns that mean the exact same document
+ * as a real SignableDocumentType — so a technician who's already e-signed
+ * it (Technician Form Checklist / the various HR-sent form flows) shows
+ * "YES" here automatically too, instead of HR having to separately upload
+ * a copy into this grid's own file-attachment system for something that
+ * was already completed through the e-signature flow. Same "match onboarding
+ * columns to real document types by exact label text" approach
+ * URGENT_ONBOARDING_COLUMN_LABELS below already uses, just going the other
+ * direction (marking done, not flagging urgent).
+ *
+ * Deliberately conservative — only labels that are an exact or unambiguous
+ * near-exact match (typos, "Acknowledgement" vs "Acknowledgment" spelling,
+ * a more descriptive custom-column wording of the same thing) are mapped.
+ * Several shorter/vaguer columns that could plausibly mean the same thing
+ * (e.g. "CAR IQ", "Floor Protection", "Parts Responsibility Acknowledgement",
+ * "Vehicle Use Agreement") are deliberately left OUT rather than guessed —
+ * see the "split into two by accident" note on URGENT_ONBOARDING_COLUMN_LABELS
+ * for why some of these are ambiguous. This can only ever ADD a "YES" a
+ * human hasn't gotten to yet; it never removes one a human already set.
+ */
+const ONBOARDING_COLUMN_TO_DOCUMENT_TYPE: Record<string, SignableDocumentType> = {
+  "Contractor Data Sheet": "contractor_data",
+  "Direct Deposit Authorization": "direct_deposit",
+  "Non-Disclosure Agreement": "nda_form",
+  "W9": "w9",
+  "W4": "w4",
+  "W-8BEN": "w8ben",
+  "Acknowledgement of Wage": "wage_ack",
+  "Car IQ Technician Agreement": "car_iq_agreement",
+  "Company Vehicle User Agreement": "vehicle_agreement",
+  "Damage Agreement": "damage",
+  "Employee Confidentiality": "employee_confidentiality",
+  "Employee Mobile App Location Sharing Consent Agreement": "location_consent",
+  "Employee Meal & Rest Break Policy": "meal_rest_break",
+  "Personal Vehicle Mileage & Fuel Policy Agreement": "mileage_fuel",
+  "Parts Responsibility & Technician Floor Protection Acknowledgment Form": "parts_responsibility",
+  "Employee PTO & Sick Leave Policy": "pto_ack",
+  "Substance Screening & Conduct Agreement": "substance_screening",
+  "W-4R": "w4r",
+  "I-9": "i9",
+};
+
 // Job Title options for the Generate COE tab — every real role in the
 // system except the three that aren't actual job titles someone would put
 // on an employment certificate (Super Admin, plain "CSR", Dispatcher).
@@ -360,6 +444,41 @@ const CANONICAL_DEPARTMENT_GROUPS: { name: string; match: RegExp }[] = [
 
 /** Master List's Department column dropdown — the 6 real destinations plus Unlisted (to explicitly park someone there), used to move a person between departments straight from the table. */
 const MASTER_LIST_DEPARTMENT_OPTIONS = [...CANONICAL_DEPARTMENT_GROUPS.map((g) => g.name), MASTER_LIST_UNLISTED];
+
+/** Where a candidate was found — Add Candidate's Source dropdown; "Other" reveals a free-text field instead of saving the literal word "Other". */
+const CANDIDATE_SOURCE_OPTIONS = ["Indeed", "ZipRecruiter", "Other"];
+
+// Toggleable columns on the Hiring table — Candidate (name) and Actions
+// stay pinned/always visible, everything else can be hidden. Same
+// key+label shape and localStorage-persisted visibility map TicketList's
+// own Columns picker already uses.
+const HIRING_COLUMNS = [
+  { key: "position", label: "Position" },
+  { key: "branch", label: "Branch" },
+  { key: "branchManager", label: "Branch Manager" },
+  { key: "assignedInterviewer", label: "Assigned Interviewer" },
+  { key: "department", label: "Department" },
+  { key: "contact", label: "Contact" },
+  { key: "outreach", label: "Texted / Called" },
+  { key: "cv", label: "CV" },
+  { key: "status", label: "Status" },
+  { key: "accountStatus", label: "Account Status" },
+  { key: "forms", label: "Forms" },
+  { key: "note", label: "Notes" },
+] as const;
+type HiringColumnKey = (typeof HIRING_COLUMNS)[number]["key"];
+const HIRING_COLUMN_VISIBILITY_KEY = "ahs:hiring:visible-columns";
+function loadHiringVisibleColumns(): Record<string, boolean> {
+  const allVisible = Object.fromEntries(HIRING_COLUMNS.map((c) => [c.key, true]));
+  try {
+    const raw = localStorage.getItem(HIRING_COLUMN_VISIBILITY_KEY);
+    if (!raw) return allVisible;
+    const saved = JSON.parse(raw) as Record<string, boolean>;
+    return { ...allVisible, ...saved }; // merge so a newly added column defaults to visible
+  } catch {
+    return allVisible;
+  }
+}
 
 /**
  * Sentinel for the Master List "Trainee" tab — cross-cutting (a trainee can
@@ -677,7 +796,109 @@ function LeaderTreeBranch({
   );
 }
 
+/** A <th> that sorts a useSortableSearchTable-backed table on click — shared across the Sent History tables so each one doesn't reimplement the same header markup and chevron-state logic. */
+function SortableTh<C extends string>({
+  column, label, sortColumn, sortDir, onSort, className,
+}: {
+  column: C;
+  label: string;
+  sortColumn: C | null;
+  sortDir: "asc" | "desc";
+  onSort: (column: C) => void;
+  className?: string;
+}) {
+  return (
+    <th
+      onClick={() => onSort(column)}
+      title={`Sort by ${label}`}
+      className={`px-4 py-3 text-left text-xs text-muted-foreground uppercase cursor-pointer select-none hover:text-foreground ${className ?? ""}`}
+    >
+      <span className="inline-flex items-center gap-1">
+        {label}
+        {sortColumn === column ? (
+          sortDir === "asc" ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />
+        ) : (
+          <ChevronDown className="h-3 w-3 opacity-20" />
+        )}
+      </span>
+    </th>
+  );
+}
+
+/** Same as SortableTh, plus a funnel icon that opens an Excel-style checklist of the column's actual values — for a low-cardinality column (Branch, Status, Sent By) where picking from what's really there beats free-text search. */
+function FilterableTh<C extends string>({
+  column, label, sortColumn, sortDir, onSort, options, isChecked, onToggleValue, onClear, isFiltered, className,
+}: {
+  column: C;
+  label: string;
+  sortColumn: C | null;
+  sortDir: "asc" | "desc";
+  onSort: (column: C) => void;
+  options: string[];
+  isChecked: (value: string) => boolean;
+  onToggleValue: (value: string) => void;
+  onClear: () => void;
+  isFiltered: boolean;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLTableCellElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onClickOutside = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, [open]);
+
+  return (
+    <th ref={ref} className={`px-4 py-3 text-left text-xs text-muted-foreground uppercase relative ${className ?? ""}`}>
+      <span className="inline-flex items-center gap-1.5">
+        <span onClick={() => onSort(column)} title={`Sort by ${label}`} className="cursor-pointer select-none hover:text-foreground inline-flex items-center gap-1">
+          {label}
+          {sortColumn === column ? (
+            sortDir === "asc" ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />
+          ) : (
+            <ChevronDown className="h-3 w-3 opacity-20" />
+          )}
+        </span>
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          title={`Filter by ${label}`}
+          className={`p-0.5 rounded hover:bg-white/10 ${isFiltered ? "text-blue-400" : "text-muted-foreground/70"}`}
+        >
+          <Filter className="h-3 w-3" />
+        </button>
+      </span>
+      {open && (
+        <div className="absolute z-20 mt-1.5 left-0 bg-slate-800 border border-white/10 rounded-md shadow-xl p-2 w-52 max-h-72 overflow-y-auto normal-case font-normal text-foreground">
+          <div className="flex items-center justify-between mb-1.5 pb-1.5 border-b border-white/10">
+            <span className="text-[10px] text-muted-foreground">{options.length} value{options.length === 1 ? "" : "s"}</span>
+            {isFiltered && (
+              <button type="button" onClick={onClear} className="text-[10px] text-blue-300 hover:text-blue-200">Clear filter</button>
+            )}
+          </div>
+          {options.map((opt) => (
+            <label key={opt} className="flex items-center gap-2 py-1 px-1 text-xs cursor-pointer hover:bg-white/5 rounded">
+              <input type="checkbox" checked={isChecked(opt)} onChange={() => onToggleValue(opt)} />
+              <span className="truncate">{opt || "(blank)"}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </th>
+  );
+}
+
 export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) {
+  // Same component either way (all the Automated Forms state/handlers live
+  // here) — HR Paperworks (its own HR-module entry) shows ONLY the
+  // Automated Forms sidebar group and lands on it directly; HR & Recruitment
+  // Dashboard shows everything else, with Automated Forms now moved out of
+  // its sidebar entirely. See tabGroups below.
+  const paperworksOnly = (sub as any).custom === "hr-paperworks";
   const goBack = useSmartBack(() => navigate({ to: "/m/$module", params: { module: mod.slug } }));
   const { role: myRole, extraRoles: myExtraRoles, ready, uid, displayName, companyId } = useAuth();
   const normalizedMyRole = normalizeRole(myRole);
@@ -701,7 +922,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   // Reviews, the Approved log, the department trend chart, and the full
   // Employee Directory all on top of each other, forcing a long scroll to
   // reach anything below Hiring.
-  const [activeTab, setActiveTab] = useState<"hiring" | "warnings" | "masterList" | "leaders" | "jotform" | "jotformDocuments" | "customForms" | "onboarding" | "hiringReports" | "report" | "coe" | "warningForm" | "promotionForm" | "actionPlanForm" | "terminationForm" | "employeeRequestManager" | "w8ben" | "i9" | "wageAck" | "carIqAgreement" | "vehicleAgreement" | "employeeConfidentiality" | "mealRestBreak" | "ptoAck" | "partsResponsibility" | "mileageFuel" | "locationConsent" | "damage" | "contractorData" | "directDeposit" | "substanceScreening" | "flashTechnicianTravel" | "contractorAddendum" | "combineForms" | "employerQueue">("hiring");
+  const [activeTab, setActiveTab] = useState<"hiring" | "warnings" | "masterList" | "leaders" | "jotform" | "jotformDocuments" | "customForms" | "onboarding" | "hiringReports" | "report" | "coe" | "warningForm" | "promotionForm" | "actionPlanForm" | "terminationForm" | "employeeRequestManager" | "w8ben" | "i9" | "wageAck" | "carIqAgreement" | "vehicleAgreement" | "vehicleUseAgreement" | "employeeConfidentiality" | "mealRestBreak" | "ptoAck" | "partsResponsibility" | "mileageFuel" | "locationConsent" | "damage" | "contractorData" | "contractorDataUs" | "directDeposit" | "substanceScreening" | "flashTechnicianTravel" | "contractorAddendum" | "combineForms" | "employerQueue" | "ndaForm" | "calendar" | "interviewCalendar" | "masterW2Agreement">(paperworksOnly ? "combineForms" : "hiring");
   const [openCategory, setOpenCategory] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // Which floating-sidebar section headers (Automated Forms/Generate
@@ -725,7 +946,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const navigate = useNavigate();
   const hrSearchParams = (useSearch({ strict: false }) as { tab?: string; submissionId?: string; profileId?: string }) ?? {};
   const initialHrSearchRef = useRef(hrSearchParams);
-  const VALID_HR_TABS = ["hiring", "warnings", "masterList", "leaders", "jotform", "jotformDocuments", "customForms", "onboarding", "hiringReports", "report", "coe", "warningForm", "promotionForm", "actionPlanForm", "terminationForm", "employeeRequestManager", "w8ben", "i9", "wageAck", "carIqAgreement", "vehicleAgreement", "employeeConfidentiality", "mealRestBreak", "ptoAck", "partsResponsibility", "mileageFuel", "locationConsent", "damage", "contractorData", "directDeposit", "substanceScreening", "flashTechnicianTravel", "combineForms", "employerQueue"] as const;
+  const VALID_HR_TABS = ["hiring", "warnings", "masterList", "leaders", "jotform", "jotformDocuments", "customForms", "onboarding", "hiringReports", "report", "coe", "warningForm", "promotionForm", "actionPlanForm", "terminationForm", "employeeRequestManager", "w8ben", "i9", "wageAck", "carIqAgreement", "vehicleAgreement", "vehicleUseAgreement", "employeeConfidentiality", "mealRestBreak", "ptoAck", "partsResponsibility", "mileageFuel", "locationConsent", "damage", "contractorData", "contractorDataUs", "directDeposit", "substanceScreening", "flashTechnicianTravel", "combineForms", "employerQueue"] as const;
   useEffect(() => {
     const tab = initialHrSearchRef.current.tab;
     if (tab && (VALID_HR_TABS as readonly string[]).includes(tab)) setActiveTab(tab as typeof activeTab);
@@ -1322,20 +1543,112 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [candidatesLoading, setCandidatesLoading] = useState(true);
   const [showAddCandidate, setShowAddCandidate] = useState(false);
-  const [newCandidate, setNewCandidate] = useState({ name: "", phone: "", email: "", position: "", branch: "" });
+  const [newCandidate, setNewCandidate] = useState({ name: "", phone: "", email: "", position: "", branch: "", department: "", branchManagerId: "", source: "", sourceOther: "" });
   const [cvFile, setCvFile] = useState<File | null>(null);
   const [savingCandidate, setSavingCandidate] = useState(false);
   const [hiringSearch, setHiringSearch] = useState("");
-  const [hiringStatusFilter, setHiringStatusFilter] = useState<"" | CandidateStatus>("");
+  const [hiringStatusFilter, setHiringStatusFilter] = useState<Set<string>>(new Set());
+  // Per-column funnel filters in the header row — Position/Branch are
+  // multi-select (empty set = no restriction); CV/Account Status/Note are
+  // tri-state (All/Has/None). Same pattern Ticket Attendance and Absent
+  // List's own header filters already use.
+  type HiringTriState = "all" | "has" | "none";
+  type HiringFilterMenuKey = "position" | "branch" | "branchManager" | "assignedInterviewer" | "department" | "outreach" | "status" | "cv" | "accountStatus" | "note";
+  const [hiringFilterMenu, setHiringFilterMenu] = useState<HiringFilterMenuKey | null>(null);
+  const [hiringPositionFilter, setHiringPositionFilter] = useState<Set<string>>(new Set());
+  const [hiringBranchFilter, setHiringBranchFilter] = useState<Set<string>>(new Set());
+  const [hiringBranchManagerFilter, setHiringBranchManagerFilter] = useState<Set<string>>(new Set());
+  const [hiringAssignedInterviewerFilter, setHiringAssignedInterviewerFilter] = useState<Set<string>>(new Set());
+  const [hiringDepartmentFilter, setHiringDepartmentFilter] = useState<Set<string>>(new Set());
+  // Any-of (OR) match — e.g. checking "Text AM" + "Call PM" shows anyone
+  // with EITHER done, not only candidates with both.
+  const [hiringOutreachFilter, setHiringOutreachFilter] = useState<Set<string>>(new Set());
+  const [hiringCvFilter, setHiringCvFilter] = useState<HiringTriState>("all");
+  const [hiringAccountStatusFilter, setHiringAccountStatusFilter] = useState<HiringTriState>("all");
+  const [hiringNoteFilter, setHiringNoteFilter] = useState<HiringTriState>("all");
 
+  // Column visibility (persisted) — Candidate/Actions always show; the rest
+  // toggle from the "Columns" button in the toolbar.
+  const [visibleHiringColumns, setVisibleHiringColumns] = useState<Record<string, boolean>>(() =>
+    typeof window !== "undefined" ? loadHiringVisibleColumns() : Object.fromEntries(HIRING_COLUMNS.map((c) => [c.key, true]))
+  );
+  const [hiringColumnsMenuOpen, setHiringColumnsMenuOpen] = useState(false);
+  const isHiringColVisible = (key: HiringColumnKey) => visibleHiringColumns[key] !== false;
+  const toggleHiringColumn = (key: HiringColumnKey) => {
+    setVisibleHiringColumns((prev) => {
+      const next = { ...prev, [key]: prev[key] === false };
+      try { localStorage.setItem(HIRING_COLUMN_VISIBILITY_KEY, JSON.stringify(next)); } catch { /* ignore */ }
+      return next;
+    });
+  };
+  const showAllHiringColumns = () => {
+    const all = Object.fromEntries(HIRING_COLUMNS.map((c) => [c.key, true]));
+    setVisibleHiringColumns(all);
+    try { localStorage.setItem(HIRING_COLUMN_VISIBILITY_KEY, JSON.stringify(all)); } catch { /* ignore */ }
+  };
+
+  const [statusChangesByCandidateId, setStatusChangesByCandidateId] = useState<Map<string, StatusChange>>(new Map());
+  // Who created the User Management account behind each "Created" Account
+  // Status badge — keyed by email since that's the only field hr_candidates
+  // and profiles share (same join key candidateHasAccount already uses).
+  const [accountCreatorsByEmail, setAccountCreatorsByEmail] = useState<Map<string, { createdByName: string | null; createdAt: string }>>(new Map());
+  // Per-column "Changed by" for every inline-editable field except Status
+  // (which has its own line above, from statusChangesByCandidateId) — keyed
+  // "candidateId||fieldName", see logCandidateFieldEdit/getLatestFieldEdits.
+  const [fieldEditsByKey, setFieldEditsByKey] = useState<Map<string, FieldEdit>>(new Map());
+  const fieldEditFor = (candidateId: string, field: string): FieldEdit | undefined => fieldEditsByKey.get(`${candidateId}||${field}`);
+  // Fire-and-forget log + optimistic local update, called right after a
+  // field save succeeds — avoids waiting on a full getLatestFieldEdits()
+  // round-trip just to show whose name was just typed.
+  const logFieldEditOptimistic = (candidateId: string, field: string) => {
+    const key = `${candidateId}||${field}`;
+    setFieldEditsByKey((prev) => {
+      const next = new Map(prev);
+      next.set(key, { changedByName: displayName || "You", changedAt: new Date().toISOString() });
+      return next;
+    });
+    void logCandidateFieldEdit(candidateId, field);
+  };
+  const renderFieldChangedBy = (candidateId: string, field: string) => {
+    const edit = fieldEditFor(candidateId, field);
+    if (!edit?.changedByName) return null;
+    return (
+      <div className="mt-1 text-[10px] text-muted-foreground whitespace-nowrap" title={new Date(edit.changedAt).toLocaleString()}>
+        Changed by: {edit.changedByName}
+      </div>
+    );
+  };
   const loadCandidates = async () => {
     setCandidatesLoading(true);
     try {
-      setCandidates(await getCandidates());
+      const [rows] = await Promise.all([
+        getCandidates(),
+        getLatestStatusChanges().then(setStatusChangesByCandidateId),
+        getAccountCreatorsByEmail().then(setAccountCreatorsByEmail),
+        getLatestFieldEdits().then(setFieldEditsByKey),
+      ]);
+      setCandidates(rows);
     } catch (err) {
       console.error("Failed to load candidates:", err);
     } finally {
       setCandidatesLoading(false);
+    }
+  };
+
+  // Forms column — every signed/pending document company-wide (one bulk
+  // call, every type at once) plus each candidate's own picked list of
+  // which types actually apply to them. Neither depends on the selected
+  // date range or anything else that changes often, so this loads once
+  // alongside candidates/employees, not per-render.
+  const [allSignableDocs, setAllSignableDocs] = useState<SignableDocument[]>([]);
+  const [requiredFormsByCandidateId, setRequiredFormsByCandidateId] = useState<Map<string, SignableDocumentType[]>>(new Map());
+  const loadCandidateForms = async () => {
+    try {
+      const [docs, required] = await Promise.all([getAllSignableDocuments(), getCandidateRequiredFormTypes()]);
+      setAllSignableDocs(docs);
+      setRequiredFormsByCandidateId(required);
+    } catch (err) {
+      console.error("Failed to load candidate forms:", err);
     }
   };
 
@@ -1383,6 +1696,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     if (!ready) return;
     loadEmployees();
     loadCandidates();
+    loadCandidateForms();
     loadNotes();
     loadPtoRequests();
     loadTodayTimecardEntries();
@@ -1474,16 +1788,294 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const allBranches = useMemo(() => LOCATIONS_DATA.map(l => l.location).sort(), []);
   const branchOptions = isBranchManager && myLocations.length > 0 ? myLocations : allBranches;
 
+  // A "Hired" candidate with no matching user account yet (matched by
+  // email, the only natural key hr_candidates and profiles share) shows as
+  // "Pending Account Creation" instead of a bare "Hired" badge — see the
+  // status cell below.
+  const employeeEmailSet = useMemo(
+    () => new Set(employees.map((e) => (e.email || "").trim().toLowerCase()).filter(Boolean)),
+    [employees]
+  );
+  const candidateNeedsAccount = (c: Candidate) => c.status === "hired" && !!c.email && !employeeEmailSet.has(c.email.trim().toLowerCase());
+  const candidateHasAccount = (c: Candidate) => !!c.email && employeeEmailSet.has(c.email.trim().toLowerCase());
+
+  // Forms column — same email-matching convention as Account Status above,
+  // just resolved to the actual profile id (needed to filter
+  // hr_signable_documents.recipient_id, which is never keyed by email —
+  // that table only ever stores a profile id or a free-typed name).
+  const profileIdByEmail = useMemo(
+    () => new Map(employees.filter((e) => e.email).map((e) => [e.email.trim().toLowerCase(), e.id])),
+    [employees]
+  );
+  // Which document TYPES are complete (signed or confirmed — same
+  // "complete" definition getTechnicianIdsMissingRouteDocuments already
+  // uses) for a given profile, across every signable document ever sent to
+  // them — a candidate whose account existed under an old email that later
+  // changed would still show correctly once employeeEmailSet reflects the
+  // current one.
+  const completeDocTypesByProfileId = useMemo(() => {
+    const map = new Map<string, Set<SignableDocumentType>>();
+    for (const doc of allSignableDocs) {
+      if (!doc.recipientId || (doc.status !== "signed" && doc.status !== "confirmed")) continue;
+      const set = map.get(doc.recipientId) ?? new Set<SignableDocumentType>();
+      set.add(doc.documentType);
+      map.set(doc.recipientId, set);
+    }
+    return map;
+  }, [allSignableDocs]);
+  // Which document TYPES are sent but still awaiting a signature, per
+  // profile — lets the Forms popup show "Sent" (vs. "Signed") so HR can
+  // tell a Send actually went out instead of wondering if it worked.
+  const pendingDocTypesByProfileId = useMemo(() => {
+    const map = new Map<string, Set<SignableDocumentType>>();
+    for (const doc of allSignableDocs) {
+      if (!doc.recipientId || doc.status !== "pending_signature") continue;
+      const set = map.get(doc.recipientId) ?? new Set<SignableDocumentType>();
+      set.add(doc.documentType);
+      map.set(doc.recipientId, set);
+    }
+    return map;
+  }, [allSignableDocs]);
+  // null = HR hasn't picked which forms apply to this candidate yet (no
+  // "X/Y" to show at all, distinct from "0/Y" which means forms ARE
+  // configured but none are complete).
+  const candidateFormProgress = (c: Candidate): { complete: number; total: number } | null => {
+    const required = requiredFormsByCandidateId.get(c.id);
+    if (!required || required.length === 0) return null;
+    const profileId = c.email ? profileIdByEmail.get(c.email.trim().toLowerCase()) : undefined;
+    const complete = profileId ? completeDocTypesByProfileId.get(profileId) : undefined;
+    return { complete: complete ? required.filter((t) => complete.has(t)).length : 0, total: required.length };
+  };
+
+  // Which Automated Forms tab (activeTab, ~line 719) sends each document
+  // type — several types share one tab (w4/w9/w4r all live under the
+  // combined "w8ben" tab). Lets the Forms popup's "Send →" jump straight
+  // to the right tab instead of making HR hunt through ~26 of them; the
+  // actual send still goes through that tab's own tested per-type flow
+  // (each type needs its own real details — name, dates, terms — that
+  // can't be safely auto-filled here), so it lands on their Automated
+  // Forms page exactly like any other form sent that way.
+  const SIGNABLE_TYPE_TO_HR_TAB: Record<SignableDocumentType, typeof activeTab> = {
+    warning_form: "warningForm",
+    promotion_form: "promotionForm",
+    action_plan_form: "actionPlanForm",
+    termination_form: "terminationForm",
+    w8ben: "w8ben",
+    w4: "w8ben",
+    w9: "w8ben",
+    w4r: "w8ben",
+    i9: "i9",
+    wage_ack: "wageAck",
+    car_iq_agreement: "carIqAgreement",
+    vehicle_agreement: "vehicleAgreement",
+    employee_confidentiality: "employeeConfidentiality",
+    meal_rest_break: "mealRestBreak",
+    pto_ack: "ptoAck",
+    parts_responsibility: "partsResponsibility",
+    mileage_fuel: "mileageFuel",
+    location_consent: "locationConsent",
+    damage: "damage",
+    contractor_data: "contractorData",
+    contractor_data_us: "contractorDataUs",
+    direct_deposit: "directDeposit",
+    substance_screening: "substanceScreening",
+    flash_technician_travel: "flashTechnicianTravel",
+    nda_form: "ndaForm",
+    vehicle_use_agreement: "vehicleUseAgreement",
+    contractor_addendum: "contractorAddendum",
+    master_w2_agreement: "masterW2Agreement",
+  };
+
+  // Forms popup — checkbox list of every SignableDocumentType, letting HR
+  // pick which ones actually apply to this one candidate (position/branch
+  // dependent, no fixed company-wide list — see migration 0224's header
+  // comment). `selected` is the set of currently-checked types.
+  const [formsDialog, setFormsDialog] = useState<{ candidateId: string; candidateName: string; selected: Set<SignableDocumentType> } | null>(null);
+  const [savingFormsDialog, setSavingFormsDialog] = useState(false);
+  const [formsDialogSearch, setFormsDialogSearch] = useState("");
+  const openFormsDialog = (c: Candidate) => {
+    const existing = requiredFormsByCandidateId.get(c.id) ?? [];
+    setFormsDialog({ candidateId: c.id, candidateName: c.name, selected: new Set(existing) });
+    setFormsDialogSearch("");
+  };
+  // Returns the freshly-saved types (so handleSendType can navigate right
+  // after saving without waiting on a state re-render to read them back).
+  const saveFormsDialog = async (dialog: { candidateId: string; selected: Set<SignableDocumentType> }): Promise<SignableDocumentType[]> => {
+    const types = Array.from(dialog.selected);
+    await setCandidateRequiredFormTypes(dialog.candidateId, types);
+    setRequiredFormsByCandidateId((prev) => {
+      const next = new Map(prev);
+      next.set(dialog.candidateId, types);
+      return next;
+    });
+    return types;
+  };
+  const handleSaveFormsDialog = async () => {
+    if (!formsDialog) return;
+    setSavingFormsDialog(true);
+    try {
+      await saveFormsDialog(formsDialog);
+      setFormsDialog(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save required forms.");
+    } finally {
+      setSavingFormsDialog(false);
+    }
+  };
+  // "Send →" on one form — saves the current picks first (so nothing
+  // checked in this popup is lost), then jumps to that type's Automated
+  // Forms tab to actually send it through the real flow.
+  const handleSendType = async (type: SignableDocumentType) => {
+    if (!formsDialog) return;
+    setSavingFormsDialog(true);
+    try {
+      await saveFormsDialog(formsDialog);
+      setFormsDialog(null);
+      setActiveTab(SIGNABLE_TYPE_TO_HR_TAB[type]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save required forms.");
+    } finally {
+      setSavingFormsDialog(false);
+    }
+  };
+
+  // Branch → its Branch Manager's name, for the Hiring table's own Branch
+  // Manager column — falls back to the Senior Branch Manager for any
+  // branch with no direct Branch Manager on file. Real profiles only (the
+  // same `employees` roster already loaded for Account Status above), not
+  // a separate lookup table — a branch's manager is just whichever active
+  // employee holds that role with assigned_branch set to it.
+  const branchManagerByBranch = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const e of employees) {
+      if (!e.branch || map.has(e.branch)) continue;
+      if (normalizeRole(e.position) === "BRANCH_MANAGER" || e.extraRoles.map(normalizeRole).includes("BRANCH_MANAGER")) {
+        map.set(e.branch, e.name);
+      }
+    }
+    for (const e of employees) {
+      if (!e.branch || map.has(e.branch)) continue;
+      if (normalizeRole(e.position) === "SENIOR_BRANCH_MANAGER" || e.extraRoles.map(normalizeRole).includes("SENIOR_BRANCH_MANAGER")) {
+        map.set(e.branch, e.name);
+      }
+    }
+    return map;
+  }, [employees]);
+
+  // Real Branch Manager / Senior Branch Manager profiles, for the "Branch
+  // Manager" dropdown on Add Candidate and the Hiring table's manual
+  // override — lets HR pick a specific person instead of only ever relying
+  // on branchManagerByBranch's auto-derived one (which breaks down for a
+  // branch with nobody on file yet, or two branches sharing one manager).
+  const branchManagerOptions = useMemo(
+    () =>
+      employees
+        .filter(
+          (e) =>
+            e.status === "active" &&
+            (normalizeRole(e.position) === "BRANCH_MANAGER" ||
+              normalizeRole(e.position) === "SENIOR_BRANCH_MANAGER" ||
+              e.extraRoles.map(normalizeRole).includes("BRANCH_MANAGER") ||
+              e.extraRoles.map(normalizeRole).includes("SENIOR_BRANCH_MANAGER"))
+        )
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [employees]
+  );
+
+  // Real HR-role profiles, for the Hiring table's "Assigned Interviewer"
+  // dropdown — who on the HR team is actually running this candidate's
+  // interview process.
+  const hrPersonnelOptions = useMemo(
+    () =>
+      employees
+        .filter((e) => e.status === "active" && (normalizeRole(e.position) === "HR" || e.extraRoles.map(normalizeRole).includes("HR")))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [employees]
+  );
+
+  // Who's training a candidate — deliberately not role-restricted (unlike
+  // Branch Manager/HR above): a trainer could be anyone on staff, not a
+  // fixed tier.
+  const trainerOptions = useMemo(
+    () => employees.filter((e) => e.status === "active").sort((a, b) => a.name.localeCompare(b.name)),
+    [employees]
+  );
+
+  // Resolved display names — same fallback logic the table cells themselves
+  // use (manual override, else auto-derived from branch for Branch Manager;
+  // nothing auto-derived for Assigned Interviewer/Trainer) — shared with the
+  // column filters below so "filter by X" always matches what's actually shown.
+  const branchManagerNameForCandidate = (c: Candidate): string | null =>
+    (c.branchManagerId && employees.find((e) => e.id === c.branchManagerId)?.name) ||
+    (c.branch ? branchManagerByBranch.get(c.branch) : undefined) ||
+    null;
+  const assignedInterviewerNameForCandidate = (c: Candidate): string | null =>
+    (c.assignedInterviewerId && employees.find((e) => e.id === c.assignedInterviewerId)?.name) || null;
+  const trainerNameForCandidate = (c: Candidate): string | null =>
+    (c.trainerId && employees.find((e) => e.id === c.trainerId)?.name) || null;
+
+  // Forward Candidate's recipient prefill — both the Assigned Interviewer
+  // (running this candidate's process) AND the Branch Manager (manual
+  // override, else auto-derived from branch) are pre-selected when either
+  // is on file, since a candidate's forward usually needs to reach both.
+  // Deduped in case one person holds both roles. Still just a starting
+  // point: recipients can be added/removed freely in the dialog.
+  const defaultForwardRecipientsForCandidate = (c: Candidate): { id: string; name: string }[] => {
+    const out: { id: string; name: string }[] = [];
+    const seen = new Set<string>();
+    const add = (e: { id: string; name: string } | undefined) => {
+      if (e && !seen.has(e.id)) {
+        seen.add(e.id);
+        out.push(e);
+      }
+    };
+    if (c.assignedInterviewerId) add(employees.find((emp) => emp.id === c.assignedInterviewerId && emp.status === "active"));
+    if (c.branchManagerId) add(employees.find((emp) => emp.id === c.branchManagerId && emp.status === "active"));
+    else if (c.branch) add(branchManagerOptions.find((m) => m.branch === c.branch));
+    return out;
+  };
+
   const visibleCandidates = useMemo(() => {
     if (!isBranchManager) return candidates;
     return candidates.filter((c) => c.branch && myLocations.includes(c.branch));
   }, [candidates, isBranchManager, myLocations]);
 
+  // Column-filter option lists — sourced from the full visible roster (not
+  // just what's currently filtered) so the checklists stay stable.
+  const hiringPositionOptions = useMemo(
+    () => Array.from(new Set(visibleCandidates.map((c) => c.position).filter((p): p is string => !!p))).sort(),
+    [visibleCandidates]
+  );
+  const hiringBranchOptions = useMemo(
+    () => Array.from(new Set(visibleCandidates.map((c) => c.branch).filter((b): b is string => !!b))).sort(),
+    [visibleCandidates]
+  );
+  const hiringBranchManagerOptions = useMemo(
+    () => Array.from(new Set(visibleCandidates.map(branchManagerNameForCandidate).filter((n): n is string => !!n))).sort(),
+    [visibleCandidates]
+  );
+  const hiringAssignedInterviewerOptions = useMemo(
+    () => Array.from(new Set(visibleCandidates.map(assignedInterviewerNameForCandidate).filter((n): n is string => !!n))).sort(),
+    [visibleCandidates]
+  );
+  const hiringDepartmentOptions = useMemo(
+    () => Array.from(new Set(visibleCandidates.map((c) => c.department).filter((d): d is string => !!d))).sort(),
+    [visibleCandidates]
+  );
+  const HIRING_OUTREACH_OPTIONS = ["Text AM", "Text PM", "Call AM", "Call PM"] as const;
+  // Matched by label (not raw status code) so the header checklist can
+  // show human-readable text without the generic multi-select renderer
+  // needing a separate label-mapping prop.
+  const hiringStatusOptions = useMemo(
+    () => Array.from(new Set(visibleCandidates.map((c) => CANDIDATE_STATUS_LABEL[c.status]))).sort(),
+    [visibleCandidates]
+  );
+
   // Search/Status filters narrow what the table shows — KPI tiles and the
   // tab badge count stay based on visibleCandidates (unfiltered) above.
   const filteredCandidates = useMemo(() => {
     let result = visibleCandidates;
-    if (hiringStatusFilter) result = result.filter((c) => c.status === hiringStatusFilter);
+    if (hiringStatusFilter.size > 0) result = result.filter((c) => hiringStatusFilter.has(CANDIDATE_STATUS_LABEL[c.status]));
     const q = hiringSearch.trim().toLowerCase();
     if (q) {
       result = result.filter((c) =>
@@ -1492,8 +2084,51 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
         (c.branch ?? "").toLowerCase().includes(q),
       );
     }
+    if (hiringPositionFilter.size > 0) result = result.filter((c) => c.position && hiringPositionFilter.has(c.position));
+    if (hiringBranchFilter.size > 0) result = result.filter((c) => c.branch && hiringBranchFilter.has(c.branch));
+    if (hiringBranchManagerFilter.size > 0) {
+      result = result.filter((c) => {
+        const name = branchManagerNameForCandidate(c);
+        return !!name && hiringBranchManagerFilter.has(name);
+      });
+    }
+    if (hiringAssignedInterviewerFilter.size > 0) {
+      result = result.filter((c) => {
+        const name = assignedInterviewerNameForCandidate(c);
+        return !!name && hiringAssignedInterviewerFilter.has(name);
+      });
+    }
+    if (hiringDepartmentFilter.size > 0) result = result.filter((c) => c.department && hiringDepartmentFilter.has(c.department));
+    if (hiringOutreachFilter.size > 0) {
+      result = result.filter(
+        (c) =>
+          (hiringOutreachFilter.has("Text AM") && c.textedAm) ||
+          (hiringOutreachFilter.has("Text PM") && c.textedPm) ||
+          (hiringOutreachFilter.has("Call AM") && c.calledAm) ||
+          (hiringOutreachFilter.has("Call PM") && c.calledPm)
+      );
+    }
+    if (hiringCvFilter !== "all") result = result.filter((c) => (hiringCvFilter === "has" ? !!c.cvPath : !c.cvPath));
+    if (hiringAccountStatusFilter !== "all") {
+      result = result.filter((c) => (hiringAccountStatusFilter === "has" ? candidateHasAccount(c) : !candidateHasAccount(c)));
+    }
+    if (hiringNoteFilter !== "all") result = result.filter((c) => (hiringNoteFilter === "has" ? !!c.notes : !c.notes));
     return result;
-  }, [visibleCandidates, hiringSearch, hiringStatusFilter]);
+  }, [
+    visibleCandidates,
+    hiringSearch,
+    hiringStatusFilter,
+    hiringPositionFilter,
+    hiringBranchFilter,
+    hiringBranchManagerFilter,
+    hiringAssignedInterviewerFilter,
+    hiringDepartmentFilter,
+    hiringOutreachFilter,
+    hiringCvFilter,
+    hiringAccountStatusFilter,
+    hiringNoteFilter,
+    employeeEmailSet,
+  ]);
 
   const kpi = useMemo(() => ({
     candidates: visibleCandidates.length,
@@ -2224,18 +2859,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadWarningFormPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const employeeName = (doc.formData as unknown as WarningFormData).employeeName || "warning-form";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Employee Warning Form - ${employeeName}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Employee Warning Form - ${employeeName}.pdf`);
   };
 
   // ── W-8BEN — HR just picks a recipient; the recipient fills in their own
@@ -2323,6 +2947,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     try {
       const recipient = employees.find((e) => e.id === w8RecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
+
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["w8ben"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Form W-8BEN on file. Send another one anyway?`)) {
+        return;
+      }
 
       const doc = await createSignableDocument({
         documentType: "w8ben",
@@ -2420,18 +3049,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadW8benPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const employeeName = (doc.formData as Partial<W8benFormData>).employeeName || "w8ben-form";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `W-8BEN - ${employeeName}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `W-8BEN - ${employeeName}.pdf`);
   };
 
   const handleDeleteW8ben = async (doc: SignableDocument) => {
@@ -2568,6 +3186,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipient = employees.find((e) => e.id === w4RecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
 
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["w4"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Form W-4 on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "w4",
         formData: { employeeId: recipient.id } as unknown as Record<string, any>,
@@ -2650,18 +3273,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     if (!doc.pdfUrl) return;
     const data = doc.formData as Partial<W4FormData>;
     const employeeName = `${data.firstNameMiddleInitial ?? ""} ${data.lastName ?? ""}`.trim() || "w4-form";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `W-4 - ${employeeName}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `W-4 - ${employeeName}.pdf`);
   };
 
   const handleDeleteW4 = async (doc: SignableDocument) => {
@@ -2767,6 +3379,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipient = employees.find((e) => e.id === w9RecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
 
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["w9"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Form W-9 on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "w9",
         formData: { employeeId: recipient.id } as unknown as Record<string, any>,
@@ -2849,18 +3466,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     if (!doc.pdfUrl) return;
     const data = doc.formData as Partial<W9FormData>;
     const name = data.name || "w9-form";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `W-9 - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `W-9 - ${name}.pdf`);
   };
 
   const handleDeleteW9 = async (doc: SignableDocument) => {
@@ -2954,6 +3560,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipient = employees.find((e) => e.id === w4rRecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
 
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["w4r"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Form W-4R on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "w4r",
         formData: { employeeId: recipient.id } as unknown as Record<string, any>,
@@ -3036,18 +3647,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     if (!doc.pdfUrl) return;
     const data = doc.formData as Partial<W4RFormData>;
     const name = `${data.firstNameMiddleInitial ?? ""} ${data.lastName ?? ""}`.trim() || "w4r-form";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `W-4R - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `W-4R - ${name}.pdf`);
   };
 
   const handleDeleteW4R = async (doc: SignableDocument) => {
@@ -3107,6 +3707,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const employeeName = `${data.firstNameMiddleInitial ?? ""} ${data.lastName ?? ""}`.trim();
       const pdfUrl = await uploadW4Form(w4EmployerDialog.companyId, employeeName, new Blob([pdfBytes as unknown as BlobPart], { type: "application/pdf" }));
       await updateSignableDocumentPdfUrl(w4EmployerDialog.id, pdfUrl, merged as unknown as Record<string, any>);
+      await confirmSignableDocument(w4EmployerDialog.id, null);
       setW4EmployerDialog(null);
       await loadSentW4Forms();
     } catch (err) {
@@ -3230,6 +3831,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipient = employees.find((e) => e.id === i9RecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
 
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["i9"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Form I-9 on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "i9",
         formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
@@ -3296,6 +3902,297 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       setTimeout(() => setI9SentLinkCopied(false), 1500);
     } catch (err) {
       console.error("Failed to copy link:", err);
+    }
+  };
+
+  // ── Master W-2 Technician Agreement — consolidates 11 of the individual
+  // Technician Forms (Wage, Meal & Rest Break, Location Consent, Mileage &
+  // Fuel, Car IQ, Company Vehicle Use, Flash Technician Travel, Damage,
+  // Parts Responsibility, PTO, Confidentiality, Substance Screening) into
+  // one document with one signature — see masterW2AgreementFormTemplate.ts's
+  // header comment. HTML-captured (no source PDF, same technique as the
+  // Warning Form), genuine two-party flow like Acknowledgment of Wage: HR
+  // sends a link, the employee fills their info + uploads a license/SSN
+  // card photo and signs (FillMasterW2AgreementPage.tsx), then it lands
+  // back here for HR to add the "Employer Representative" signature. The
+  // 11 individual forms this supersedes are left in place, still sendable —
+  // this is additive, not a replacement, until a decision is made on
+  // retiring them. ──
+  const [sentMasterW2AgreementForms, setSentMasterW2AgreementForms] = useState<SignableDocument[]>([]);
+  const loadSentMasterW2AgreementForms = async () => {
+    try {
+      setSentMasterW2AgreementForms(await getSignableDocuments("master_w2_agreement"));
+    } catch (err) {
+      console.error("Failed to load sent Master W-2 Agreement forms:", err);
+    }
+  };
+  useEffect(() => {
+    if (activeTab === "masterW2Agreement" || activeTab === "jotformDocuments" || activeTab === "combineForms" || activeTab === "employerQueue") void loadSentMasterW2AgreementForms();
+  }, [activeTab]);
+  const sentMasterW2AgreementAwaitingEmployerCount = useMemo(
+    () => sentMasterW2AgreementForms.filter(isAwaitingEmployerStep).length,
+    [sentMasterW2AgreementForms]
+  );
+
+  type MasterW2AgreementSortColumn = "employee" | "branch" | "sentBy" | "status" | "sent";
+  const masterW2AgreementStatusLabel = (doc: SignableDocument): string =>
+    doc.status === "confirmed" ? "Completed"
+      : isAwaitingEmployerStep(doc) ? "Awaiting Employer Signature"
+      : doc.status === "cancelled" ? "Cancelled"
+      : "Awaiting Employee";
+  const {
+    search: masterW2AgreementSentSearch,
+    setSearch: setMasterW2AgreementSentSearch,
+    sortColumn: masterW2AgreementSentSortColumn,
+    sortDir: masterW2AgreementSentSortDir,
+    handleSort: handleMasterW2AgreementSentSort,
+    filterOptionsFor: masterW2AgreementFilterOptionsFor,
+    toggleFilterValue: masterW2AgreementToggleFilterValue,
+    clearColumnFilter: masterW2AgreementClearColumnFilter,
+    isColumnFiltered: masterW2AgreementIsColumnFiltered,
+    isValueChecked: masterW2AgreementIsValueChecked,
+    rows: sortedSentMasterW2AgreementForms,
+  } = useSortableSearchTable<SignableDocument, MasterW2AgreementSortColumn>(
+    sentMasterW2AgreementForms,
+    (doc, q) => {
+      const data = doc.formData as Partial<MasterW2AgreementFormData>;
+      const employeeName = (data.employeeName || doc.recipientName || "").toLowerCase();
+      const branch = (data.branch || "").toLowerCase();
+      return employeeName.includes(q) || branch.includes(q);
+    },
+    (doc, column) => {
+      const data = doc.formData as Partial<MasterW2AgreementFormData>;
+      switch (column) {
+        case "employee": return (data.employeeName || doc.recipientName || "").toLowerCase();
+        case "branch": return (data.branch || "").toLowerCase();
+        case "sentBy": return (doc.createdByName ?? "").toLowerCase();
+        case "status": return masterW2AgreementStatusLabel(doc).toLowerCase();
+        case "sent": return new Date(doc.createdAt).getTime();
+      }
+    },
+    (doc, column) => {
+      const data = doc.formData as Partial<MasterW2AgreementFormData>;
+      switch (column) {
+        case "branch": return data.branch || "—";
+        case "sentBy": return doc.createdByName ?? "—";
+        case "status": return masterW2AgreementStatusLabel(doc);
+        default: return "";
+      }
+    }
+  );
+
+  const [masterW2AgreementRecipientId, setMasterW2AgreementRecipientId] = useState("");
+  const [masterW2AgreementRecipientSearch, setMasterW2AgreementRecipientSearch] = useState("");
+  const [masterW2AgreementRecipientDropdownOpen, setMasterW2AgreementRecipientDropdownOpen] = useState(false);
+  const [masterW2AgreementSending, setMasterW2AgreementSending] = useState(false);
+  const [masterW2AgreementSendError, setMasterW2AgreementSendError] = useState<string | null>(null);
+  const [masterW2AgreementActionBusyId, setMasterW2AgreementActionBusyId] = useState<string | null>(null);
+  const [masterW2AgreementActionError, setMasterW2AgreementActionError] = useState<string | null>(null);
+  const [masterW2AgreementDocPreview, setMasterW2AgreementDocPreview] = useState<SignableDocument | null>(null);
+  const [masterW2AgreementPreviewExpanded, setMasterW2AgreementPreviewExpanded] = useState(false);
+  const [masterW2AgreementPreviewPdfUrl, setMasterW2AgreementPreviewPdfUrl] = useState<string | null>(null);
+  const [masterW2AgreementPreviewLoading, setMasterW2AgreementPreviewLoading] = useState(false);
+  const filteredMasterW2AgreementRecipients = useMemo(
+    () => employees.filter((e) => e.status === "active" && e.name.toLowerCase().includes(masterW2AgreementRecipientSearch.toLowerCase())),
+    [employees, masterW2AgreementRecipientSearch]
+  );
+
+  const buildMasterW2AgreementPreviewData = (employeeName: string): MasterW2AgreementFormData => {
+    const [firstName = "", ...rest] = employeeName.trim().split(/\s+/).filter(Boolean);
+    const lastName = rest.length ? rest[rest.length - 1] : "";
+    const middleName = rest.length > 1 ? rest.slice(0, -1).join(" ") : "";
+    return {
+      employeeId: "",
+      employeeName,
+      firstName,
+      middleName,
+      lastName,
+      branch: "",
+      effectiveDate: "",
+      addressStreet: "",
+      addressCity: "",
+      addressState: "",
+      addressZip: "",
+      phone: "",
+      email: "",
+      licensePhotoPath: "",
+      ssnCardPhotoPath: "",
+      employeeDateSigned: "",
+      employeeSignatureDataUrl: "",
+      employerDateSigned: "",
+      employerSignatureDataUrl: "",
+    };
+  };
+
+  /** Toggles the inline collapsible preview panel — collapsing just hides it (and revokes the blob URL); expanding (re)builds a fresh blank-filled sample from the currently-selected recipient's name. HTML-captured (not a pdf-lib fill like the other types' own preview), same technique as the document itself. */
+  const toggleMasterW2AgreementPreview = async () => {
+    if (masterW2AgreementPreviewExpanded) {
+      setMasterW2AgreementPreviewExpanded(false);
+      if (masterW2AgreementPreviewPdfUrl) URL.revokeObjectURL(masterW2AgreementPreviewPdfUrl);
+      setMasterW2AgreementPreviewPdfUrl(null);
+      return;
+    }
+    setMasterW2AgreementSendError(null);
+    setMasterW2AgreementPreviewExpanded(true);
+    setMasterW2AgreementPreviewLoading(true);
+    try {
+      const recipientName = employees.find((e) => e.id === masterW2AgreementRecipientId)?.name || "";
+      const logo = masterW2AgreementLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      const pdfBlob = await captureHtmlToPdfBlob(buildMasterW2AgreementBodyMarkup(buildMasterW2AgreementPreviewData(recipientName), logo), masterW2AgreementStyles);
+      const url = URL.createObjectURL(pdfBlob);
+      setMasterW2AgreementPreviewPdfUrl(url);
+    } catch (err) {
+      setMasterW2AgreementSendError(err instanceof Error ? err.message : "Failed to build preview.");
+    } finally {
+      setMasterW2AgreementPreviewLoading(false);
+    }
+  };
+
+  const handleSendMasterW2Agreement = async () => {
+    if (!masterW2AgreementRecipientId || !uid) return;
+    setMasterW2AgreementSending(true);
+    setMasterW2AgreementSendError(null);
+    try {
+      const recipient = employees.find((e) => e.id === masterW2AgreementRecipientId);
+      if (!recipient) throw new Error("Select a recipient first.");
+
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["master_w2_agreement"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Master W-2 Technician Agreement on file. Send another one anyway?`)) {
+        return;
+      }
+
+      const doc = await createSignableDocument({
+        documentType: "master_w2_agreement",
+        formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
+        recipientId: masterW2AgreementRecipientId,
+        recipientSlot: "employee",
+        pdfUrl: "",
+      });
+
+      const myProfileId = await getMyProfileId(uid);
+      if (!myProfileId) throw new Error("Could not resolve your profile.");
+      const thread = await getOrCreateDmThread(myProfileId, masterW2AgreementRecipientId);
+      const fillLink = `${getAppUrl()}/fill-master-w2-agreement/${doc.id}`;
+      await sendMessage({
+        dmThreadId: thread.id,
+        senderId: myProfileId,
+        senderName: displayName || "HR",
+        body: `📋 Please complete the Master W-2 Technician Comprehensive Policy, Consent & Agreement: ${fillLink}`,
+      });
+
+      void logActivity({ action: "master_w2_agreement_sent", targetType: "employee", targetId: recipient.id, targetLabel: recipient.name });
+
+      setMasterW2AgreementRecipientId("");
+      setMasterW2AgreementRecipientSearch("");
+      await loadSentMasterW2AgreementForms();
+    } catch (err) {
+      setMasterW2AgreementSendError(err instanceof Error ? err.message : "Failed to send request.");
+    } finally {
+      setMasterW2AgreementSending(false);
+    }
+  };
+
+  const handleCopyMasterW2AgreementLink = async (doc: SignableDocument) => {
+    try {
+      await navigator.clipboard.writeText(`${getAppUrl()}/fill-master-w2-agreement/${doc.id}`);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  const handleDownloadMasterW2AgreementPdf = async (doc: SignableDocument) => {
+    if (!doc.pdfUrl) return;
+    const name = (doc.formData as Partial<MasterW2AgreementFormData>).employeeName || doc.recipientName || "master-w2-agreement";
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Master W-2 Technician Agreement - ${name}.pdf`);
+  };
+
+  const handleReopenMasterW2AgreementEmployer = async (doc: SignableDocument) => {
+    if (!window.confirm("Re-open this for a new employer signature? The employee's signature stays as-is.")) return;
+    setMasterW2AgreementActionBusyId(doc.id);
+    setMasterW2AgreementActionError(null);
+    try {
+      await reopenEmployerSignature(doc.id);
+      await loadSentMasterW2AgreementForms();
+    } catch (err) {
+      setMasterW2AgreementActionError(err instanceof Error ? err.message : "Failed to reopen for re-signing.");
+    } finally {
+      setMasterW2AgreementActionBusyId(null);
+    }
+  };
+
+  const handleDeleteMasterW2Agreement = async (doc: SignableDocument) => {
+    if (!window.confirm("Permanently delete this Master W-2 Technician Agreement request?")) return;
+    setMasterW2AgreementActionBusyId(doc.id);
+    setMasterW2AgreementActionError(null);
+    try {
+      await deleteSignableDocument(doc.id);
+      await loadSentMasterW2AgreementForms();
+    } catch (err) {
+      setMasterW2AgreementActionError(err instanceof Error ? err.message : "Failed to delete.");
+    } finally {
+      setMasterW2AgreementActionBusyId(null);
+    }
+  };
+
+  // ── Complete Employer Signature — a plain signature pad (no fields to
+  // review), reassigns the document to the current HR user first so the
+  // RLS update policy allows it (same "claim" pattern Wage Ack's own dialog
+  // uses), then regenerates the whole PDF fresh with both signatures. ──
+  const [masterW2AgreementEmployerDialog, setMasterW2AgreementEmployerDialog] = useState<SignableDocument | null>(null);
+  const [masterW2AgreementEmployerSaving, setMasterW2AgreementEmployerSaving] = useState(false);
+  const [masterW2AgreementEmployerError, setMasterW2AgreementEmployerError] = useState<string | null>(null);
+  const masterW2AgreementEmployerSigPad = useSignaturePad({ width: 400, height: 120 });
+  const [masterW2AgreementLogoDataUrl, setMasterW2AgreementLogoDataUrl] = useState("");
+
+  const handleOpenMasterW2AgreementEmployerDialog = (doc: SignableDocument) => {
+    setMasterW2AgreementEmployerDialog(doc);
+    setMasterW2AgreementEmployerError(null);
+    if (!masterW2AgreementLogoDataUrl) {
+      loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")).then(setMasterW2AgreementLogoDataUrl).catch(() => {});
+    }
+  };
+
+  const handleSaveMasterW2AgreementEmployerSignature = async () => {
+    if (!masterW2AgreementEmployerDialog || !uid) return;
+    if (!masterW2AgreementEmployerSigPad.hasContent()) {
+      setMasterW2AgreementEmployerError("Please add your signature.");
+      return;
+    }
+    setMasterW2AgreementEmployerSaving(true);
+    setMasterW2AgreementEmployerError(null);
+    try {
+      const myProfileId = await getMyProfileId(uid);
+      if (!myProfileId) throw new Error("Could not resolve your profile.");
+
+      await reassignSignableDocument(masterW2AgreementEmployerDialog.id, { recipientId: myProfileId, recipientName: displayName || "HR" }, "hr_staff");
+
+      const existing = masterW2AgreementEmployerDialog.formData as MasterW2AgreementFormData;
+      const dataUrl = masterW2AgreementEmployerSigPad.toDataURL();
+      if (!dataUrl) {
+        setMasterW2AgreementEmployerError("Please add your signature.");
+        return;
+      }
+      await refreshStorageAuthToken();
+      const signatureUrl = await uploadSignableDocumentSignature(masterW2AgreementEmployerDialog.companyId, masterW2AgreementEmployerDialog.id, "hr_staff", dataUrl);
+      const signedAt = new Date().toISOString();
+
+      const merged: MasterW2AgreementFormData = { ...existing, employerSignatureDataUrl: dataUrl, employerDateSigned: signedAt };
+
+      const logo = masterW2AgreementLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      const pdfBlob = await captureHtmlToPdfBlob(buildMasterW2AgreementBodyMarkup(merged, logo), masterW2AgreementStyles);
+      const pdfUrl = await uploadMasterW2AgreementForm(masterW2AgreementEmployerDialog.companyId, existing.employeeName || "master-w2-agreement", pdfBlob);
+
+      const entry = { name: displayName || "HR", url: signatureUrl, signedAt };
+      await signDocument(masterW2AgreementEmployerDialog.id, "hr_staff", entry, pdfUrl, merged as unknown as Record<string, any>);
+      await confirmSignableDocument(masterW2AgreementEmployerDialog.id, null);
+
+      void logActivity({ action: "master_w2_agreement_employer_signed", targetType: "employee", targetLabel: existing.employeeName || "" });
+      setMasterW2AgreementEmployerDialog(null);
+      await loadSentMasterW2AgreementForms();
+    } catch (err) {
+      setMasterW2AgreementEmployerError(err instanceof Error ? err.message : "Failed to save signature.");
+    } finally {
+      setMasterW2AgreementEmployerSaving(false);
     }
   };
 
@@ -3383,6 +4280,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipient = employees.find((e) => e.id === wageAckRecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
 
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["wage_ack"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has an Acknowledgment of Wage form on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "wage_ack",
         formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
@@ -3464,18 +4366,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadWageAckPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<WageAckFormData>).employeeName || doc.recipientName || "acknowledgment-of-wage";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Acknowledgment of Wage - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Acknowledgment of Wage - ${name}.pdf`);
   };
 
   // Redo the employer signature only — the employee's original signature/
@@ -3667,6 +4558,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipient = employees.find((e) => e.id === mealRestBreakRecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
 
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["meal_rest_break"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Meal & Rest Break Policy on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "meal_rest_break",
         formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
@@ -3747,18 +4643,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadMealRestBreakPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<MealRestBreakFormData>).employeeName || doc.recipientName || "meal-rest-break";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Meal and Rest Break Acknowledgment - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Meal and Rest Break Acknowledgment - ${name}.pdf`);
   };
 
   const handleReopenMealRestBreakEmployer = async (doc: SignableDocument) => {
@@ -3936,6 +4821,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipient = employees.find((e) => e.id === carIqRecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
 
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["car_iq_agreement"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Car IQ Technician Agreement on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "car_iq_agreement",
         formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
@@ -4016,18 +4906,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadCarIqPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<CarIqAgreementFormData>).employeeName || doc.recipientName || "car-iq-agreement";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Car IQ Technician Agreement - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Car IQ Technician Agreement - ${name}.pdf`);
   };
 
   const handleDeleteCarIqAgreement = async (doc: SignableDocument) => {
@@ -4126,6 +5005,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipient = employees.find((e) => e.id === vehicleRecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
 
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["vehicle_agreement"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Company Vehicle Use Agreement on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "vehicle_agreement",
         formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
@@ -4206,18 +5090,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadVehiclePdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<VehicleAgreementFormData>).employeeName || doc.recipientName || "vehicle-agreement";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Company Vehicle Use Agreement - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Company Vehicle Use Agreement - ${name}.pdf`);
   };
 
   const handleDeleteVehicleAgreement = async (doc: SignableDocument) => {
@@ -4315,6 +5188,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipient = employees.find((e) => e.id === confidentialityRecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
 
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["employee_confidentiality"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has an Employee Confidentiality Agreement on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "employee_confidentiality",
         formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
@@ -4395,18 +5273,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadConfidentialityPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<EmployeeConfidentialityFormData>).employeeName || doc.recipientName || "employee-confidentiality";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Employee Confidentiality Agreement - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Employee Confidentiality Agreement - ${name}.pdf`);
   };
 
   const handleDeleteConfidentiality = async (doc: SignableDocument) => {
@@ -4420,6 +5287,194 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       setConfidentialityActionError(err instanceof Error ? err.message : "Failed to delete.");
     } finally {
       setConfidentialityActionBusyId(null);
+    }
+  };
+
+  // ── Non-Disclosure Agreement (General tab) — same shape as Employee
+  // Confidentiality above: single recipient, the recipient fills in
+  // everything themselves (name, nationality, address, branch) on
+  // SignNdaFormPage.tsx and signs. No employer/HR co-signature step, and no
+  // blank-template preview here (there's nothing meaningful to preview
+  // before the employee fills it in) — see ndaFormTemplate.ts's header
+  // comment for why this is a different document from Employee
+  // Confidentiality (native HTML/letterhead PDF, not a real scanned PDF). ──
+  const [sentNdaForms, setSentNdaForms] = useState<SignableDocument[]>([]);
+  const loadSentNdaForms = async () => {
+    try {
+      setSentNdaForms(await getSignableDocuments("nda_form"));
+    } catch (err) {
+      console.error("Failed to load sent Non-Disclosure Agreement forms:", err);
+    }
+  };
+  useEffect(() => {
+    if (activeTab === "ndaForm" || activeTab === "jotformDocuments" || activeTab === "combineForms") void loadSentNdaForms();
+  }, [activeTab]);
+
+  const [ndaRecipientId, setNdaRecipientId] = useState("");
+  const [ndaRecipientSearch, setNdaRecipientSearch] = useState("");
+  const [ndaRecipientDropdownOpen, setNdaRecipientDropdownOpen] = useState(false);
+  const [ndaSending, setNdaSending] = useState(false);
+  const [ndaSendError, setNdaSendError] = useState<string | null>(null);
+  const [ndaActionBusyId, setNdaActionBusyId] = useState<string | null>(null);
+  const [ndaActionError, setNdaActionError] = useState<string | null>(null);
+  const [ndaDocPreview, setNdaDocPreview] = useState<SignableDocument | null>(null);
+  const [ndaExternalName, setNdaExternalName] = useState("");
+  const [ndaSentLink, setNdaSentLink] = useState<{ link: string; recipientName: string } | null>(null);
+  const [ndaSentLinkCopied, setNdaSentLinkCopied] = useState(false);
+  const filteredNdaRecipients = useMemo(
+    () => employees.filter((e) => e.status === "active" && e.name.toLowerCase().includes(ndaRecipientSearch.toLowerCase())),
+    [employees, ndaRecipientSearch]
+  );
+
+  const [ndaLogoDataUrl, setNdaLogoDataUrl] = useState("");
+  const [ndaPreviewOpen, setNdaPreviewOpen] = useState(false);
+  const [ndaPreviewPdfUrl, setNdaPreviewPdfUrl] = useState<string | null>(null);
+  const [ndaPreviewLoading, setNdaPreviewLoading] = useState(false);
+
+  const buildNdaPreviewData = (employeeName: string): NdaFormData => ({
+    employeeId: "",
+    employeeName,
+    nationality: "",
+    address: "",
+    city: "",
+    state: "",
+    zip: "",
+    branch: "",
+    dateSigned: "",
+  });
+
+  /** Toggles the inline collapsible preview panel — collapsing just hides it (and revokes the blob URL); expanding (re)builds a fresh blank-filled sample from the currently-selected recipient's name. Same HTML/letterhead pipeline SignNdaFormPage.tsx itself uses (captureHtmlToPdfBlob), not a real-PDF-fill byte generator like Employee Confidentiality's. */
+  const toggleNdaPreview = async () => {
+    if (ndaPreviewOpen) {
+      setNdaPreviewOpen(false);
+      if (ndaPreviewPdfUrl) URL.revokeObjectURL(ndaPreviewPdfUrl);
+      setNdaPreviewPdfUrl(null);
+      return;
+    }
+    setNdaSendError(null);
+    setNdaPreviewOpen(true);
+    setNdaPreviewLoading(true);
+    try {
+      const recipientName = employees.find((e) => e.id === ndaRecipientId)?.name || "";
+      const logo = ndaLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      if (!ndaLogoDataUrl) setNdaLogoDataUrl(logo);
+      const pdfBlob = await captureHtmlPagesToPdfBlob(buildNdaFormPages(buildNdaPreviewData(recipientName), logo, undefined), ndaFormStyles);
+      const url = URL.createObjectURL(pdfBlob);
+      setNdaPreviewPdfUrl(url);
+    } catch (err) {
+      setNdaSendError(err instanceof Error ? err.message : "Failed to build preview.");
+    } finally {
+      setNdaPreviewLoading(false);
+    }
+  };
+
+  const handleSendNda = async () => {
+    if (!ndaRecipientId || !uid) return;
+    setNdaSending(true);
+    setNdaSendError(null);
+    try {
+      const recipient = employees.find((e) => e.id === ndaRecipientId);
+      if (!recipient) throw new Error("Select a recipient first.");
+
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["nda_form"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Non-Disclosure Agreement on file. Send another one anyway?`)) {
+        return;
+      }
+
+      const doc = await createSignableDocument({
+        documentType: "nda_form",
+        formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
+        recipientId: ndaRecipientId,
+        recipientSlot: "employee",
+        pdfUrl: "",
+      });
+
+      const myProfileId = await getMyProfileId(uid);
+      if (!myProfileId) throw new Error("Could not resolve your profile.");
+      const thread = await getOrCreateDmThread(myProfileId, ndaRecipientId);
+      const fillLink = `${getAppUrl()}/sign-nda-form/${doc.id}`;
+      await sendMessage({
+        dmThreadId: thread.id,
+        senderId: myProfileId,
+        senderName: displayName || "HR",
+        body: `📋 Please complete the Non-Disclosure Agreement: ${fillLink}`,
+      });
+
+      void logActivity({ action: "nda_form_sent", targetType: "employee", targetId: recipient.id, targetLabel: recipient.name });
+
+      setNdaRecipientId("");
+      setNdaRecipientSearch("");
+      await loadSentNdaForms();
+    } catch (err) {
+      setNdaSendError(err instanceof Error ? err.message : "Failed to send request.");
+    } finally {
+      setNdaSending(false);
+    }
+  };
+
+  /** No AHS profile to tie this to, so no DM — the link itself (shown in the same panel, right below "Generate Link") is the only way the recipient finds out, same as the Warning Form's "External Link" mode. */
+  const handleGenerateExternalNda = async () => {
+    setNdaSending(true);
+    setNdaSendError(null);
+    try {
+      const name = ndaExternalName.trim() || "External Recipient";
+      const doc = await createSignableDocument({
+        documentType: "nda_form",
+        formData: { employeeId: "", employeeName: name } as unknown as Record<string, any>,
+        recipientName: name,
+        recipientSlot: "employee",
+        pdfUrl: "",
+      });
+
+      void logActivity({ action: "nda_form_sent", targetType: "employee", targetLabel: name, details: { external: true } });
+
+      setNdaSentLink({ link: `${getAppUrl()}/sign-nda-external/${doc.id}`, recipientName: name });
+      setNdaExternalName("");
+      await loadSentNdaForms();
+    } catch (err) {
+      setNdaSendError(err instanceof Error ? err.message : "Failed to generate link.");
+    } finally {
+      setNdaSending(false);
+    }
+  };
+
+  const handleCopyNdaSentLink = async () => {
+    if (!ndaSentLink) return;
+    try {
+      await navigator.clipboard.writeText(ndaSentLink.link);
+      setNdaSentLinkCopied(true);
+      setTimeout(() => setNdaSentLinkCopied(false), 1500);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  const handleCopyNdaLink = async (doc: SignableDocument) => {
+    try {
+      const path = doc.recipientId ? "sign-nda-form" : "sign-nda-external";
+      await navigator.clipboard.writeText(`${getAppUrl()}/${path}/${doc.id}`);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  const handleDownloadNdaPdf = async (doc: SignableDocument) => {
+    if (!doc.pdfUrl) return;
+    const name = (doc.formData as { employeeName?: string }).employeeName || doc.recipientName || "nda-form";
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Non-Disclosure Agreement - ${name}.pdf`);
+  };
+
+  const handleDeleteNda = async (doc: SignableDocument) => {
+    if (!window.confirm("Permanently delete this Non-Disclosure Agreement request?")) return;
+    setNdaActionBusyId(doc.id);
+    setNdaActionError(null);
+    try {
+      await deleteSignableDocument(doc.id);
+      await loadSentNdaForms();
+    } catch (err) {
+      setNdaActionError(err instanceof Error ? err.message : "Failed to delete.");
+    } finally {
+      setNdaActionBusyId(null);
     }
   };
 
@@ -4501,6 +5556,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipient = employees.find((e) => e.id === substanceScreeningRecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
 
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["substance_screening"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Substance Screening & Conduct Agreement on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "substance_screening",
         formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
@@ -4581,18 +5641,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadSubstanceScreeningPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<SubstanceScreeningFormData>).employeeName || doc.recipientName || "substance-screening";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Substance Screening & Conduct Agreement - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Substance Screening & Conduct Agreement - ${name}.pdf`);
   };
 
   const handleDeleteSubstanceScreening = async (doc: SignableDocument) => {
@@ -4604,6 +5653,20 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       await loadSentSubstanceScreeningForms();
     } catch (err) {
       setSubstanceScreeningActionError(err instanceof Error ? err.message : "Failed to delete.");
+    } finally {
+      setSubstanceScreeningActionBusyId(null);
+    }
+  };
+
+  const handleReopenSubstanceScreeningEmployer = async (doc: SignableDocument) => {
+    if (!window.confirm("Re-open this for a new employer signature? The employee's signature stays as-is.")) return;
+    setSubstanceScreeningActionBusyId(doc.id);
+    setSubstanceScreeningActionError(null);
+    try {
+      await reopenEmployerSignature(doc.id);
+      await loadSentSubstanceScreeningForms();
+    } catch (err) {
+      setSubstanceScreeningActionError(err instanceof Error ? err.message : "Failed to reopen for re-signing.");
     } finally {
       setSubstanceScreeningActionBusyId(null);
     }
@@ -4757,6 +5820,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipient = employees.find((e) => e.id === ptoAckRecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
 
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["pto_ack"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a PTO & Sick Leave Policy on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "pto_ack",
         formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
@@ -4837,18 +5905,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadPtoAckPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<PtoAckFormData>).employeeName || doc.recipientName || "pto-ack";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `PTO and Sick Leave Policy Acknowledgment - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `PTO and Sick Leave Policy Acknowledgment - ${name}.pdf`);
   };
 
   const handleDeletePtoAck = async (doc: SignableDocument) => {
@@ -4958,6 +6015,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipient = employees.find((e) => e.id === partsResponsibilityRecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
 
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["parts_responsibility"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Parts Responsibility Form on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "parts_responsibility",
         formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
@@ -5038,18 +6100,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadPartsResponsibilityPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<PartsResponsibilityFormData>).employeeName || doc.recipientName || "parts-responsibility";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Parts Responsibility and Floor Protection Acknowledgment - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Parts Responsibility and Floor Protection Acknowledgment - ${name}.pdf`);
   };
 
   const handleReopenPartsResponsibilityManager = async (doc: SignableDocument) => {
@@ -5170,6 +6221,53 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     [sentMileageFuelForms]
   );
 
+  type MileageFuelSortColumn = "employee" | "branch" | "sentBy" | "status" | "sent";
+  const mileageFuelStatusLabel = (doc: SignableDocument): string =>
+    doc.status === "confirmed" ? "Completed"
+      : isAwaitingEmployerStep(doc) ? "Awaiting Employer Signature"
+      : doc.status === "cancelled" ? "Cancelled"
+      : "Awaiting Employee";
+  const {
+    search: mileageFuelSentSearch,
+    setSearch: setMileageFuelSentSearch,
+    sortColumn: mileageFuelSentSortColumn,
+    sortDir: mileageFuelSentSortDir,
+    handleSort: handleMileageFuelSentSort,
+    filterOptionsFor: mileageFuelFilterOptionsFor,
+    toggleFilterValue: mileageFuelToggleFilterValue,
+    clearColumnFilter: mileageFuelClearColumnFilter,
+    isColumnFiltered: mileageFuelIsColumnFiltered,
+    isValueChecked: mileageFuelIsValueChecked,
+    rows: sortedSentMileageFuelForms,
+  } = useSortableSearchTable<SignableDocument, MileageFuelSortColumn>(
+    sentMileageFuelForms,
+    (doc, q) => {
+      const data = doc.formData as Partial<MileageFuelFormData>;
+      const employeeName = (data.employeeName || doc.recipientName || "").toLowerCase();
+      const branch = (data.branch || "").toLowerCase();
+      return employeeName.includes(q) || branch.includes(q);
+    },
+    (doc, column) => {
+      const data = doc.formData as Partial<MileageFuelFormData>;
+      switch (column) {
+        case "employee": return (data.employeeName || doc.recipientName || "").toLowerCase();
+        case "branch": return (data.branch || "").toLowerCase();
+        case "sentBy": return (doc.createdByName ?? "").toLowerCase();
+        case "status": return mileageFuelStatusLabel(doc).toLowerCase();
+        case "sent": return new Date(doc.createdAt).getTime();
+      }
+    },
+    (doc, column) => {
+      const data = doc.formData as Partial<MileageFuelFormData>;
+      switch (column) {
+        case "branch": return data.branch || "—";
+        case "sentBy": return doc.createdByName ?? "—";
+        case "status": return mileageFuelStatusLabel(doc);
+        default: return "";
+      }
+    }
+  );
+
   const [mileageFuelRecipientId, setMileageFuelRecipientId] = useState("");
   const [mileageFuelRecipientSearch, setMileageFuelRecipientSearch] = useState("");
   const [mileageFuelRecipientDropdownOpen, setMileageFuelRecipientDropdownOpen] = useState(false);
@@ -5237,6 +6335,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     try {
       const recipient = employees.find((e) => e.id === mileageFuelRecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
+
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["mileage_fuel"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Mileage & Fuel Policy on file. Send another one anyway?`)) {
+        return;
+      }
 
       const doc = await createSignableDocument({
         documentType: "mileage_fuel",
@@ -5318,18 +6421,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadMileageFuelPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<MileageFuelFormData>).employeeName || doc.recipientName || "mileage-fuel";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Personal Vehicle Mileage and Fuel Policy Agreement - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Personal Vehicle Mileage and Fuel Policy Agreement - ${name}.pdf`);
   };
 
   const handleReopenMileageFuelEmployer = async (doc: SignableDocument) => {
@@ -5509,6 +6601,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipient = employees.find((e) => e.id === flashTechnicianTravelRecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
 
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["flash_technician_travel"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Flash Technician Travel & Out-of-State Policy on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "flash_technician_travel",
         formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
@@ -5592,18 +6689,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadFlashTechnicianTravelPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<FlashTechnicianTravelFormData>).employeeName || doc.recipientName || "flash-technician-travel";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Flash Technician Travel & Out-of-State Policy - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Flash Technician Travel & Out-of-State Policy - ${name}.pdf`);
   };
 
   const handleReopenFlashTechnicianTravelEmployer = async (doc: SignableDocument) => {
@@ -5780,6 +6866,12 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     try {
       const recipient = employees.find((e) => e.id === contractorAddendumRecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
+
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["contractor_addendum"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Master Independent Contractor Subcontractor Agreement Addendum on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "contractor_addendum",
         formData: { ...blankContractorAddendumData(), employeeId: recipient.id, signerNames: { ...CONTRACTOR_ADDENDUM_DEFAULT_SIGNER_NAMES, employee: recipient.name } } as unknown as Record<string, any>,
@@ -5858,17 +6950,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadContractorAddendumPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const name = (doc.formData as ContractorAddendumFormData).signerNames?.employee || doc.recipientName || "contractor-addendum";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blobUrl = URL.createObjectURL(await res.blob());
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Master Independent Contractor Subcontractor Agreement Addendum - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Master Independent Contractor Subcontractor Agreement Addendum - ${name}.pdf`);
   };
 
   const handleDeleteContractorAddendum = async (doc: SignableDocument) => {
@@ -6076,6 +7158,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipient = employees.find((e) => e.id === locationConsentRecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
 
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["location_consent"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Location Sharing Consent on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "location_consent",
         formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
@@ -6156,18 +7243,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadLocationConsentPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<LocationConsentFormData>).employeeName || doc.recipientName || "location-consent";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Location Sharing Consent Agreement - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Location Sharing Consent Agreement - ${name}.pdf`);
   };
 
   const handleReopenLocationConsentEmployer = async (doc: SignableDocument) => {
@@ -6351,6 +7427,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipient = employees.find((e) => e.id === damageRecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
 
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["damage"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Damage Agreement on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "damage",
         formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
@@ -6431,18 +7512,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadDamagePdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<DamageFormData>).employeeName || doc.recipientName || "damage";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Damage Agreement - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Damage Agreement - ${name}.pdf`);
   };
 
   const handleReopenDamageEmployer = async (doc: SignableDocument) => {
@@ -6642,6 +7712,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipient = employees.find((e) => e.id === contractorDataRecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
 
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["contractor_data"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has an Employee Data form on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "contractor_data",
         formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
@@ -6722,18 +7797,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadContractorDataPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<ContractorDataFormData>).employeeName || doc.recipientName || "employee-data";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Employee Data - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Employee Data - ${name}.pdf`);
   };
 
   const handleDeleteContractorData = async (doc: SignableDocument) => {
@@ -6747,6 +7811,398 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       setContractorDataActionError(err instanceof Error ? err.message : "Failed to delete.");
     } finally {
       setContractorDataActionBusyId(null);
+    }
+  };
+
+  // ── Contractor Data (US) — a second, independent copy of the Contractor
+  // Data flow above, same fields/behavior, requested as its own distinct
+  // document type. Like Contractor Data, there's no real source PDF (see
+  // contractorDataUsFormTemplate.ts's header comment):
+  // the final document is a from-scratch HTML template captured to PDF,
+  // same technique as the Warning Form/Promotion Form. Single-party, same
+  // shape as Car IQ/Parts Responsibility — one recipient fills in
+  // everything (including two ID-photo uploads, this form's first use of
+  // file uploads in this family) and signs, no employer/HR co-signature
+  // step. ──
+  const [sentContractorDataUsForms, setSentContractorDataUsForms] = useState<SignableDocument[]>([]);
+  const loadSentContractorDataUsForms = async () => {
+    try {
+      setSentContractorDataUsForms(await getSignableDocuments("contractor_data_us"));
+    } catch (err) {
+      console.error("Failed to load sent Contractor Data (US) forms:", err);
+    }
+  };
+  useEffect(() => {
+    if (activeTab === "contractorDataUs" || activeTab === "jotformDocuments" || activeTab === "combineForms") void loadSentContractorDataUsForms();
+  }, [activeTab]);
+
+  const [contractorDataUsRecipientId, setContractorDataUsRecipientId] = useState("");
+  const [contractorDataUsRecipientSearch, setContractorDataUsRecipientSearch] = useState("");
+  const [contractorDataUsRecipientDropdownOpen, setContractorDataUsRecipientDropdownOpen] = useState(false);
+  const [contractorDataUsSending, setContractorDataUsSending] = useState(false);
+  const [contractorDataUsSendError, setContractorDataUsSendError] = useState<string | null>(null);
+  const [contractorDataUsActionBusyId, setContractorDataUsActionBusyId] = useState<string | null>(null);
+  const [contractorDataUsActionError, setContractorDataUsActionError] = useState<string | null>(null);
+  const [contractorDataUsDocPreview, setContractorDataUsDocPreview] = useState<SignableDocument | null>(null);
+  const [contractorDataUsPreviewExpanded, setContractorDataUsPreviewExpanded] = useState(false);
+  const [contractorDataUsPreviewPdfUrl, setContractorDataUsPreviewPdfUrl] = useState<string | null>(null);
+  const [contractorDataUsPreviewLoading, setContractorDataUsPreviewLoading] = useState(false);
+  const [contractorDataUsLogoDataUrl, setContractorDataUsLogoDataUrl] = useState("");
+  const [contractorDataUsExternalName, setContractorDataUsExternalName] = useState("");
+  const [contractorDataUsSentLink, setContractorDataUsSentLink] = useState<{ link: string; recipientName: string } | null>(null);
+  const [contractorDataUsSentLinkCopied, setContractorDataUsSentLinkCopied] = useState(false);
+  const filteredContractorDataUsRecipients = useMemo(
+    () => employees.filter((e) => e.status === "active" && e.name.toLowerCase().includes(contractorDataUsRecipientSearch.toLowerCase())),
+    [employees, contractorDataUsRecipientSearch]
+  );
+
+  const buildContractorDataUsPreviewData = (employeeName: string): ContractorDataUsFormData => ({
+    employeeId: "",
+    employeeName,
+    firstName: employeeName,
+    middleName: "",
+    lastName: "",
+    branch: "",
+    streetAddress: "",
+    city: "",
+    state: "",
+    zipCode: "",
+    country: "",
+    phoneNumber: "",
+    otherPhoneNumber: "",
+    startDate: "",
+    birthDate: "",
+    ssn: "",
+    ssnCardUrls: [],
+    driversLicenseNumber: "",
+    driversLicenseState: "",
+    driversLicenseUrls: [],
+    email: "",
+    maritalStatus: "",
+    spouseName: "",
+    spouseEmployer: "",
+    livedInNewYork: "",
+    emergencyContacts: [{ ...BLANK_EMERGENCY_CONTACT_US }, { ...BLANK_EMERGENCY_CONTACT_US }, { ...BLANK_EMERGENCY_CONTACT_US }],
+    dateSigned: "",
+    signatureDataUrl: "",
+  });
+
+  /** Toggles the inline collapsible preview panel — collapsing just hides it (and revokes the blob URL); expanding (re)builds a fresh blank-filled sample from the currently-selected recipient's name via the HTML template (no source PDF here — see contractorDataUsFormTemplate.ts's header comment), same captureHtmlToPdfBlob technique the Warning Form's own preview uses. */
+  const toggleContractorDataUsPreview = async () => {
+    if (contractorDataUsPreviewExpanded) {
+      setContractorDataUsPreviewExpanded(false);
+      if (contractorDataUsPreviewPdfUrl) URL.revokeObjectURL(contractorDataUsPreviewPdfUrl);
+      setContractorDataUsPreviewPdfUrl(null);
+      return;
+    }
+    setContractorDataUsSendError(null);
+    setContractorDataUsPreviewExpanded(true);
+    setContractorDataUsPreviewLoading(true);
+    try {
+      const logoDataUrl = contractorDataUsLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      if (!contractorDataUsLogoDataUrl) setContractorDataUsLogoDataUrl(logoDataUrl);
+      const recipientName = employees.find((e) => e.id === contractorDataUsRecipientId)?.name || "";
+      const pdfBlob = await captureHtmlToPdfBlob(buildContractorDataUsBodyMarkup(buildContractorDataUsPreviewData(recipientName), logoDataUrl, undefined), contractorDataUsStyles);
+      const url = URL.createObjectURL(pdfBlob);
+      setContractorDataUsPreviewPdfUrl(url);
+    } catch (err) {
+      setContractorDataUsSendError(err instanceof Error ? err.message : "Failed to build preview.");
+    } finally {
+      setContractorDataUsPreviewLoading(false);
+    }
+  };
+
+  const handleSendContractorDataUs = async () => {
+    if (!contractorDataUsRecipientId || !uid) return;
+    setContractorDataUsSending(true);
+    setContractorDataUsSendError(null);
+    try {
+      const recipient = employees.find((e) => e.id === contractorDataUsRecipientId);
+      if (!recipient) throw new Error("Select a recipient first.");
+
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["contractor_data_us"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Contractor Data (US) form on file. Send another one anyway?`)) {
+        return;
+      }
+
+      const doc = await createSignableDocument({
+        documentType: "contractor_data_us",
+        formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
+        recipientId: contractorDataUsRecipientId,
+        recipientSlot: "employee",
+        pdfUrl: "",
+      });
+
+      const myProfileId = await getMyProfileId(uid);
+      if (!myProfileId) throw new Error("Could not resolve your profile.");
+      const thread = await getOrCreateDmThread(myProfileId, contractorDataUsRecipientId);
+      const fillLink = `${getAppUrl()}/fill-contractor-data-us/${doc.id}`;
+      await sendMessage({
+        dmThreadId: thread.id,
+        senderId: myProfileId,
+        senderName: displayName || "HR",
+        body: `📋 Please complete the Contractor Data (US) form: ${fillLink}`,
+      });
+
+      void logActivity({ action: "contractor_data_us_sent", targetType: "employee", targetId: recipient.id, targetLabel: recipient.name });
+
+      setContractorDataUsRecipientId("");
+      setContractorDataUsRecipientSearch("");
+      await loadSentContractorDataUsForms();
+    } catch (err) {
+      setContractorDataUsSendError(err instanceof Error ? err.message : "Failed to send request.");
+    } finally {
+      setContractorDataUsSending(false);
+    }
+  };
+
+  /** No AHS profile to tie this to, so no DM — the link itself (shown in the same panel, right below "Generate Link") is the only way the recipient finds out, same as the Warning Form's "External Link" mode. */
+  const handleGenerateExternalContractorDataUs = async () => {
+    setContractorDataUsSending(true);
+    setContractorDataUsSendError(null);
+    try {
+      const name = contractorDataUsExternalName.trim() || "External Recipient";
+      const doc = await createSignableDocument({
+        documentType: "contractor_data_us",
+        formData: { employeeId: "", employeeName: name } as unknown as Record<string, any>,
+        recipientName: name,
+        recipientSlot: "employee",
+        pdfUrl: "",
+      });
+
+      void logActivity({ action: "contractor_data_us_sent", targetType: "employee", targetLabel: name, details: { external: true } });
+
+      setContractorDataUsSentLink({ link: `${getAppUrl()}/fill-contractor-data-us-external/${doc.id}`, recipientName: name });
+      setContractorDataUsExternalName("");
+      await loadSentContractorDataUsForms();
+    } catch (err) {
+      setContractorDataUsSendError(err instanceof Error ? err.message : "Failed to generate link.");
+    } finally {
+      setContractorDataUsSending(false);
+    }
+  };
+
+  const handleCopyContractorDataUsSentLink = async () => {
+    if (!contractorDataUsSentLink) return;
+    try {
+      await navigator.clipboard.writeText(contractorDataUsSentLink.link);
+      setContractorDataUsSentLinkCopied(true);
+      setTimeout(() => setContractorDataUsSentLinkCopied(false), 1500);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  const handleCopyContractorDataUsLink = async (doc: SignableDocument) => {
+    try {
+      const path = doc.recipientId ? "fill-contractor-data-us" : "fill-contractor-data-us-external";
+      await navigator.clipboard.writeText(`${getAppUrl()}/${path}/${doc.id}`);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  const handleDownloadContractorDataUsPdf = async (doc: SignableDocument) => {
+    if (!doc.pdfUrl) return;
+    const name = (doc.formData as Partial<ContractorDataUsFormData>).employeeName || doc.recipientName || "contractor-data-us";
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Contractor Data (US) - ${name}.pdf`);
+  };
+
+  const handleDeleteContractorDataUs = async (doc: SignableDocument) => {
+    if (!window.confirm("Permanently delete this Contractor Data (US) request?")) return;
+    setContractorDataUsActionBusyId(doc.id);
+    setContractorDataUsActionError(null);
+    try {
+      await deleteSignableDocument(doc.id);
+      await loadSentContractorDataUsForms();
+    } catch (err) {
+      setContractorDataUsActionError(err instanceof Error ? err.message : "Failed to delete.");
+    } finally {
+      setContractorDataUsActionBusyId(null);
+    }
+  };
+
+  // ── Vehicle Use Agreement — a brand-new document type (distinct from the
+  // existing Company Vehicle Use Agreement, which draws onto its own real
+  // source PDF via pdf-lib). No source PDF here — same from-scratch HTML
+  // template technique as Contractor Data (see
+  // vehicleUseAgreementFormTemplate.ts's header comment). Single-party, no
+  // employer/HR co-signature step, no file uploads. ──
+  const [sentVehicleUseAgreementForms, setSentVehicleUseAgreementForms] = useState<SignableDocument[]>([]);
+  const loadSentVehicleUseAgreementForms = async () => {
+    try {
+      setSentVehicleUseAgreementForms(await getSignableDocuments("vehicle_use_agreement"));
+    } catch (err) {
+      console.error("Failed to load sent Vehicle Use Agreement forms:", err);
+    }
+  };
+  useEffect(() => {
+    if (activeTab === "vehicleUseAgreement" || activeTab === "jotformDocuments" || activeTab === "combineForms") void loadSentVehicleUseAgreementForms();
+  }, [activeTab]);
+
+  const [vehicleUseAgreementRecipientId, setVehicleUseAgreementRecipientId] = useState("");
+  const [vehicleUseAgreementRecipientSearch, setVehicleUseAgreementRecipientSearch] = useState("");
+  const [vehicleUseAgreementRecipientDropdownOpen, setVehicleUseAgreementRecipientDropdownOpen] = useState(false);
+  const [vehicleUseAgreementSending, setVehicleUseAgreementSending] = useState(false);
+  const [vehicleUseAgreementSendError, setVehicleUseAgreementSendError] = useState<string | null>(null);
+  const [vehicleUseAgreementActionBusyId, setVehicleUseAgreementActionBusyId] = useState<string | null>(null);
+  const [vehicleUseAgreementActionError, setVehicleUseAgreementActionError] = useState<string | null>(null);
+  const [vehicleUseAgreementDocPreview, setVehicleUseAgreementDocPreview] = useState<SignableDocument | null>(null);
+  const [vehicleUseAgreementPreviewExpanded, setVehicleUseAgreementPreviewExpanded] = useState(false);
+  const [vehicleUseAgreementPreviewPdfUrl, setVehicleUseAgreementPreviewPdfUrl] = useState<string | null>(null);
+  const [vehicleUseAgreementPreviewLoading, setVehicleUseAgreementPreviewLoading] = useState(false);
+  const [vehicleUseAgreementLogoDataUrl, setVehicleUseAgreementLogoDataUrl] = useState("");
+  const [vehicleUseAgreementExternalName, setVehicleUseAgreementExternalName] = useState("");
+  const [vehicleUseAgreementSentLink, setVehicleUseAgreementSentLink] = useState<{ link: string; recipientName: string } | null>(null);
+  const [vehicleUseAgreementSentLinkCopied, setVehicleUseAgreementSentLinkCopied] = useState(false);
+  const filteredVehicleUseAgreementRecipients = useMemo(
+    () => employees.filter((e) => e.status === "active" && e.name.toLowerCase().includes(vehicleUseAgreementRecipientSearch.toLowerCase())),
+    [employees, vehicleUseAgreementRecipientSearch]
+  );
+
+  const buildVehicleUseAgreementPreviewData = (employeeName: string): VehicleUseAgreementFormData => ({
+    employeeId: "",
+    employeeName,
+    firstName: employeeName,
+    lastName: "",
+    branch: "",
+    date: "",
+    dateSigned: "",
+    signatureDataUrl: "",
+  });
+
+  /** Toggles the inline collapsible preview panel — collapsing just hides it (and revokes the blob URL); expanding (re)builds a fresh blank-filled sample from the currently-selected recipient's name via the HTML template, same captureHtmlToPdfBlob technique the Warning Form's own preview uses. */
+  const toggleVehicleUseAgreementPreview = async () => {
+    if (vehicleUseAgreementPreviewExpanded) {
+      setVehicleUseAgreementPreviewExpanded(false);
+      if (vehicleUseAgreementPreviewPdfUrl) URL.revokeObjectURL(vehicleUseAgreementPreviewPdfUrl);
+      setVehicleUseAgreementPreviewPdfUrl(null);
+      return;
+    }
+    setVehicleUseAgreementSendError(null);
+    setVehicleUseAgreementPreviewExpanded(true);
+    setVehicleUseAgreementPreviewLoading(true);
+    try {
+      const logoDataUrl = vehicleUseAgreementLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      if (!vehicleUseAgreementLogoDataUrl) setVehicleUseAgreementLogoDataUrl(logoDataUrl);
+      const recipientName = employees.find((e) => e.id === vehicleUseAgreementRecipientId)?.name || "";
+      const pdfBlob = await captureHtmlToPdfBlob(buildVehicleUseAgreementBodyMarkup(buildVehicleUseAgreementPreviewData(recipientName), logoDataUrl, undefined), vehicleUseAgreementStyles);
+      const url = URL.createObjectURL(pdfBlob);
+      setVehicleUseAgreementPreviewPdfUrl(url);
+    } catch (err) {
+      setVehicleUseAgreementSendError(err instanceof Error ? err.message : "Failed to build preview.");
+    } finally {
+      setVehicleUseAgreementPreviewLoading(false);
+    }
+  };
+
+  const handleSendVehicleUseAgreement = async () => {
+    if (!vehicleUseAgreementRecipientId || !uid) return;
+    setVehicleUseAgreementSending(true);
+    setVehicleUseAgreementSendError(null);
+    try {
+      const recipient = employees.find((e) => e.id === vehicleUseAgreementRecipientId);
+      if (!recipient) throw new Error("Select a recipient first.");
+
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["vehicle_use_agreement"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Vehicle Use Agreement on file. Send another one anyway?`)) {
+        return;
+      }
+
+      const doc = await createSignableDocument({
+        documentType: "vehicle_use_agreement",
+        formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
+        recipientId: vehicleUseAgreementRecipientId,
+        recipientSlot: "employee",
+        pdfUrl: "",
+      });
+
+      const myProfileId = await getMyProfileId(uid);
+      if (!myProfileId) throw new Error("Could not resolve your profile.");
+      const thread = await getOrCreateDmThread(myProfileId, vehicleUseAgreementRecipientId);
+      const fillLink = `${getAppUrl()}/fill-vehicle-use-agreement/${doc.id}`;
+      await sendMessage({
+        dmThreadId: thread.id,
+        senderId: myProfileId,
+        senderName: displayName || "HR",
+        body: `📋 Please complete the Vehicle Use Agreement form: ${fillLink}`,
+      });
+
+      void logActivity({ action: "vehicle_use_agreement_sent", targetType: "employee", targetId: recipient.id, targetLabel: recipient.name });
+
+      setVehicleUseAgreementRecipientId("");
+      setVehicleUseAgreementRecipientSearch("");
+      await loadSentVehicleUseAgreementForms();
+    } catch (err) {
+      setVehicleUseAgreementSendError(err instanceof Error ? err.message : "Failed to send request.");
+    } finally {
+      setVehicleUseAgreementSending(false);
+    }
+  };
+
+  /** No AHS profile to tie this to, so no DM — the link itself (shown in the same panel, right below "Generate Link") is the only way the recipient finds out, same as the Warning Form's "External Link" mode. */
+  const handleGenerateExternalVehicleUseAgreement = async () => {
+    setVehicleUseAgreementSending(true);
+    setVehicleUseAgreementSendError(null);
+    try {
+      const name = vehicleUseAgreementExternalName.trim() || "External Recipient";
+      const doc = await createSignableDocument({
+        documentType: "vehicle_use_agreement",
+        formData: { employeeId: "", employeeName: name } as unknown as Record<string, any>,
+        recipientName: name,
+        recipientSlot: "employee",
+        pdfUrl: "",
+      });
+
+      void logActivity({ action: "vehicle_use_agreement_sent", targetType: "employee", targetLabel: name, details: { external: true } });
+
+      setVehicleUseAgreementSentLink({ link: `${getAppUrl()}/fill-vehicle-use-agreement-external/${doc.id}`, recipientName: name });
+      setVehicleUseAgreementExternalName("");
+      await loadSentVehicleUseAgreementForms();
+    } catch (err) {
+      setVehicleUseAgreementSendError(err instanceof Error ? err.message : "Failed to generate link.");
+    } finally {
+      setVehicleUseAgreementSending(false);
+    }
+  };
+
+  const handleCopyVehicleUseAgreementSentLink = async () => {
+    if (!vehicleUseAgreementSentLink) return;
+    try {
+      await navigator.clipboard.writeText(vehicleUseAgreementSentLink.link);
+      setVehicleUseAgreementSentLinkCopied(true);
+      setTimeout(() => setVehicleUseAgreementSentLinkCopied(false), 1500);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  const handleCopyVehicleUseAgreementLink = async (doc: SignableDocument) => {
+    try {
+      const path = doc.recipientId ? "fill-vehicle-use-agreement" : "fill-vehicle-use-agreement-external";
+      await navigator.clipboard.writeText(`${getAppUrl()}/${path}/${doc.id}`);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  const handleDownloadVehicleUseAgreementPdf = async (doc: SignableDocument) => {
+    if (!doc.pdfUrl) return;
+    const name = (doc.formData as Partial<VehicleUseAgreementFormData>).employeeName || doc.recipientName || "vehicle-use-agreement";
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Vehicle Use Agreement - ${name}.pdf`);
+  };
+
+  const handleDeleteVehicleUseAgreement = async (doc: SignableDocument) => {
+    if (!window.confirm("Permanently delete this Vehicle Use Agreement request?")) return;
+    setVehicleUseAgreementActionBusyId(doc.id);
+    setVehicleUseAgreementActionError(null);
+    try {
+      await deleteSignableDocument(doc.id);
+      await loadSentVehicleUseAgreementForms();
+    } catch (err) {
+      setVehicleUseAgreementActionError(err instanceof Error ? err.message : "Failed to delete.");
+    } finally {
+      setVehicleUseAgreementActionBusyId(null);
     }
   };
 
@@ -6839,6 +8295,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       const recipient = employees.find((e) => e.id === directDepositRecipientId);
       if (!recipient) throw new Error("Select a recipient first.");
 
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["direct_deposit"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Direct Deposit Authorization on file. Send another one anyway?`)) {
+        return;
+      }
+
       const doc = await createSignableDocument({
         documentType: "direct_deposit",
         formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
@@ -6919,18 +8380,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadDirectDepositPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<DirectDepositFormData>).employeeName || doc.recipientName || "direct-deposit";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Direct Deposit Authorization - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Direct Deposit Authorization - ${name}.pdf`);
   };
 
   const handleDeleteDirectDeposit = async (doc: SignableDocument) => {
@@ -6989,39 +8439,38 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       if (myProfileId) {
         const employeeName = (doc.formData as { employeeName?: string })?.employeeName || doc.recipientName || "an employee";
         const thread = await getOrCreateDmThread(myProfileId, recipient.id);
-        // Deep-links straight to the right Automated Forms tab (same
-        // ?tab= param VALID_HR_TABS/hrSearchParams already reads on load) —
-        // a real clickable link, not just an instruction to go find the
-        // tab manually.
-        const tabKey =
-          doc.documentType === "i9" ? "i9"
-          : doc.documentType === "meal_rest_break" ? "mealRestBreak"
-          : doc.documentType === "parts_responsibility" ? "partsResponsibility"
-          : doc.documentType === "mileage_fuel" ? "mileageFuel"
-          : doc.documentType === "location_consent" ? "locationConsent"
-          : doc.documentType === "damage" ? "damage"
-          : doc.documentType === "substance_screening" ? "substanceScreening"
-          : doc.documentType === "flash_technician_travel" ? "flashTechnicianTravel"
-          : "wageAck";
-        const tabLink = `${getAppUrl()}/m/hr/hr-dashboard?tab=${tabKey}`;
+        // Every type but i9 now links straight to sign-manager-review — a
+        // standalone page authorized by "are you this document's current
+        // recipient" rather than the HR Dashboard's ADMIN/HR-only role
+        // gate. The reassign target here is routinely a real line manager
+        // with neither role — confirmed live on 2026-09-10 for three
+        // Branch/Senior Branch Managers who couldn't open the old
+        // hr-dashboard link at all. i9's Section 2 needs real review
+        // fields (documents examined, first day employed, business info),
+        // not just a signature, so it isn't on that page yet and still
+        // deep-links into the HR Dashboard's Form I-9 tab.
+        const tabLink =
+          doc.documentType === "i9"
+            ? `${getAppUrl()}/m/hr/hr-dashboard?tab=i9`
+            : `${getAppUrl()}/sign-manager-review/${doc.id}`;
         const body =
           doc.documentType === "i9"
             ? `📋 Please complete Section 2 (document review + employer/AR signature) of Form I-9 for ${employeeName} — [open the Form I-9 tab](${tabLink}) in the HR Dashboard.`
             : doc.documentType === "meal_rest_break"
-            ? `📋 Please add the employer signature to the Employee Meal and Rest Break Policy Acknowledgment for ${employeeName} — [open the Meal & Rest Break Policy tab](${tabLink}) in the HR Dashboard.`
+            ? `📋 Please add the employer signature to the Employee Meal and Rest Break Policy Acknowledgment for ${employeeName}: ${tabLink}`
             : doc.documentType === "parts_responsibility"
-            ? `📋 Please add the manager/supervisor signature to the Parts Responsibility and Technician Floor Protection Acknowledgment Form for ${employeeName} — [open the Parts Responsibility and Technician Floor Protection Acknowledgment Form tab](${tabLink}) in the HR Dashboard.`
+            ? `📋 Please add the manager/supervisor signature to the Parts Responsibility and Technician Floor Protection Acknowledgment Form for ${employeeName}: ${tabLink}`
             : doc.documentType === "mileage_fuel"
-            ? `📋 Please add the employer/representative signature to the Personal Vehicle Mileage and Fuel Policy Agreement for ${employeeName} — [open the Mileage & Fuel Policy tab](${tabLink}) in the HR Dashboard.`
+            ? `📋 Please add the employer/representative signature to the Personal Vehicle Mileage and Fuel Policy Agreement for ${employeeName}: ${tabLink}`
             : doc.documentType === "location_consent"
-            ? `📋 Please add the employer/representative signature to the Employee Mobile App Location Sharing Consent Agreement for ${employeeName} — [open the Location Sharing Consent tab](${tabLink}) in the HR Dashboard.`
+            ? `📋 Please add the employer/representative signature to the Employee Mobile App Location Sharing Consent Agreement for ${employeeName}: ${tabLink}`
             : doc.documentType === "damage"
-            ? `📋 Please add the employer/representative signature to the Damage, Part Loss, and Tool Penalty Commission Deduction Agreement for ${employeeName} — [open the Damage Agreement tab](${tabLink}) in the HR Dashboard.`
+            ? `📋 Please add the employer/representative signature to the Damage, Part Loss, and Tool Penalty Commission Deduction Agreement for ${employeeName}: ${tabLink}`
             : doc.documentType === "substance_screening"
-            ? `📋 Please add the company representative signature to the Substance Screening & Conduct Agreement for ${employeeName} — [open the Substance Screening & Conduct Agreement tab](${tabLink}) in the HR Dashboard.`
+            ? `📋 Please add the company representative signature to the Substance Screening & Conduct Agreement for ${employeeName}: ${tabLink}`
             : doc.documentType === "flash_technician_travel"
-            ? `📋 Please add the employer/representative signature to the Flash Technician Travel & Out-of-State Policy for ${employeeName} — [open the Flash Technician Travel tab](${tabLink}) in the HR Dashboard.`
-            : `📋 Please add the employer/representative signature to the Acknowledgment of Wage & Compensation Structure for ${employeeName} — [open the Acknowledgment of Wage tab](${tabLink}) in the HR Dashboard.`;
+            ? `📋 Please add the employer/representative signature to the Flash Technician Travel & Out-of-State Policy for ${employeeName}: ${tabLink}`
+            : `📋 Please add the employer/representative signature to the Acknowledgment of Wage & Compensation Structure for ${employeeName}: ${tabLink}`;
         await sendMessage({
           dmThreadId: thread.id,
           senderId: myProfileId,
@@ -7081,11 +8530,13 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       ...sentLocationConsentForms.map((doc) => ({ doc, formLabel: "Location Sharing Consent Agreement" })),
       ...sentDamageForms.map((doc) => ({ doc, formLabel: "Damage Agreement" })),
       ...sentContractorDataForms.map((doc) => ({ doc, formLabel: "Employee Data" })),
+      ...sentContractorDataUsForms.map((doc) => ({ doc, formLabel: "Contractor Data (US)" })),
       ...sentDirectDepositForms.map((doc) => ({ doc, formLabel: "Direct Deposit Authorization" })),
       ...sentSubstanceScreeningForms.map((doc) => ({ doc, formLabel: "Substance Screening & Conduct Agreement" })),
+      ...sentVehicleUseAgreementForms.map((doc) => ({ doc, formLabel: "Vehicle Use Agreement" })),
     ];
     return rows.sort((a, b) => new Date(b.doc.createdAt).getTime() - new Date(a.doc.createdAt).getTime());
-  }, [sentW8benForms, sentW4Forms, sentW9Forms, sentW4RForms, sentI9Forms, sentWageAckForms, sentCarIqAgreementForms, sentVehicleAgreementForms, sentEmployeeConfidentialityForms, sentMealRestBreakForms, sentPtoAckForms, sentPartsResponsibilityForms, sentMileageFuelForms, sentLocationConsentForms, sentDamageForms, sentContractorDataForms, sentDirectDepositForms, sentSubstanceScreeningForms]);
+  }, [sentW8benForms, sentW4Forms, sentW9Forms, sentW4RForms, sentI9Forms, sentWageAckForms, sentCarIqAgreementForms, sentVehicleAgreementForms, sentEmployeeConfidentialityForms, sentMealRestBreakForms, sentPtoAckForms, sentPartsResponsibilityForms, sentMileageFuelForms, sentLocationConsentForms, sentDamageForms, sentContractorDataForms, sentContractorDataUsForms, sentDirectDepositForms, sentSubstanceScreeningForms, sentVehicleUseAgreementForms]);
 
   const [signedFormsSearch, setSignedFormsSearch] = useState("");
   const [signedFormsTypeFilter, setSignedFormsTypeFilter] = useState("");
@@ -7118,23 +8569,48 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     return { label: "Awaiting Completion", className: "bg-yellow-500/20 text-yellow-300" };
   };
 
+  // Click a column header to sort by it; click the same one again to flip
+  // direction. Defaults to the same newest-first order signedFormRows
+  // itself is already built in, so "no sort chosen yet" looks identical to
+  // today's behavior.
+  type SignedFormsSortColumn = "name" | "form" | "sentBy" | "status" | "sent";
+  const [signedFormsSortColumn, setSignedFormsSortColumn] = useState<SignedFormsSortColumn | null>(null);
+  const [signedFormsSortDir, setSignedFormsSortDir] = useState<"asc" | "desc">("asc");
+  const handleSignedFormsSort = (column: SignedFormsSortColumn) => {
+    if (signedFormsSortColumn === column) {
+      setSignedFormsSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSignedFormsSortColumn(column);
+      setSignedFormsSortDir("asc");
+    }
+  };
+  const sortedSignedFormRows = useMemo(() => {
+    if (!signedFormsSortColumn) return filteredSignedFormRows;
+    const key = (row: { doc: SignableDocument; formLabel: string }): string | number => {
+      switch (signedFormsSortColumn) {
+        case "name": return signedFormNameOf(row.doc).toLowerCase();
+        case "form": return row.formLabel.toLowerCase();
+        case "sentBy": return (row.doc.createdByName ?? "").toLowerCase();
+        case "status": return signedFormStatusLabel(row).label.toLowerCase();
+        case "sent": return new Date(row.doc.createdAt).getTime();
+      }
+    };
+    const dir = signedFormsSortDir === "asc" ? 1 : -1;
+    return [...filteredSignedFormRows].sort((a, b) => {
+      const ka = key(a), kb = key(b);
+      if (ka < kb) return -1 * dir;
+      if (ka > kb) return 1 * dir;
+      return 0;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredSignedFormRows, signedFormsSortColumn, signedFormsSortDir]);
+
   const [signedFormPreview, setSignedFormPreview] = useState<{ doc: SignableDocument; formLabel: string } | null>(null);
 
   const handleDownloadSignedForm = async (row: { doc: SignableDocument; formLabel: string }) => {
     if (!row.doc.pdfUrl) return;
     const name = signedFormNameOf(row.doc);
-    try {
-      const res = await fetch(row.doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `${row.formLabel} - ${name}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(row.doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(row.doc.pdfUrl, `${row.formLabel} - ${name}.pdf`);
   };
 
   // ── Combine Forms — pick a technician, check off which of the acknowledgment/
@@ -7153,11 +8629,9 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const GENERAL_FORM_TYPES: { type: SignableDocumentType; label: string }[] = [
     { type: "w8ben", label: "Form W-8BEN" },
     { type: "w4", label: "Form W-4" },
-    { type: "w9", label: "Form W-9" },
-    { type: "w4r", label: "Form W-4R" },
-    { type: "i9", label: "Form I-9 (Employment Eligibility)" },
   ];
   const TECHNICIAN_FORM_TYPES: { type: SignableDocumentType; label: string }[] = [
+    { type: "master_w2_agreement", label: "Master W-2 Technician Agreement" },
     { type: "wage_ack", label: "Acknowledgment of Wage" },
     { type: "car_iq_agreement", label: "Car IQ Technician Agreement" },
     { type: "vehicle_agreement", label: "Company Vehicle Use Agreement" },
@@ -7172,6 +8646,17 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     { type: "parts_responsibility", label: "Parts Responsibility Form" },
     { type: "pto_ack", label: "PTO & Sick Leave Policy" },
     { type: "substance_screening", label: "Substance Screening & Conduct Agreement" },
+    { type: "w4r", label: "Form W-4R" },
+    { type: "i9", label: "Form I-9 (Employment Eligibility)" },
+  ];
+  // BM, SBS, Tech Director, Tech Assistant Director tier — same grouping as
+  // ReportHRDaily's own "Automated Forms" tab columns (automatedFormsManagementTabs).
+  const MANAGEMENT_FORM_TYPES: { type: SignableDocumentType; label: string }[] = [
+    { type: "contractor_data_us", label: "Contractor Data (US)" },
+    { type: "contractor_addendum", label: "Master Independent Contractor Subcontractor Agreement Addendum" },
+    { type: "nda_form", label: "Non-Disclosure Agreement" },
+    { type: "vehicle_use_agreement", label: "Vehicle Use Agreement" },
+    { type: "w9", label: "Form W-9" },
   ];
 
   const [combineFormsRecipientId, setCombineFormsRecipientId] = useState("");
@@ -7196,6 +8681,48 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const [combineFormsSentNotice, setCombineFormsSentNotice] = useState<string | null>(null);
   const [combineFormsCopyLink, setCombineFormsCopyLink] = useState<string | null>(null);
 
+  // "Send All Selected" on the Forms popup (~line 1606) — saves the
+  // candidate's picks, then jumps to Bulk Form Send with those picks and
+  // the candidate (or their name, if they have no AHS account yet)
+  // preselected, instead of making HR re-check the same boxes there. Only
+  // the types Bulk Form Send actually supports get preselected — it covers
+  // onboarding paperwork, not the HR action forms (warning/promotion/
+  // termination), which stay reachable only via each row's own "Send →".
+  const handleSendAllSelected = async () => {
+    if (!formsDialog) return;
+    const bulkSendableTypes = new Set<SignableDocumentType>(
+      [...GENERAL_FORM_TYPES, ...TECHNICIAN_FORM_TYPES, ...MANAGEMENT_FORM_TYPES].map((f) => f.type)
+    );
+    const toSend = Array.from(formsDialog.selected).filter((t) => bulkSendableTypes.has(t));
+    if (toSend.length === 0) {
+      setError('None of the selected forms can be sent as a bundle — use "Send →" next to each one instead.');
+      return;
+    }
+    setSavingFormsDialog(true);
+    try {
+      await saveFormsDialog(formsDialog);
+      const candidate = candidates.find((c) => c.id === formsDialog.candidateId);
+      const profileId = candidate?.email ? profileIdByEmail.get(candidate.email.trim().toLowerCase()) : undefined;
+      const recipient = profileId ? employees.find((e) => e.id === profileId) : undefined;
+      setSelectedFormTypes(new Set(toSend));
+      if (recipient) {
+        setCombineFormsRecipientId(recipient.id);
+        setCombineFormsRecipientSearch(`${recipient.name} — ${ROLE_LABELS[normalizeRole(recipient.position)] ?? recipient.position}`);
+        setCombineFormsExternalName("");
+      } else {
+        setCombineFormsRecipientId("");
+        setCombineFormsRecipientSearch("");
+        setCombineFormsExternalName(formsDialog.candidateName);
+      }
+      setFormsDialog(null);
+      setActiveTab("combineForms");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save required forms.");
+    } finally {
+      setSavingFormsDialog(false);
+    }
+  };
+
   const handleGenerateCombinedForms = async (deliver: "message" | "copyLink") => {
     // "message" always needs a real AHS teammate (there's no one to DM otherwise).
     // "copyLink" also accepts a typed name, or no name at all — same "name isn't
@@ -7209,6 +8736,24 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     setCombineFormsSentNotice(null);
     setCombineFormsCopyLink(null);
     try {
+      // Nothing else stops the same packet from being generated twice for
+      // the same person (e.g. re-clicking after navigating away and back) —
+      // this is exactly how a batch of real duplicate hr_signable_documents
+      // rows got created in production. Only checked for a real AHS
+      // recipient — an external/no-login recipient has no stable identifier
+      // to match duplicates against.
+      if (recipient) {
+        const alreadySent = await getExistingActiveDocumentTypes(recipient.id, Array.from(selectedFormTypes));
+        if (alreadySent.length > 0) {
+          const labelByType = new Map(
+            [...GENERAL_FORM_TYPES, ...TECHNICIAN_FORM_TYPES, ...MANAGEMENT_FORM_TYPES].map((f) => [f.type, f.label])
+          );
+          const names = alreadySent.map((t) => labelByType.get(t) ?? t).join(", ");
+          if (!window.confirm(`${recipient.name} already has these forms on file: ${names}.\n\nSend them again anyway?`)) {
+            return;
+          }
+        }
+      }
       const docs = await Promise.all(
         Array.from(selectedFormTypes).map((type) =>
           createSignableDocument(
@@ -7290,18 +8835,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadI9Pdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const employeeName = (doc.formData as Partial<I9FormData>).employeeName || "i9-form";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Form I-9 - ${employeeName}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Form I-9 - ${employeeName}.pdf`);
   };
 
   const handleDeleteI9 = async (doc: SignableDocument) => {
@@ -7313,6 +8847,25 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       await loadSentI9Forms();
     } catch (err) {
       setI9ActionError(err instanceof Error ? err.message : "Failed to delete.");
+    } finally {
+      setI9ActionBusyId(null);
+    }
+  };
+
+  // Re-opens Section 2 for a redo — keeps the employee's Section 1 signature
+  // and formData untouched, same "reassign back to pending_signature/
+  // hr_staff" primitive every other document type's own Re-sign uses. Once
+  // reopened, the row's status/recipientSlot match isAwaitingEmployerStep
+  // again, so "Complete Section 2 →" reappears on its own.
+  const handleReopenI9Section2 = async (doc: SignableDocument) => {
+    if (!window.confirm("Re-open Section 2 for a redo? The employee's Section 1 signature stays as-is.")) return;
+    setI9ActionBusyId(doc.id);
+    setI9ActionError(null);
+    try {
+      await reopenEmployerSignature(doc.id);
+      await loadSentI9Forms();
+    } catch (err) {
+      setI9ActionError(err instanceof Error ? err.message : "Failed to reopen for re-signing.");
     } finally {
       setI9ActionBusyId(null);
     }
@@ -7840,18 +9393,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadPromoFormPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const employeeName = (doc.formData as unknown as PromotionFormData).employeeName || "promotion-form";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Employee Promotion Form - ${employeeName}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Employee Promotion Form - ${employeeName}.pdf`);
   };
 
   const handleCopyPromotionFormLink = async (doc: SignableDocument) => {
@@ -8253,18 +9795,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadActionPlanFormPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const employeeName = (doc.formData as unknown as ActionPlanFormData).employeeName || "action-plan-form";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Manager Action Plan Form - ${employeeName}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Manager Action Plan Form - ${employeeName}.pdf`);
   };
 
   const handleCopyActionPlanFormLink = async (doc: SignableDocument) => {
@@ -8637,18 +10168,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadTerminationFormPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const employeeName = (doc.formData as unknown as TerminationFormData).employeeName || "termination-form";
-    try {
-      const res = await fetch(doc.pdfUrl);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `Termination Notice - ${employeeName}.pdf`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(doc.pdfUrl, "_blank", "noopener,noreferrer");
-    }
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Termination Notice - ${employeeName}.pdf`);
   };
 
   const handleCopyTerminationFormLink = async (doc: SignableDocument) => {
@@ -9437,11 +10957,14 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     setSavingCandidate(true);
     setError(null);
     try {
-      const created = await addCandidate(newCandidate);
+      const created = await addCandidate({
+        ...newCandidate,
+        source: newCandidate.source === "Other" ? newCandidate.sourceOther.trim() : newCandidate.source,
+      });
       // The candidate row is saved at this point — close the form and
       // refresh the list regardless of what happens next, so a CV upload
       // failure doesn't strand the UI on a stale, still-open form.
-      setNewCandidate({ name: "", phone: "", email: "", position: "", branch: "" });
+      setNewCandidate({ name: "", phone: "", email: "", position: "", branch: "", department: "", branchManagerId: "", source: "", sourceOther: "" });
       setCvFile(null);
       setShowAddCandidate(false);
       await loadCandidates();
@@ -9466,16 +10989,42 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     }
   };
 
-  // Interviewing/Training require an accompanying date — instead of saving
-  // immediately, open a small dialog to collect it first.
-  const [statusDateDialog, setStatusDateDialog] = useState<{ candidateId: string; candidateName: string; status: CandidateStatus; label: string; date: string } | null>(null);
+  // Interviewing/Training/Withdrawn require an accompanying date — instead
+  // of saving immediately, open a small dialog to collect it first.
+  // Interviewing also collects a time (feeds the Interview Calendar tab);
+  // Training also collects an end date — both in the same dialog, both
+  // optional (status still saves without one).
+  const [statusDateDialog, setStatusDateDialog] = useState<{ candidateId: string; candidateName: string; status: CandidateStatus; label: string; date: string; time: string; timezone: "CST" | "EST"; endDate: string; trainerId: string } | null>(null);
+  // Trainer picker on the Training dialog — typeable, not a plain dropdown
+  // (trainerOptions can run long), same search+select combobox pattern as
+  // Forward Candidate's recipient picker.
+  const [trainerSearch, setTrainerSearch] = useState("");
+  const [trainerDropdownOpen, setTrainerDropdownOpen] = useState(false);
+  const filteredTrainerOptions = useMemo(() => {
+    const q = trainerSearch.trim().toLowerCase();
+    if (!q) return trainerOptions;
+    return trainerOptions.filter((t) => t.name.toLowerCase().includes(q));
+  }, [trainerOptions, trainerSearch]);
 
   const handleCandidateStatus = async (id: string, status: CandidateStatus) => {
     const requiredLabel = STATUS_REQUIRES_DATE[status];
     if (requiredLabel) {
       const candidate = candidates.find((c) => c.id === id);
-      const existingDate = status === "interviewing" ? candidate?.interviewDate : candidate?.trainingStartDate;
-      setStatusDateDialog({ candidateId: id, candidateName: candidate?.name || "", status, label: requiredLabel, date: existingDate || today });
+      const existingDate =
+        status === "interviewing" ? candidate?.interviewDate : status === "training" ? candidate?.trainingStartDate : candidate?.withdrawnDate;
+      setStatusDateDialog({
+        candidateId: id,
+        candidateName: candidate?.name || "",
+        status,
+        label: requiredLabel,
+        date: existingDate || today,
+        time: candidate?.interviewTime || "",
+        timezone: candidate?.interviewTimezone || "CST",
+        endDate: candidate?.trainingEndDate || "",
+        trainerId: candidate?.trainerId || "",
+      });
+      setTrainerSearch(candidate?.trainerId ? trainerNameForCandidate(candidate) || "" : "");
+      setTrainerDropdownOpen(false);
       return;
     }
     try {
@@ -9491,14 +11040,36 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleConfirmStatusDate = async () => {
     if (!statusDateDialog) return;
     try {
-      await updateCandidateStatus(statusDateDialog.candidateId, statusDateDialog.status, statusDateDialog.date);
+      await updateCandidateStatus(
+        statusDateDialog.candidateId,
+        statusDateDialog.status,
+        statusDateDialog.date,
+        statusDateDialog.status === "training" ? statusDateDialog.endDate || undefined : undefined,
+        statusDateDialog.status === "interviewing" ? statusDateDialog.time || undefined : undefined,
+        statusDateDialog.status === "interviewing" ? statusDateDialog.timezone : undefined
+      );
+      // Trainer isn't part of hr_update_candidate_status() (it's a plain
+      // field, not a status-transition side effect like the dates above —
+      // same convention as Branch Manager/Assigned Interviewer) but is
+      // still collected in this same Training dialog for convenience, so
+      // save it alongside the status change rather than in a separate step.
+      if (statusDateDialog.status === "training") {
+        await updateCandidateFields(statusDateDialog.candidateId, { trainerId: statusDateDialog.trainerId });
+      }
       await loadCandidates();
       void logActivity({
         action: "candidate_status_changed",
         targetType: "candidate",
         targetId: statusDateDialog.candidateId,
         targetLabel: statusDateDialog.candidateName,
-        details: { status: statusDateDialog.status, date: statusDateDialog.date },
+        details: {
+          status: statusDateDialog.status,
+          date: statusDateDialog.date,
+          time: statusDateDialog.time || undefined,
+          timezone: statusDateDialog.status === "interviewing" ? statusDateDialog.timezone : undefined,
+          endDate: statusDateDialog.endDate || undefined,
+          trainerId: statusDateDialog.status === "training" ? statusDateDialog.trainerId || undefined : undefined,
+        },
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to update candidate status.");
@@ -9579,6 +11150,121 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     }
   };
 
+  // Candidate Notes — three independent slots (HR/Interviewer/Screening,
+  // see 0241_hr_candidates_screening_interviewer_notes.sql) stacked in one
+  // Note column cell, each its own inline pencil-edit, same click-to-edit
+  // pattern used elsewhere in this file (e.g. Estimate Time on Payroll
+  // Detail). One shared draft/editing-cell state, keyed by which of the
+  // three fields is open, so editing one never touches the others.
+  type CandidateNoteField = "notes" | "interviewerNote" | "screeningNote";
+  const [editingNoteCell, setEditingNoteCell] = useState<{ id: string; field: CandidateNoteField } | null>(null);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [savingNoteCell, setSavingNoteCell] = useState<{ id: string; field: CandidateNoteField } | null>(null);
+  const handleSaveCandidateNote = async (id: string, field: CandidateNoteField) => {
+    setSavingNoteCell({ id, field });
+    try {
+      if (field === "notes") await updateCandidateNotes(id, noteDraft);
+      else if (field === "interviewerNote") await updateCandidateInterviewerNote(id, noteDraft);
+      else await updateCandidateScreeningNote(id, noteDraft);
+      setCandidates((prev) => prev.map((c) => (c.id === id ? { ...c, [field]: noteDraft.trim() || null } : c)));
+      logFieldEditOptimistic(id, field);
+      setEditingNoteCell(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save note.");
+    } finally {
+      setSavingNoteCell(null);
+    }
+  };
+
+  // Candidate/Position/Branch/Contact — inline-editable so a data-entry
+  // mismatch (e.g. an email typo silently making Account Status read "Not
+  // Created" even though a real account exists under the correct address)
+  // can be fixed directly here instead of needing to delete and re-add the
+  // whole candidate. Same click-to-edit pattern as the Note column above,
+  // one shared draft object since Contact edits two fields (phone + email)
+  // at once.
+  type CandidateEditField = "name" | "position" | "branch" | "contact" | "department" | "branchManager" | "assignedInterviewer";
+  const [editingCandidateCell, setEditingCandidateCell] = useState<{ id: string; field: CandidateEditField } | null>(null);
+  const [candidateFieldDraft, setCandidateFieldDraft] = useState({ name: "", position: "", branch: "", phone: "", email: "", department: "", branchManagerId: "", assignedInterviewerId: "", source: "", sourceOther: "" });
+  const [savingCandidateFieldId, setSavingCandidateFieldId] = useState<string | null>(null);
+  const startEditCandidateCell = (c: Candidate, field: CandidateEditField) => {
+    setEditingCandidateCell({ id: c.id, field });
+    // A source matching one of the fixed options (Indeed/ZipRecruiter)
+    // reselects that option; anything else on file (including from before
+    // this dropdown existed) is treated as a custom "Other" value.
+    const isKnownSource = c.source && CANDIDATE_SOURCE_OPTIONS.includes(c.source) && c.source !== "Other";
+    setCandidateFieldDraft({
+      name: c.name,
+      position: c.position || "",
+      branch: c.branch || "",
+      phone: c.phone || "",
+      email: c.email || "",
+      department: c.department || "",
+      branchManagerId: c.branchManagerId || "",
+      assignedInterviewerId: c.assignedInterviewerId || "",
+      source: isKnownSource ? c.source! : c.source ? "Other" : "",
+      sourceOther: isKnownSource ? "" : c.source || "",
+    });
+  };
+  const handleSaveCandidateField = async (id: string, field: CandidateEditField) => {
+    setSavingCandidateFieldId(id);
+    try {
+      if (field === "contact") {
+        const resolvedSource = candidateFieldDraft.source === "Other" ? candidateFieldDraft.sourceOther : candidateFieldDraft.source;
+        await updateCandidateFields(id, { phone: candidateFieldDraft.phone, email: candidateFieldDraft.email, source: resolvedSource });
+        setCandidates((prev) =>
+          prev.map((c) =>
+            c.id === id
+              ? { ...c, phone: candidateFieldDraft.phone.trim() || null, email: candidateFieldDraft.email.trim() || null, source: resolvedSource.trim() || null }
+              : c
+          )
+        );
+      } else if (field === "name") {
+        await updateCandidateFields(id, { name: candidateFieldDraft.name });
+        setCandidates((prev) => prev.map((c) => (c.id === id ? { ...c, name: candidateFieldDraft.name.trim() } : c)));
+      } else if (field === "position") {
+        await updateCandidateFields(id, { position: candidateFieldDraft.position });
+        setCandidates((prev) => prev.map((c) => (c.id === id ? { ...c, position: candidateFieldDraft.position.trim() || null } : c)));
+      } else if (field === "branch") {
+        await updateCandidateFields(id, { branch: candidateFieldDraft.branch });
+        setCandidates((prev) => prev.map((c) => (c.id === id ? { ...c, branch: candidateFieldDraft.branch.trim() || null } : c)));
+      } else if (field === "department") {
+        await updateCandidateFields(id, { department: candidateFieldDraft.department });
+        setCandidates((prev) => prev.map((c) => (c.id === id ? { ...c, department: candidateFieldDraft.department.trim() || null } : c)));
+      } else if (field === "branchManager") {
+        await updateCandidateFields(id, { branchManagerId: candidateFieldDraft.branchManagerId });
+        setCandidates((prev) => prev.map((c) => (c.id === id ? { ...c, branchManagerId: candidateFieldDraft.branchManagerId.trim() || null } : c)));
+      } else if (field === "assignedInterviewer") {
+        await updateCandidateFields(id, { assignedInterviewerId: candidateFieldDraft.assignedInterviewerId });
+        setCandidates((prev) => prev.map((c) => (c.id === id ? { ...c, assignedInterviewerId: candidateFieldDraft.assignedInterviewerId.trim() || null } : c)));
+      }
+      logFieldEditOptimistic(id, field);
+      setEditingCandidateCell(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save.");
+    } finally {
+      setSavingCandidateFieldId(null);
+    }
+  };
+
+  // Texted / Called AM+PM — 4 independent flags (0226), toggled directly
+  // from the Hiring table with no popup/edit mode, unlike the fields above.
+  const [savingOutreachId, setSavingOutreachId] = useState<string | null>(null);
+  const handleToggleOutreach = async (c: Candidate, field: "textedAm" | "textedPm" | "calledAm" | "calledPm") => {
+    const next = !c[field];
+    setSavingOutreachId(c.id);
+    setCandidates((prev) => prev.map((row) => (row.id === c.id ? { ...row, [field]: next } : row)));
+    try {
+      await setCandidateOutreach(c.id, field, next);
+      logFieldEditOptimistic(c.id, "outreach");
+    } catch (err) {
+      setCandidates((prev) => prev.map((row) => (row.id === c.id ? { ...row, [field]: !next } : row)));
+      setError(err instanceof Error ? err.message : "Failed to save.");
+    } finally {
+      setSavingOutreachId(null);
+    }
+  };
+
   // ── Forward CV to a manager via the internal messenger ──
   // "Manager" = any role containing "MANAGER" (Branch Manager, Parts
   // Manager, CSR Manager, Technician Manager, etc.) — matches the same
@@ -9594,49 +11280,79 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     [employees]
   );
   const [forwardCvDialog, setForwardCvDialog] = useState<Candidate | null>(null);
-  const [forwardRecipientId, setForwardRecipientId] = useState("");
+  // Multiple recipients — pre-populated with the candidate's Assigned
+  // Interviewer + Branch Manager (see defaultForwardRecipientsForCandidate),
+  // freely addable/removable from there.
+  const [forwardRecipientIds, setForwardRecipientIds] = useState<Set<string>>(new Set());
   const [forwardRecipientSearch, setForwardRecipientSearch] = useState("");
   const [forwardRecipientDropdownOpen, setForwardRecipientDropdownOpen] = useState(false);
   const [forwardSending, setForwardSending] = useState(false);
+  const forwardRecipients = useMemo(
+    () =>
+      Array.from(forwardRecipientIds)
+        .map((id) => employees.find((e) => e.id === id))
+        .filter((e): e is Employee => !!e),
+    [forwardRecipientIds, employees]
+  );
   const filteredManagerRecipients = useMemo(() => {
     const q = forwardRecipientSearch.trim().toLowerCase();
-    if (!q) return managerRecipients;
-    return managerRecipients.filter(
-      (m) => m.name.toLowerCase().includes(q) || (ROLE_LABELS[normalizeRole(m.position)] ?? m.position).toLowerCase().includes(q)
-    );
-  }, [managerRecipients, forwardRecipientSearch]);
+    return managerRecipients
+      .filter((m) => !forwardRecipientIds.has(m.id))
+      .filter((m) => !q || m.name.toLowerCase().includes(q) || (ROLE_LABELS[normalizeRole(m.position)] ?? m.position).toLowerCase().includes(q));
+  }, [managerRecipients, forwardRecipientSearch, forwardRecipientIds]);
 
   const handleForwardCv = async () => {
-    if (!forwardCvDialog?.cvPath || !forwardRecipientId || !uid) return;
+    if (!forwardCvDialog || forwardRecipientIds.size === 0 || !uid) return;
     setForwardSending(true);
     try {
       const myProfileId = await getMyProfileId(uid);
       if (!myProfileId) throw new Error("Could not resolve your profile.");
-      const cvUrl = await getCandidateCvUrlForForwarding(forwardCvDialog.cvPath);
-      const thread = await getOrCreateDmThread(myProfileId, forwardRecipientId);
-      const details = [forwardCvDialog.position, forwardCvDialog.branch].filter(Boolean).join(", ");
-      // cvPath is "{companyId}/{candidateId}/{timestamp}_{originalFilename}"
-      // (see uploadCandidateCv) — strip the leading timestamp so the link
-      // label reads as the real filename, not a raw signed URL.
-      const filename = (forwardCvDialog.cvPath.split("/").pop() || "CV").replace(/^\d+_/, "");
-      await sendMessage({
-        dmThreadId: thread.id,
-        senderId: myProfileId,
-        senderName: displayName || "HR",
-        body: `📄 Candidate CV forwarded — ${forwardCvDialog.name}${details ? ` (${details})` : ""}: [${filename}](${cvUrl})`,
-      });
-      // Counted against the candidate's own Position+Branch on the EOD/EOM
-      // "CVs Sent to BM" column — best-effort, a logging failure shouldn't
-      // undo the fact the message already sent successfully.
-      try {
-        await logCvForward(forwardCvDialog.id, forwardCvDialog.position, forwardCvDialog.branch, forwardRecipientId);
-      } catch (logErr) {
-        console.error("Failed to log CV forward for reporting:", logErr);
+      // Full candidate details, not just the CV file — a manager deciding
+      // whether to interview someone needs the position/branch/contact
+      // info too, not only a filename link. Built once, sent to every
+      // selected recipient.
+      const lines = [
+        `📋 Candidate details — ${forwardCvDialog.name}`,
+        forwardCvDialog.position ? `Position: ${forwardCvDialog.position}` : null,
+        forwardCvDialog.branch ? `Branch: ${forwardCvDialog.branch}` : null,
+        forwardCvDialog.department ? `Department: ${forwardCvDialog.department}` : null,
+        `Status: ${CANDIDATE_STATUS_LABEL[forwardCvDialog.status]}`,
+        forwardCvDialog.phone ? `Phone: ${forwardCvDialog.phone}` : null,
+        forwardCvDialog.email ? `Email: ${forwardCvDialog.email}` : null,
+        forwardCvDialog.createdAt ? `Applied: ${new Date(forwardCvDialog.createdAt).toLocaleDateString()}` : null,
+        forwardCvDialog.notes ? `Notes: ${forwardCvDialog.notes}` : null,
+      ].filter((l): l is string => Boolean(l));
+      if (forwardCvDialog.cvPath) {
+        const cvUrl = await getCandidateCvUrlForForwarding(forwardCvDialog.cvPath);
+        // cvPath is "{companyId}/{candidateId}/{timestamp}_{originalFilename}"
+        // (see uploadCandidateCv) — strip the leading timestamp so the link
+        // label reads as the real filename, not a raw signed URL.
+        const filename = (forwardCvDialog.cvPath.split("/").pop() || "CV").replace(/^\d+_/, "");
+        lines.push(`CV: [${filename}](${cvUrl})`);
       }
-      const recipientName = managerRecipients.find((m) => m.id === forwardRecipientId)?.name;
-      void logActivity({ action: "candidate_cv_forwarded", targetType: "candidate", targetId: forwardCvDialog.id, targetLabel: forwardCvDialog.name, details: { to: recipientName ?? "" } });
+      const body = lines.join("\n");
+      const sentTo: string[] = [];
+      for (const recipientId of forwardRecipientIds) {
+        const thread = await getOrCreateDmThread(myProfileId, recipientId);
+        await sendMessage({
+          dmThreadId: thread.id,
+          senderId: myProfileId,
+          senderName: displayName || "HR",
+          body,
+        });
+        // Counted against the candidate's own Position+Branch on the
+        // EOD/EOM "CVs Sent to BM" column — best-effort, a logging failure
+        // shouldn't undo the fact the message already sent successfully.
+        try {
+          await logCvForward(forwardCvDialog.id, forwardCvDialog.position, forwardCvDialog.branch, recipientId);
+        } catch (logErr) {
+          console.error("Failed to log CV forward for reporting:", logErr);
+        }
+        sentTo.push(employees.find((e) => e.id === recipientId)?.name ?? recipientId);
+      }
+      void logActivity({ action: "candidate_cv_forwarded", targetType: "candidate", targetId: forwardCvDialog.id, targetLabel: forwardCvDialog.name, details: { to: sentTo.join(", ") } });
       setForwardCvDialog(null);
-      setForwardRecipientId("");
+      setForwardRecipientIds(new Set());
       setForwardRecipientSearch("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to forward CV.");
@@ -9648,8 +11364,8 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   // Branch Managers run the final interview and pick a candidate, but HR
   // finalizes the actual hire.
   const candidateStatusOptions = (isHrOrAdmin
-    ? ["applied", "interviewing", "selected", "training", "on_hold", "hired", "rejected"]
-    : ["interviewing", "selected", "training", "on_hold", "rejected"]) as CandidateStatus[];
+    ? ["applied", "phone_screening", "interviewing", "selected", "training", "hired", "rejected", "withdrawn", "cancelled"]
+    : ["phone_screening", "interviewing", "selected", "training", "rejected", "withdrawn", "cancelled"]) as CandidateStatus[];
 
   // ── Employee status handlers (now real — persists to employee_info + is_active) ──
   const handleUpdateEmployeeStatus = (id: string, newStatus: EmploymentStatus) => {
@@ -10016,16 +11732,53 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
 
   // YES/NO on the checklist grid reflects whether a real document has
   // actually been filed (uploaded, linked, or dragged in from Jotform) for
-  // that applicant + category in onboarding_documents — not a manually
-  // toggled flag — so the grid can never claim "YES" for a document nobody
-  // attached. Re-fetched whenever the currently-visible employee list
-  // changes (group/search), keyed by profile id.
+  // that applicant + category in onboarding_documents, OR — for the columns
+  // ONBOARDING_COLUMN_TO_DOCUMENT_TYPE maps to a real SignableDocumentType —
+  // whether they've already completed that form through the e-signature
+  // flow. Either way this is never a manually toggled flag, so the grid can
+  // never claim "YES" for a document nobody actually attached/signed.
+  // Re-fetched whenever the currently-visible employee list changes
+  // (group/search), keyed by profile id.
   const [onboardingDocCategoriesByProfile, setOnboardingDocCategoriesByProfile] = useState<Map<string, Set<string>>>(new Map());
+  // Subset of the above that came from an e-signature completion rather than
+  // an actual onboarding_documents file — so the grid can tell HR which is
+  // which (clicking through to the file-attachment modal would otherwise
+  // show "nothing here" for a document that's really just signed, not
+  // uploaded, which reads as a bug if the tooltip doesn't say so upfront).
+  const [onboardingSignedLabelsByProfile, setOnboardingSignedLabelsByProfile] = useState<Map<string, Set<string>>>(new Map());
   useEffect(() => {
     if (activeTab !== "onboarding" || onboardingEmployees.length === 0) return;
     let cancelled = false;
-    getOnboardingDocumentCategoriesByProfileIds(onboardingEmployees.map((e) => e.id))
-      .then((map) => { if (!cancelled) setOnboardingDocCategoriesByProfile(map); })
+    const employeeIds = onboardingEmployees.map((e) => e.id);
+    const mappedTypes = Array.from(new Set(Object.values(ONBOARDING_COLUMN_TO_DOCUMENT_TYPE)));
+    const labelsByType = new Map<SignableDocumentType, string[]>();
+    for (const [label, type] of Object.entries(ONBOARDING_COLUMN_TO_DOCUMENT_TYPE)) {
+      const arr = labelsByType.get(type) ?? [];
+      arr.push(label);
+      labelsByType.set(type, arr);
+    }
+    Promise.all([
+      getOnboardingDocumentCategoriesByProfileIds(employeeIds),
+      getCompletedDocumentTypesByRecipientIds(employeeIds, mappedTypes),
+    ])
+      .then(([fileMap, signedMap]) => {
+        if (cancelled) return;
+        const signedLabelMap = new Map<string, Set<string>>();
+        for (const [profileId, types] of signedMap) {
+          const fileSet = fileMap.get(profileId) ?? new Set<string>();
+          const signedSet = new Set<string>();
+          for (const type of types) {
+            for (const label of labelsByType.get(type) ?? []) {
+              fileSet.add(label);
+              signedSet.add(label);
+            }
+          }
+          fileMap.set(profileId, fileSet);
+          signedLabelMap.set(profileId, signedSet);
+        }
+        setOnboardingDocCategoriesByProfile(fileMap);
+        setOnboardingSignedLabelsByProfile(signedLabelMap);
+      })
       .catch((err) => console.error("Failed to load onboarding document status:", err));
     return () => { cancelled = true; };
   }, [activeTab, onboardingEmployees]);
@@ -10770,11 +12523,19 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     { key: "promotionForm", label: "Employee Promotion / Role Change", count: 0, icon: FileText },
     { key: "warningForm", label: "Employee Warning Form", count: 0, icon: FileText },
     { key: "i9", label: "Form I-9 (Employment Eligibility)", count: sentI9AwaitingSection2Count, icon: FileCheck },
-    { key: "contractorAddendum", label: "Master Independent Contractor Subcontractor Agreement Addendum", count: 0, icon: FileText },
     { key: "actionPlanForm", label: "Manager's Action Plan Form", count: 0, icon: FileText },
     { key: "terminationForm", label: "Termination Notice Form", count: 0, icon: FileText },
     { key: "w8ben", label: "W-8 / W-9 / W-4 / W-4R Forms", count: 0, icon: Landmark },
   ] as const;
+
+  // "New Automation Forms"' own General column — the same first 7 of
+  // automatedFormsGeneralTabs above, minus Form I-9/Manager's Action Plan
+  // Form/Termination Notice Form/W-8ben — those 4 live directly under New
+  // Technician Forms instead (see newAutomationFormsTechnicianTabs below),
+  // so listing them here too would just be a duplicate.
+  const newAutomationFormsGeneralTabs = automatedFormsGeneralTabs.filter(
+    (t) => !["i9", "actionPlanForm", "terminationForm", "w8ben"].includes(t.key)
+  );
 
   const automatedFormsTechnicianTabs = [
     { key: "wageAck", label: "Acknowledgment of Wage", count: sentWageAckAwaitingEmployerCount, icon: FileCheck },
@@ -10793,6 +12554,31 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     { key: "substanceScreening", label: "Substance Screening & Conduct Agreement", count: 0, icon: FileCheck },
   ] as const;
 
+  // "New Automation Forms" — a separate sidebar group, sibling to
+  // "Automated Forms" rather than a 4th column inside it, for the new
+  // consolidated form types (starting with Master W-2 Technician
+  // Agreement) as they're built. General is the exact same
+  // automatedFormsGeneralTabs list as the old group — same tab keys, so
+  // clicking either copy lands on the identical tab — just reachable from
+  // both places per the explicit ask to keep General available here too.
+  const newAutomationFormsTechnicianTabs = [
+    { key: "masterW2Agreement", label: "Master W-2 Technician Agreement", count: sentMasterW2AgreementAwaitingEmployerCount, icon: FileCheck },
+    { key: "w8ben", label: "W-8 / W-9 / W-4 / W-4R Forms", count: 0, icon: Landmark },
+    { key: "i9", label: "Form I-9 (Employment Eligibility)", count: sentI9AwaitingSection2Count, icon: FileCheck },
+    { key: "directDeposit", label: "Direct Deposit Authorization", count: 0, icon: FileCheck },
+  ] as const;
+
+  // Management-tier forms (Branch Manager / Senior Branch Manager /
+  // Technical Director / Technical Assistant Director) — its own column,
+  // separate from the rank-and-file Technician Forms and the HR/admin
+  // General forms.
+  const automatedFormsManagementTabs = [
+    { key: "contractorDataUs", label: "Contractor Data (US)", count: 0, icon: FileCheck },
+    { key: "contractorAddendum", label: "Master Independent Contractor Subcontractor Agreement Addendum", count: 0, icon: FileText },
+    { key: "ndaForm", label: "Non-Disclosure Agreement", count: 0, icon: FileText },
+    { key: "vehicleUseAgreement", label: "Vehicle Use Agreement", count: 0, icon: FileCheck },
+  ] as const;
+
   // ── Tab groups — single source shared by the dropdown header nav and the
   // floating sidebar, so the two stay in sync automatically. Categories and
   // the tabs within them are kept in alphabetical order. A group may
@@ -10803,38 +12589,67 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   // uniformly across the array. ──
   const tabGroups = [
     // Automated Forms (COE, Warning Form, tax forms, Jotform docs, and the
-    // technician-facing acknowledgment forms) is AH Solutions-only for now —
-    // other companies don't use these forms.
-    ...(companyId === "COMP001" ? [{
+    // technician-facing acknowledgment forms) now lives only under its own
+    // HR Paperworks module entry (custom: "hr-paperworks") — not inside HR &
+    // Recruitment Dashboard's sidebar anymore. Still AH Solutions-only for
+    // now — other companies don't use these forms.
+    ...(paperworksOnly && companyId === "COMP001" ? [{
       group: "Automated Forms",
       icon: Paperclip,
-      tabs: [...automatedFormsGeneralTabs, ...automatedFormsTechnicianTabs],
+      tabs: [...automatedFormsGeneralTabs, ...automatedFormsTechnicianTabs, ...automatedFormsManagementTabs],
       columns: [
         { label: "General", tabs: automatedFormsGeneralTabs },
         { label: "Technician Forms", tabs: automatedFormsTechnicianTabs },
+        { label: "BM, SBS, Tech Director, Tech Assistant Director", tabs: automatedFormsManagementTabs },
       ],
     }] : []),
-    {
-      group: "Generate Reports",
-      icon: Download,
-      tabs: [
-        { key: "report", label: "Generate Report", count: 0, icon: Download },
-      ] as const,
-      columns: undefined,
-    },
-    {
-      group: "People Operations",
-      icon: Users,
-      tabs: [
-        { key: "masterList", label: "Master List", count: employees.length, icon: Users },
-        { key: "leaders", label: "Leaders", count: leadersRoster.length, icon: UserCheck },
-        { key: "employeeRequestManager", label: "Employee Request Manager", count: requestManagerPendingCount, icon: ClipboardList },
-        { key: "hiring", label: "Hiring", count: visibleCandidates.length, icon: Users },
-        { key: "onboarding", label: "Onboarding Documents", count: 0, icon: Paperclip },
-        { key: "warnings", label: "Warnings & Mistakes", count: isHrOrAdmin ? pendingNotes.length : 0, icon: AlertTriangle },
-      ] as const,
-      columns: undefined,
-    },
+    // New Automation Forms — a separate sidebar group (not a 4th column
+    // inside "Automated Forms" above) for new consolidated form types as
+    // they're built, starting with Master W-2 Technician Agreement. General
+    // here is trimmed (newAutomationFormsGeneralTabs) — I-9/Action Plan/
+    // Termination/W-8ben deliberately excluded since I-9 and W-8ben already
+    // live directly under New Technician Forms, and Action Plan/Termination
+    // aren't part of this group at all.
+    ...(paperworksOnly && companyId === "COMP001" ? [{
+      group: "New Automation Forms",
+      icon: Paperclip,
+      tabs: [...newAutomationFormsGeneralTabs, ...newAutomationFormsTechnicianTabs],
+      columns: [
+        { label: "General", tabs: newAutomationFormsGeneralTabs },
+        { label: "New Technician Forms", tabs: newAutomationFormsTechnicianTabs },
+      ],
+    }] : []),
+    ...(!paperworksOnly ? [
+      {
+        group: "Generate Reports",
+        icon: Download,
+        tabs: [
+          { key: "report", label: "Generate Report", count: 0, icon: Download },
+        ] as const,
+        columns: undefined,
+      },
+      {
+        group: "People Operations",
+        icon: Users,
+        tabs: [
+          { key: "masterList", label: "Master List", count: employees.length, icon: Users },
+          { key: "leaders", label: "Leaders", count: leadersRoster.length, icon: UserCheck },
+          { key: "employeeRequestManager", label: "Employee Request Manager", count: requestManagerPendingCount, icon: ClipboardList },
+          { key: "hiring", label: "Hiring", count: visibleCandidates.length, icon: Users },
+          { key: "onboarding", label: "Onboarding Documents", count: 0, icon: Paperclip },
+          { key: "warnings", label: "Warnings & Mistakes", count: isHrOrAdmin ? pendingNotes.length : 0, icon: AlertTriangle },
+        ] as const,
+        columns: undefined,
+      },
+      {
+        group: "Calendar",
+        icon: Calendar,
+        tabs: [
+          { key: "interviewCalendar", label: "Interview Calendar", count: kpi.scheduled, icon: Calendar },
+        ] as const,
+        columns: undefined,
+      },
+    ] : []),
   ] as const;
 
   // A group with `columns` (currently just "Automated Forms") renders as a
@@ -10929,11 +12744,15 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
               </button>
               {!collapsed && (
                 section.columns ? (
-                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 pl-2 border-l border-white/10 ml-4">
+                  <div className="grid grid-cols-3 gap-x-4 gap-y-1 pl-2 border-l border-white/10 ml-4">
                     {section.columns.map((col) => (
                       <div key={col.label} className="flex flex-col gap-0.5">
                         <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide px-2.5 pt-1 pb-0.5">{col.label}</p>
-                        {col.tabs.map(renderSidebarTabButton)}
+                        {col.tabs.length === 0 ? (
+                          <p className="px-2.5 py-1 text-xs text-muted-foreground italic">No forms yet.</p>
+                        ) : (
+                          col.tabs.map(renderSidebarTabButton)
+                        )}
                       </div>
                     ))}
                   </div>
@@ -11014,10 +12833,10 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       {/* ── KPI overview — every tile is clickable, same as Attendance: it jumps straight to the tab/filter that explains the number instead of just displaying it. ── */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 mb-4">
         {[
-          { label: "Candidates", value: kpi.candidates, color: "text-blue-300", icon: <Users className="h-4 w-4" />, onClick: () => { setActiveTab("hiring"); setHiringStatusFilter(""); } },
-          { label: "Scheduled for Interview", value: kpi.scheduled, color: "text-yellow-300", icon: <Clock className="h-4 w-4" />, onClick: () => { setActiveTab("hiring"); setHiringStatusFilter("interviewing"); } },
-          { label: "Rejected", value: kpi.rejected, color: "text-red-300", icon: <XCircle className="h-4 w-4" />, onClick: () => { setActiveTab("hiring"); setHiringStatusFilter("rejected"); } },
-          { label: "Hired", value: kpi.hired, color: "text-green-300", icon: <UserCheck className="h-4 w-4" />, onClick: () => { setActiveTab("hiring"); setHiringStatusFilter("hired"); } },
+          { label: "Candidates", value: kpi.candidates, color: "text-blue-300", icon: <Users className="h-4 w-4" />, onClick: () => { setActiveTab("hiring"); setHiringStatusFilter(new Set()); } },
+          { label: "Scheduled for Interview", value: kpi.scheduled, color: "text-yellow-300", icon: <Clock className="h-4 w-4" />, onClick: () => { setActiveTab("hiring"); setHiringStatusFilter(new Set([CANDIDATE_STATUS_LABEL.interviewing])); } },
+          { label: "Rejected", value: kpi.rejected, color: "text-red-300", icon: <XCircle className="h-4 w-4" />, onClick: () => { setActiveTab("hiring"); setHiringStatusFilter(new Set([CANDIDATE_STATUS_LABEL.rejected])); } },
+          { label: "Hired", value: kpi.hired, color: "text-green-300", icon: <UserCheck className="h-4 w-4" />, onClick: () => { setActiveTab("hiring"); setHiringStatusFilter(new Set([CANDIDATE_STATUS_LABEL.hired])); } },
           { label: "Terminated", value: kpi.terminated, color: "text-red-400", icon: <UserX className="h-4 w-4" />, onClick: () => setActiveTab("masterList") },
           { label: "Resigned", value: kpi.resigned, color: "text-slate-300", icon: <UserMinus className="h-4 w-4" />, onClick: () => setActiveTab("masterList") },
         ].map((k) => (
@@ -11184,13 +13003,17 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                 {isOpen && (
                   <>
                     <div className="fixed inset-0 z-10" onClick={() => setOpenCategory(null)} />
-                    <div className={`absolute top-full left-0 mt-1 z-20 rounded-md border border-white/10 bg-slate-900 shadow-xl py-1 ${section.columns ? "w-[min(90vw,560px)]" : "min-w-[220px]"}`}>
+                    <div className={`absolute top-full left-0 mt-1 z-20 rounded-md border border-white/10 bg-slate-900 shadow-xl py-1 ${section.columns ? "w-[min(95vw,780px)]" : "min-w-[220px]"}`}>
                       {section.columns ? (
-                        <div className="grid grid-cols-2 gap-x-1">
+                        <div className="grid grid-cols-3 gap-x-1">
                           {section.columns.map((col) => (
                             <div key={col.label} className="flex flex-col py-1">
                               <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide px-3.5 pt-1 pb-1">{col.label}</p>
-                              {col.tabs.map(renderDropdownTabButton)}
+                              {col.tabs.length === 0 ? (
+                                <p className="px-3.5 py-1 text-xs text-muted-foreground italic">No forms yet.</p>
+                              ) : (
+                                col.tabs.map(renderDropdownTabButton)
+                              )}
                             </div>
                           ))}
                         </div>
@@ -11242,20 +13065,61 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                 <input value={hiringSearch} onChange={(e) => setHiringSearch(e.target.value)} placeholder="Name, position, or branch…" className="glass-input text-sm py-1.5 pl-8 pr-3 rounded-md w-56" />
               </div>
             </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Status</label>
-              <select value={hiringStatusFilter} onChange={(e) => setHiringStatusFilter(e.target.value as any)} className="glass-input text-sm py-1.5 px-3 rounded-md">
-                <option value="">All</option>
-                {(["applied", "interviewing", "selected", "hired", "rejected"] as CandidateStatus[]).map((s) => (
-                  <option key={s} value={s}>{CANDIDATE_STATUS_LABEL[s]}</option>
-                ))}
-              </select>
-            </div>
-            {(hiringSearch || hiringStatusFilter) && (
-              <button onClick={() => { setHiringSearch(""); setHiringStatusFilter(""); }} className="btn text-sm px-3 mb-0.5">Clear</button>
+            {(hiringSearch || hiringStatusFilter.size > 0 || hiringPositionFilter.size > 0 || hiringBranchFilter.size > 0 || hiringBranchManagerFilter.size > 0 || hiringAssignedInterviewerFilter.size > 0 || hiringDepartmentFilter.size > 0 || hiringOutreachFilter.size > 0 || hiringCvFilter !== "all" || hiringAccountStatusFilter !== "all" || hiringNoteFilter !== "all") && (
+              <button
+                onClick={() => {
+                  setHiringSearch("");
+                  setHiringStatusFilter(new Set());
+                  setHiringPositionFilter(new Set());
+                  setHiringBranchFilter(new Set());
+                  setHiringBranchManagerFilter(new Set());
+                  setHiringAssignedInterviewerFilter(new Set());
+                  setHiringDepartmentFilter(new Set());
+                  setHiringOutreachFilter(new Set());
+                  setHiringCvFilter("all");
+                  setHiringAccountStatusFilter("all");
+                  setHiringNoteFilter("all");
+                }}
+                className="btn text-sm px-3 mb-0.5"
+              >
+                Clear
+              </button>
             )}
+            <div className="relative mb-0.5">
+              <button
+                type="button"
+                onClick={() => setHiringColumnsMenuOpen((open) => !open)}
+                className="btn text-sm px-3 py-1.5 inline-flex items-center gap-2"
+                aria-haspopup="true"
+                aria-expanded={hiringColumnsMenuOpen}
+              >
+                <Columns3 className="h-3.5 w-3.5" /> Columns
+                <span className="text-xs text-muted-foreground">
+                  ({HIRING_COLUMNS.filter((c) => isHiringColVisible(c.key)).length}/{HIRING_COLUMNS.length})
+                </span>
+              </button>
+              {hiringColumnsMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setHiringColumnsMenuOpen(false)} />
+                  <div className="absolute left-0 top-full z-50 mt-2 w-56 rounded-lg border border-white/15 bg-slate-900 p-2 shadow-2xl">
+                    <div className="flex items-center justify-between px-2 py-1.5 border-b border-white/10 mb-1">
+                      <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">Show columns</span>
+                      <button type="button" onClick={showAllHiringColumns} className="text-xs text-blue-400 hover:text-blue-300">Show all</button>
+                    </div>
+                    <div className="max-h-72 overflow-y-auto">
+                      {HIRING_COLUMNS.map((col) => (
+                        <label key={col.key} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-white/5 cursor-pointer text-sm">
+                          <input type="checkbox" checked={isHiringColVisible(col.key)} onChange={() => toggleHiringColumn(col.key)} />
+                          <span className="text-slate-200">{col.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
             <span className="text-xs text-muted-foreground mb-1.5 ml-auto">
-              {filteredCandidates.length}{(hiringSearch || hiringStatusFilter) ? ` of ${visibleCandidates.length}` : ""} candidates
+              {filteredCandidates.length}{filteredCandidates.length !== visibleCandidates.length ? ` of ${visibleCandidates.length}` : ""} candidates
             </span>
           </div>
         </div>
@@ -11276,6 +13140,31 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                 <input type="file" accept=".pdf,.doc,.docx" className="hidden" onChange={(e) => setCvFile(e.target.files?.[0] ?? null)} />
               </label>
             </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+              <select value={newCandidate.department} onChange={(e) => setNewCandidate({ ...newCandidate, department: e.target.value })} className="glass-input text-sm py-1.5 px-3 rounded-md">
+                <option value="">Select Department</option>
+                {MASTER_LIST_DEPARTMENT_OPTIONS.map((d) => <option key={d} value={d}>{d}</option>)}
+              </select>
+              <select value={newCandidate.branchManagerId} onChange={(e) => setNewCandidate({ ...newCandidate, branchManagerId: e.target.value })} className="glass-input text-sm py-1.5 px-3 rounded-md">
+                <option value="">Select Branch Manager</option>
+                {branchManagerOptions.map((m) => <option key={m.id} value={m.id}>{m.name}{m.branch ? ` — ${m.branch}` : ""}</option>)}
+              </select>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+              <select value={newCandidate.source} onChange={(e) => setNewCandidate({ ...newCandidate, source: e.target.value })} className="glass-input text-sm py-1.5 px-3 rounded-md">
+                <option value="">Where was this applicant found?</option>
+                {CANDIDATE_SOURCE_OPTIONS.map((s) => <option key={s} value={s}>{s === "Other" ? "Other, please specify" : s}</option>)}
+              </select>
+              {newCandidate.source === "Other" && (
+                <input
+                  type="text"
+                  placeholder="Specify source"
+                  value={newCandidate.sourceOther}
+                  onChange={(e) => setNewCandidate({ ...newCandidate, sourceOther: e.target.value })}
+                  className="glass-input text-sm py-1.5 px-3 rounded-md"
+                />
+              )}
+            </div>
             <div className="flex gap-2">
               <button onClick={handleAddCandidate} disabled={savingCandidate || !newCandidate.name.trim()} className="btn bg-green-600 hover:bg-green-700 text-white text-sm px-4 py-1.5 disabled:opacity-50">{savingCandidate ? "Saving…" : "Save"}</button>
               <button onClick={() => setShowAddCandidate(false)} className="btn text-sm px-4 py-1.5">Cancel</button>
@@ -11283,57 +13172,606 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
           </div>
         )}
 
+        {(() => {
+          // Shared markup for the multi-select header filters (Position/Branch).
+          const renderHiringMultiSelectHeader = (
+            key: HiringFilterMenuKey,
+            label: string,
+            options: string[],
+            selected: Set<string>,
+            setSelected: (s: Set<string>) => void
+          ) => (
+            <>
+              <span className="inline-flex items-center gap-1">
+                {label}
+                <button
+                  type="button"
+                  onClick={() => setHiringFilterMenu((cur) => (cur === key ? null : key))}
+                  title={`Filter by ${label}`}
+                  className={selected.size > 0 ? "text-blue-400" : "text-muted-foreground hover:text-slate-300"}
+                >
+                  <Filter className="h-3 w-3" />
+                </button>
+              </span>
+              {hiringFilterMenu === key && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setHiringFilterMenu(null)} />
+                  <div className="absolute left-0 top-full mt-1 w-56 max-h-72 overflow-y-auto bg-slate-900 border border-white/15 rounded-lg shadow-2xl z-50 p-2 normal-case font-normal text-left">
+                    {options.length === 0 ? (
+                      <div className="text-xs text-muted-foreground px-2 py-1.5">No options.</div>
+                    ) : (
+                      <>
+                        {options.map((opt) => (
+                          <label key={opt} className="flex items-center gap-2 px-2 py-1.5 text-sm text-slate-200 hover:bg-white/5 rounded cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={selected.has(opt)}
+                              onChange={() => {
+                                const next = new Set(selected);
+                                if (next.has(opt)) next.delete(opt);
+                                else next.add(opt);
+                                setSelected(next);
+                              }}
+                              className="h-3.5 w-3.5 accent-blue-500"
+                            />
+                            {opt}
+                          </label>
+                        ))}
+                        {selected.size > 0 && (
+                          <button type="button" onClick={() => setSelected(new Set())} className="mt-1 w-full text-left text-xs text-blue-300 hover:text-blue-200 px-2 py-1">
+                            Clear
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </>
+              )}
+            </>
+          );
+          // Shared markup for the tri-state header filters (CV/Account Status/Note).
+          const renderHiringTriStateHeader = (
+            key: HiringFilterMenuKey,
+            label: string,
+            value: HiringTriState,
+            setValue: (v: HiringTriState) => void,
+            hasLabel: string,
+            noneLabel: string
+          ) => (
+            <>
+              <span className="inline-flex items-center gap-1">
+                {label}
+                <button
+                  type="button"
+                  onClick={() => setHiringFilterMenu((cur) => (cur === key ? null : key))}
+                  title={`Filter by ${label}`}
+                  className={value !== "all" ? "text-blue-400" : "text-muted-foreground hover:text-slate-300"}
+                >
+                  <Filter className="h-3 w-3" />
+                </button>
+              </span>
+              {hiringFilterMenu === key && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setHiringFilterMenu(null)} />
+                  <div className="absolute left-0 top-full mt-1 w-40 bg-slate-900 border border-white/15 rounded-lg shadow-2xl z-50 p-1 normal-case font-normal text-left">
+                    {([
+                      ["all", "All"],
+                      ["has", hasLabel],
+                      ["none", noneLabel],
+                    ] as [HiringTriState, string][]).map(([v, vLabel]) => (
+                      <button
+                        key={v}
+                        type="button"
+                        onClick={() => { setValue(v); setHiringFilterMenu(null); }}
+                        className={`block w-full text-left px-2 py-1.5 text-sm rounded hover:bg-white/5 ${value === v ? "text-blue-300 font-semibold" : "text-slate-200"}`}
+                      >
+                        {vLabel}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </>
+          );
+          return (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-white/10 bg-white/5">
                 <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Candidate</th>
-                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Position</th>
-                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Branch</th>
-                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Contact</th>
-                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">CV</th>
-                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Status</th>
-                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Applied</th>
+                {isHiringColVisible("position") && (
+                  <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase relative">
+                    {renderHiringMultiSelectHeader("position", "Position", hiringPositionOptions, hiringPositionFilter, setHiringPositionFilter)}
+                  </th>
+                )}
+                {isHiringColVisible("branch") && (
+                  <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase relative">
+                    {renderHiringMultiSelectHeader("branch", "Branch", hiringBranchOptions, hiringBranchFilter, setHiringBranchFilter)}
+                  </th>
+                )}
+                {isHiringColVisible("branchManager") && (
+                  <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase relative">
+                    {renderHiringMultiSelectHeader("branchManager", "Branch Manager", hiringBranchManagerOptions, hiringBranchManagerFilter, setHiringBranchManagerFilter)}
+                  </th>
+                )}
+                {isHiringColVisible("assignedInterviewer") && (
+                  <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase relative">
+                    {renderHiringMultiSelectHeader("assignedInterviewer", "Assigned Interviewer", hiringAssignedInterviewerOptions, hiringAssignedInterviewerFilter, setHiringAssignedInterviewerFilter)}
+                  </th>
+                )}
+                {isHiringColVisible("department") && (
+                  <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase relative">
+                    {renderHiringMultiSelectHeader("department", "Department", hiringDepartmentOptions, hiringDepartmentFilter, setHiringDepartmentFilter)}
+                  </th>
+                )}
+                {isHiringColVisible("contact") && <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Contact</th>}
+                {isHiringColVisible("outreach") && (
+                  <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase relative">
+                    {renderHiringMultiSelectHeader("outreach", "Texted / Called", [...HIRING_OUTREACH_OPTIONS], hiringOutreachFilter, setHiringOutreachFilter)}
+                  </th>
+                )}
+                {isHiringColVisible("cv") && (
+                  <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase relative">
+                    {renderHiringTriStateHeader("cv", "CV", hiringCvFilter, setHiringCvFilter, "Has CV", "No CV")}
+                  </th>
+                )}
+                {isHiringColVisible("status") && (
+                  <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase relative">
+                    {renderHiringMultiSelectHeader("status", "Status", hiringStatusOptions, hiringStatusFilter, setHiringStatusFilter)}
+                  </th>
+                )}
+                {isHiringColVisible("accountStatus") && (
+                  <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase relative">
+                    {renderHiringTriStateHeader("accountStatus", "Account Status", hiringAccountStatusFilter, setHiringAccountStatusFilter, "Created", "Not Created")}
+                  </th>
+                )}
+                {isHiringColVisible("forms") && <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Forms</th>}
+                {isHiringColVisible("note") && (
+                  <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase relative">
+                    {renderHiringTriStateHeader("note", "Notes", hiringNoteFilter, setHiringNoteFilter, "Has HR note", "No HR note")}
+                  </th>
+                )}
                 <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Actions</th>
               </tr>
             </thead>
             <tbody>
               {candidatesLoading ? (
-                <tr><td colSpan={8} className="px-4 py-8 text-center text-muted-foreground text-sm">Loading candidates…</td></tr>
+                <tr><td colSpan={2 + HIRING_COLUMNS.filter((c) => isHiringColVisible(c.key)).length} className="px-4 py-8 text-center text-muted-foreground text-sm">Loading candidates…</td></tr>
               ) : filteredCandidates.length === 0 ? (
-                <tr><td colSpan={8} className="px-4 py-8 text-center text-muted-foreground text-sm">{visibleCandidates.length === 0 ? "No candidates yet." : "No candidates match these filters."}</td></tr>
+                <tr><td colSpan={2 + HIRING_COLUMNS.filter((c) => isHiringColVisible(c.key)).length} className="px-4 py-8 text-center text-muted-foreground text-sm">{visibleCandidates.length === 0 ? "No candidates yet." : "No candidates match these filters."}</td></tr>
               ) : (
                 filteredCandidates.map((c) => (
                   <tr key={c.id} className="border-b border-white/5 hover:bg-white/5">
-                    <td className="px-4 py-3 font-medium">{c.name}</td>
-                    <td className="px-4 py-3 text-sm text-muted-foreground">{c.position || "—"}</td>
-                    <td className="px-4 py-3 text-sm text-muted-foreground">{c.branch || "—"}</td>
-                    <td className="px-4 py-3 text-xs text-muted-foreground">{c.phone || c.email ? <>{c.phone && <div>{c.phone}</div>}{c.email && <div>{c.email}</div>}</> : "—"}</td>
+                    <td className="px-4 py-3 font-medium">
+                      {editingCandidateCell?.id === c.id && editingCandidateCell.field === "name" ? (
+                        <div className="flex items-center gap-1">
+                          <input
+                            autoFocus
+                            type="text"
+                            value={candidateFieldDraft.name}
+                            onChange={(e) => setCandidateFieldDraft({ ...candidateFieldDraft, name: e.target.value })}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") void handleSaveCandidateField(c.id, "name");
+                              if (e.key === "Escape") setEditingCandidateCell(null);
+                            }}
+                            className="w-32 rounded border border-white/15 bg-slate-800 px-1.5 py-0.5 text-xs text-white"
+                          />
+                          <button onClick={() => void handleSaveCandidateField(c.id, "name")} disabled={savingCandidateFieldId === c.id} className="text-emerald-400 hover:text-emerald-300 disabled:opacity-40">
+                            <Check className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <button onClick={() => startEditCandidateCell(c, "name")} className="flex items-center gap-1 text-left hover:text-blue-300">
+                          {c.name}
+                          <Pencil className="h-2.5 w-2.5 text-muted-foreground shrink-0" />
+                        </button>
+                      )}
+                      {renderFieldChangedBy(c.id, "name")}
+                    </td>
+                    {isHiringColVisible("position") && (
+                    <td className="px-4 py-3 text-sm text-muted-foreground">
+                      {editingCandidateCell?.id === c.id && editingCandidateCell.field === "position" ? (
+                        <div className="flex items-center gap-1">
+                          <input
+                            autoFocus
+                            type="text"
+                            value={candidateFieldDraft.position}
+                            onChange={(e) => setCandidateFieldDraft({ ...candidateFieldDraft, position: e.target.value })}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") void handleSaveCandidateField(c.id, "position");
+                              if (e.key === "Escape") setEditingCandidateCell(null);
+                            }}
+                            className="w-28 rounded border border-white/15 bg-slate-800 px-1.5 py-0.5 text-xs text-white"
+                          />
+                          <button onClick={() => void handleSaveCandidateField(c.id, "position")} disabled={savingCandidateFieldId === c.id} className="text-emerald-400 hover:text-emerald-300 disabled:opacity-40">
+                            <Check className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <button onClick={() => startEditCandidateCell(c, "position")} className="flex items-center gap-1 text-left hover:text-blue-300">
+                          {c.position || <span className="text-muted-foreground">—</span>}
+                          <Pencil className="h-2.5 w-2.5 text-muted-foreground shrink-0" />
+                        </button>
+                      )}
+                      {renderFieldChangedBy(c.id, "position")}
+                    </td>
+                    )}
+                    {isHiringColVisible("branch") && (
+                    <td className="px-4 py-3 text-sm text-muted-foreground">
+                      {editingCandidateCell?.id === c.id && editingCandidateCell.field === "branch" ? (
+                        <div className="flex items-center gap-1">
+                          <select
+                            autoFocus
+                            value={candidateFieldDraft.branch}
+                            onChange={(e) => setCandidateFieldDraft({ ...candidateFieldDraft, branch: e.target.value })}
+                            className="rounded border border-white/15 bg-slate-800 px-1.5 py-0.5 text-xs text-white"
+                          >
+                            <option value="">Select Branch</option>
+                            {allBranches.map((b) => <option key={b} value={b}>{b}</option>)}
+                          </select>
+                          <button onClick={() => void handleSaveCandidateField(c.id, "branch")} disabled={savingCandidateFieldId === c.id} className="text-emerald-400 hover:text-emerald-300 disabled:opacity-40">
+                            <Check className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <button onClick={() => startEditCandidateCell(c, "branch")} className="flex items-center gap-1 text-left hover:text-blue-300">
+                          {c.branch || <span className="text-muted-foreground">—</span>}
+                          <Pencil className="h-2.5 w-2.5 text-muted-foreground shrink-0" />
+                        </button>
+                      )}
+                      {renderFieldChangedBy(c.id, "branch")}
+                    </td>
+                    )}
+                    {isHiringColVisible("branchManager") && (
+                    <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">
+                      {editingCandidateCell?.id === c.id && editingCandidateCell.field === "branchManager" ? (
+                        <div className="flex items-center gap-1">
+                          <select
+                            autoFocus
+                            value={candidateFieldDraft.branchManagerId}
+                            onChange={(e) => setCandidateFieldDraft({ ...candidateFieldDraft, branchManagerId: e.target.value })}
+                            className="rounded border border-white/15 bg-slate-800 px-1.5 py-0.5 text-xs text-white"
+                          >
+                            <option value="">Auto (from Branch)</option>
+                            {branchManagerOptions.map((m) => <option key={m.id} value={m.id}>{m.name}{m.branch ? ` — ${m.branch}` : ""}</option>)}
+                          </select>
+                          <button onClick={() => void handleSaveCandidateField(c.id, "branchManager")} disabled={savingCandidateFieldId === c.id} className="text-emerald-400 hover:text-emerald-300 disabled:opacity-40">
+                            <Check className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <button onClick={() => startEditCandidateCell(c, "branchManager")} className="flex items-center gap-1 text-left hover:text-blue-300">
+                          {branchManagerNameForCandidate(c) || <span className="text-muted-foreground">—</span>}
+                          <Pencil className="h-2.5 w-2.5 text-muted-foreground shrink-0" />
+                        </button>
+                      )}
+                      {renderFieldChangedBy(c.id, "branchManager")}
+                    </td>
+                    )}
+                    {isHiringColVisible("assignedInterviewer") && (
+                    <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">
+                      {editingCandidateCell?.id === c.id && editingCandidateCell.field === "assignedInterviewer" ? (
+                        <div className="flex items-center gap-1">
+                          <select
+                            autoFocus
+                            value={candidateFieldDraft.assignedInterviewerId}
+                            onChange={(e) => setCandidateFieldDraft({ ...candidateFieldDraft, assignedInterviewerId: e.target.value })}
+                            className="rounded border border-white/15 bg-slate-800 px-1.5 py-0.5 text-xs text-white"
+                          >
+                            <option value="">Unassigned</option>
+                            {hrPersonnelOptions.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                          </select>
+                          <button onClick={() => void handleSaveCandidateField(c.id, "assignedInterviewer")} disabled={savingCandidateFieldId === c.id} className="text-emerald-400 hover:text-emerald-300 disabled:opacity-40">
+                            <Check className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <button onClick={() => startEditCandidateCell(c, "assignedInterviewer")} className="flex items-center gap-1 text-left hover:text-blue-300">
+                          {assignedInterviewerNameForCandidate(c) || <span className="text-muted-foreground">—</span>}
+                          <Pencil className="h-2.5 w-2.5 text-muted-foreground shrink-0" />
+                        </button>
+                      )}
+                      {renderFieldChangedBy(c.id, "assignedInterviewer")}
+                    </td>
+                    )}
+                    {isHiringColVisible("department") && (
+                    <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">
+                      {editingCandidateCell?.id === c.id && editingCandidateCell.field === "department" ? (
+                        <div className="flex items-center gap-1">
+                          <select
+                            autoFocus
+                            value={candidateFieldDraft.department}
+                            onChange={(e) => setCandidateFieldDraft({ ...candidateFieldDraft, department: e.target.value })}
+                            className="rounded border border-white/15 bg-slate-800 px-1.5 py-0.5 text-xs text-white"
+                          >
+                            <option value="">Select Department</option>
+                            {MASTER_LIST_DEPARTMENT_OPTIONS.map((d) => <option key={d} value={d}>{d}</option>)}
+                          </select>
+                          <button onClick={() => void handleSaveCandidateField(c.id, "department")} disabled={savingCandidateFieldId === c.id} className="text-emerald-400 hover:text-emerald-300 disabled:opacity-40">
+                            <Check className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <button onClick={() => startEditCandidateCell(c, "department")} className="flex items-center gap-1 text-left hover:text-blue-300">
+                          {c.department || <span className="text-muted-foreground">—</span>}
+                          <Pencil className="h-2.5 w-2.5 text-muted-foreground shrink-0" />
+                        </button>
+                      )}
+                      {renderFieldChangedBy(c.id, "department")}
+                    </td>
+                    )}
+                    {isHiringColVisible("contact") && (
+                    <td className="px-4 py-3 text-xs text-muted-foreground">
+                      {editingCandidateCell?.id === c.id && editingCandidateCell.field === "contact" ? (
+                        <div className="flex flex-col gap-1">
+                          <input
+                            autoFocus
+                            type="text"
+                            placeholder="Phone"
+                            value={candidateFieldDraft.phone}
+                            onChange={(e) => setCandidateFieldDraft({ ...candidateFieldDraft, phone: e.target.value })}
+                            onKeyDown={(e) => { if (e.key === "Escape") setEditingCandidateCell(null); }}
+                            className="w-36 rounded border border-white/15 bg-slate-800 px-1.5 py-0.5 text-xs text-white"
+                          />
+                          <input
+                            type="email"
+                            placeholder="Email"
+                            value={candidateFieldDraft.email}
+                            onChange={(e) => setCandidateFieldDraft({ ...candidateFieldDraft, email: e.target.value })}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") void handleSaveCandidateField(c.id, "contact");
+                              if (e.key === "Escape") setEditingCandidateCell(null);
+                            }}
+                            className="w-36 rounded border border-white/15 bg-slate-800 px-1.5 py-0.5 text-xs text-white"
+                          />
+                          <select
+                            value={candidateFieldDraft.source}
+                            onChange={(e) => setCandidateFieldDraft({ ...candidateFieldDraft, source: e.target.value })}
+                            className="w-36 rounded border border-white/15 bg-slate-800 px-1.5 py-0.5 text-xs text-white"
+                          >
+                            <option value="">Source: none</option>
+                            {CANDIDATE_SOURCE_OPTIONS.map((s) => <option key={s} value={s}>{s === "Other" ? "Other, please specify" : s}</option>)}
+                          </select>
+                          {candidateFieldDraft.source === "Other" && (
+                            <input
+                              type="text"
+                              placeholder="Specify source"
+                              value={candidateFieldDraft.sourceOther}
+                              onChange={(e) => setCandidateFieldDraft({ ...candidateFieldDraft, sourceOther: e.target.value })}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") void handleSaveCandidateField(c.id, "contact");
+                                if (e.key === "Escape") setEditingCandidateCell(null);
+                              }}
+                              className="w-36 rounded border border-white/15 bg-slate-800 px-1.5 py-0.5 text-xs text-white"
+                            />
+                          )}
+                          <button
+                            onClick={() => void handleSaveCandidateField(c.id, "contact")}
+                            disabled={savingCandidateFieldId === c.id}
+                            className="self-start text-emerald-400 hover:text-emerald-300 disabled:opacity-40"
+                          >
+                            <Check className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <button onClick={() => startEditCandidateCell(c, "contact")} className="flex items-start gap-1 text-left hover:text-blue-300">
+                          {c.phone || c.email || c.source ? (
+                            <div>
+                              {c.phone && <div>{c.phone}</div>}
+                              {c.email && <div>{c.email}</div>}
+                              {c.source && <div className="text-muted-foreground">Source: {c.source}</div>}
+                            </div>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                          <Pencil className="h-2.5 w-2.5 text-muted-foreground shrink-0 mt-0.5" />
+                        </button>
+                      )}
+                      {renderFieldChangedBy(c.id, "contact")}
+                    </td>
+                    )}
+                    {isHiringColVisible("outreach") && (
+                    <td className="px-4 py-3">
+                      <div className="grid grid-cols-2 gap-1 w-max">
+                        {(
+                          [
+                            ["textedAm", "Text AM"],
+                            ["textedPm", "Text PM"],
+                            ["calledAm", "Call AM"],
+                            ["calledPm", "Call PM"],
+                          ] as const
+                        ).map(([field, label]) => (
+                          <button
+                            key={field}
+                            type="button"
+                            onClick={() => void handleToggleOutreach(c, field)}
+                            disabled={savingOutreachId === c.id}
+                            className={`text-[10px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap disabled:opacity-40 ${
+                              c[field]
+                                ? "bg-green-500/20 text-green-300 hover:bg-green-500/30"
+                                : "bg-slate-500/20 text-slate-400 hover:bg-slate-500/30 hover:text-slate-200"
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                      {renderFieldChangedBy(c.id, "outreach")}
+                    </td>
+                    )}
+                    {isHiringColVisible("cv") && (
                     <td className="px-4 py-3">
                       {c.cvPath ? (
                         <button onClick={() => handleViewCv(c.cvPath!)} className="text-blue-400 hover:text-blue-300 text-xs underline">View CV</button>
                       ) : <span className="text-muted-foreground text-xs">—</span>}
                     </td>
+                    )}
+                    {isHiringColVisible("status") && (
                     <td className="px-4 py-3">
                       <select value={c.status} onChange={(e) => handleCandidateStatus(c.id, e.target.value as CandidateStatus)} className={`text-xs font-semibold px-2 py-1 rounded border-0 ${CANDIDATE_STATUS_COLOR[c.status]}`}>
-                        {!candidateStatusOptions.includes(c.status) && <option value={c.status}>{CANDIDATE_STATUS_LABEL[c.status]}</option>}
-                        {candidateStatusOptions.map((s) => <option key={s} value={s}>{CANDIDATE_STATUS_LABEL[s]}</option>)}
+                        {/* The closed control can use a translucent semantic
+                            background (bg-green-500/20 etc.) since it sits on
+                            this page's own dark panel, but the native dropdown
+                            popup is browser-chrome, not this page — without an
+                            explicit solid background here, light status text
+                            (e.g. text-green-300) renders on the browser's own
+                            near-white popup and becomes nearly unreadable. */}
+                        {!candidateStatusOptions.includes(c.status) && <option value={c.status} className="bg-slate-800 text-white">{CANDIDATE_STATUS_LABEL[c.status]}</option>}
+                        {candidateStatusOptions.map((s) => <option key={s} value={s} className="bg-slate-800 text-white">{CANDIDATE_STATUS_LABEL[s]}</option>)}
                       </select>
+                      {statusChangesByCandidateId.get(c.id)?.changedByName && (
+                        <div className={`mt-1 text-[10px] whitespace-nowrap ${candidateStatusTextColor(c.status)}`} title={new Date(statusChangesByCandidateId.get(c.id)!.changedAt).toLocaleString()}>
+                          Changed by: {statusChangesByCandidateId.get(c.id)!.changedByName}
+                        </div>
+                      )}
+                      {c.createdAt && (
+                        <div className="mt-1 text-[10px] text-muted-foreground whitespace-nowrap">
+                          Applied: {new Date(c.createdAt).toLocaleDateString()}
+                        </div>
+                      )}
+                      {c.status === "interviewing" && c.interviewDate && (
+                        <div className={`mt-1 text-[10px] whitespace-nowrap ${candidateStatusTextColor(c.status)}`}>
+                          Interview: {new Date(c.interviewDate + "T00:00:00").toLocaleDateString()}
+                          {c.interviewTime ? ` ${formatHHMM(c.interviewTime)}${c.interviewTimezone ? ` ${c.interviewTimezone}` : ""}` : ""}
+                        </div>
+                      )}
+                      {c.status === "training" && (c.trainingStartDate || c.trainingEndDate) && (
+                        <div className={`mt-1 text-[10px] whitespace-nowrap ${candidateStatusTextColor(c.status)}`}>
+                          Training: {c.trainingStartDate ? new Date(c.trainingStartDate + "T00:00:00").toLocaleDateString() : "—"}
+                          {" → "}
+                          {c.trainingEndDate ? new Date(c.trainingEndDate + "T00:00:00").toLocaleDateString() : "—"}
+                        </div>
+                      )}
+                      {c.status === "training" && trainerNameForCandidate(c) && (
+                        <div className="mt-1 text-[10px] text-cyan-300 whitespace-nowrap">
+                          Trainer: {trainerNameForCandidate(c)}
+                        </div>
+                      )}
+                      {c.status === "withdrawn" && c.withdrawnDate && (
+                        <div className={`mt-1 text-[10px] whitespace-nowrap ${candidateStatusTextColor(c.status)}`}>
+                          Withdrawn: {new Date(c.withdrawnDate + "T00:00:00").toLocaleDateString()}
+                        </div>
+                      )}
+                      {candidateNeedsAccount(c) && (
+                        <div className="mt-1 flex items-center gap-1.5">
+                          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 whitespace-nowrap">Pending Account Creation</span>
+                          <Link
+                            to="/m/$module/$submodule"
+                            params={{ module: "hr", submodule: "user-management" }}
+                            className="text-[10px] text-blue-400 hover:text-blue-300 underline whitespace-nowrap"
+                          >
+                            Create Account
+                          </Link>
+                        </div>
+                      )}
                     </td>
-                    <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
-                      {c.createdAt ? new Date(c.createdAt).toLocaleString() : "—"}
+                    )}
+                    {isHiringColVisible("accountStatus") && (
+                    <td className="px-4 py-3">
+                      {c.email && employeeEmailSet.has(c.email.trim().toLowerCase()) ? (
+                        <>
+                          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-green-500/20 text-green-300 whitespace-nowrap">Created</span>
+                          {(() => {
+                            const creator = accountCreatorsByEmail.get(c.email!.trim().toLowerCase());
+                            return creator?.createdByName ? (
+                              <div className="mt-1 text-[10px] text-green-300 whitespace-nowrap" title={new Date(creator.createdAt).toLocaleString()}>
+                                Created by: {creator.createdByName}
+                              </div>
+                            ) : null;
+                          })()}
+                        </>
+                      ) : (
+                        <Link
+                          to="/m/$module/$submodule"
+                          params={{ module: "hr", submodule: "user-management" }}
+                          title="Go to User Management to add this person"
+                          className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-red-500/20 text-red-300 hover:bg-red-500/30 hover:text-red-200 whitespace-nowrap"
+                        >
+                          Not Created
+                        </Link>
+                      )}
                     </td>
+                    )}
+                    {isHiringColVisible("forms") && (
+                    <td className="px-4 py-3">
+                      {(() => {
+                        const progress = candidateFormProgress(c);
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => openFormsDialog(c)}
+                            title="Click to pick which forms apply to this candidate"
+                            className={`text-[10px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap ${
+                              !progress
+                                ? "bg-slate-500/20 text-slate-400 hover:bg-slate-500/30 hover:text-slate-200"
+                                : progress.complete === progress.total
+                                ? "bg-green-500/20 text-green-300 hover:bg-green-500/30"
+                                : "bg-amber-500/20 text-amber-300 hover:bg-amber-500/30"
+                            }`}
+                          >
+                            {progress ? `${progress.complete}/${progress.total}` : "Select forms"}
+                          </button>
+                        );
+                      })()}
+                    </td>
+                    )}
+                    {isHiringColVisible("note") && (
+                    <td className="px-4 py-3 max-w-[16rem] space-y-2">
+                      {(
+                        [
+                          { field: "notes" as const, label: "HR Note", value: c.notes },
+                          { field: "interviewerNote" as const, label: "Interviewer Note", value: c.interviewerNote },
+                          { field: "screeningNote" as const, label: "Screening Note", value: c.screeningNote },
+                        ]
+                      ).map(({ field, label, value }) => (
+                        <div key={field}>
+                          <p className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground/70 mb-0.5">{label}</p>
+                          {editingNoteCell?.id === c.id && editingNoteCell.field === field ? (
+                            <div className="flex items-start gap-1">
+                              <textarea
+                                autoFocus
+                                value={noteDraft}
+                                onChange={(e) => setNoteDraft(e.target.value)}
+                                onKeyDown={(e) => { if (e.key === "Escape") setEditingNoteCell(null); }}
+                                rows={2}
+                                className="w-40 rounded border border-white/15 bg-slate-800 px-2 py-1 text-xs text-white focus:outline-none focus:border-blue-500"
+                              />
+                              <button
+                                onClick={() => void handleSaveCandidateNote(c.id, field)}
+                                disabled={savingNoteCell?.id === c.id && savingNoteCell.field === field}
+                                className="text-emerald-400 hover:text-emerald-300 disabled:opacity-40 shrink-0 mt-1"
+                              >
+                                <Check className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => { setEditingNoteCell({ id: c.id, field }); setNoteDraft(value || ""); }}
+                              className="inline-flex items-start gap-1 text-left text-xs text-muted-foreground hover:text-white"
+                              title="Click to edit"
+                            >
+                              <span className="line-clamp-2">{value || "—"}</span>
+                              <Pencil className="h-3 w-3 shrink-0 mt-0.5 opacity-60" />
+                            </button>
+                          )}
+                          {renderFieldChangedBy(c.id, field)}
+                        </div>
+                      ))}
+                    </td>
+                    )}
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1">
-                        {c.cvPath && (
-                          <button
-                            onClick={() => { setForwardCvDialog(c); setForwardRecipientId(""); setForwardRecipientSearch(""); }}
-                            title="Forward CV to a manager"
-                            className="btn text-blue-400 hover:text-blue-300 text-sm p-1"
-                          >
-                            <Forward className="h-4 w-4" />
-                          </button>
-                        )}
+                        <button
+                          onClick={() => {
+                            setForwardCvDialog(c);
+                            setForwardRecipientIds(new Set(defaultForwardRecipientsForCandidate(c).map((r) => r.id)));
+                            setForwardRecipientSearch("");
+                          }}
+                          title="Forward candidate details to a manager"
+                          className="btn text-blue-400 hover:text-blue-300 text-sm p-1"
+                        >
+                          <Forward className="h-4 w-4" />
+                        </button>
                         {isHrOrAdmin && (
                           <button onClick={() => handleDeleteCandidate(c.id)} className="btn text-red-400 hover:text-red-300 text-sm p-1"><Trash2 className="h-4 w-4" /></button>
                         )}
@@ -11345,6 +13783,8 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
             </tbody>
           </table>
         </div>
+          );
+        })()}
       </div>
       )}
 
@@ -11587,6 +14027,29 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
         )}
       </div>
       </>
+      )}
+
+      {activeTab === "interviewCalendar" && (
+        <InterviewCalendarTab
+          candidates={candidates
+            .filter((c): c is Candidate & { interviewDate: string } => c.status === "interviewing" && !!c.interviewDate)
+            .map(
+              (c): InterviewCalendarCandidate => ({
+                id: c.id,
+                name: c.name,
+                position: c.position,
+                branch: c.branch,
+                phone: c.phone,
+                email: c.email,
+                interviewDate: c.interviewDate,
+                interviewTime: c.interviewTime,
+                interviewTimezone: c.interviewTimezone,
+                interviewerName: assignedInterviewerNameForCandidate(c),
+                notes: c.notes,
+              })
+            )}
+          onGoToHiring={() => setActiveTab("hiring")}
+        />
       )}
 
       {/* ── Master List — Employee Directory's same roster, split into
@@ -12255,19 +14718,37 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-white/10 bg-white/5">
-                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Name</th>
-                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Form</th>
-                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Sent By</th>
-                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Status</th>
-                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Sent</th>
+                {([
+                  ["name", "Name"],
+                  ["form", "Form"],
+                  ["sentBy", "Sent By"],
+                  ["status", "Status"],
+                  ["sent", "Sent"],
+                ] as [SignedFormsSortColumn, string][]).map(([column, label]) => (
+                  <th
+                    key={column}
+                    onClick={() => handleSignedFormsSort(column)}
+                    title={`Sort by ${label}`}
+                    className="px-4 py-3 text-left text-xs text-muted-foreground uppercase cursor-pointer select-none hover:text-foreground"
+                  >
+                    <span className="inline-flex items-center gap-1">
+                      {label}
+                      {signedFormsSortColumn === column ? (
+                        signedFormsSortDir === "asc" ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />
+                      ) : (
+                        <ChevronDown className="h-3 w-3 opacity-20" />
+                      )}
+                    </span>
+                  </th>
+                ))}
                 <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Document</th>
               </tr>
             </thead>
             <tbody>
-              {filteredSignedFormRows.length === 0 ? (
+              {sortedSignedFormRows.length === 0 ? (
                 <tr><td colSpan={6} className="px-4 py-8 text-center text-muted-foreground text-sm">{signedFormRows.length === 0 ? "No signed forms sent yet." : "No forms match these filters."}</td></tr>
               ) : (
-                filteredSignedFormRows.map((row) => {
+                sortedSignedFormRows.map((row) => {
                   const status = signedFormStatusLabel(row);
                   return (
                     <tr key={row.doc.id} className="border-b border-white/5 hover:bg-white/5">
@@ -12454,8 +14935,38 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
         <div className="px-4 pt-4">
           <h3 className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Technician</h3>
         </div>
-        <div className="p-4 pt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        <div className="p-4 pt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 border-b border-white/10">
           {TECHNICIAN_FORM_TYPES.map(({ type, label }) => {
+            const checked = selectedFormTypes.has(type);
+            const urgent = ROUTE_REQUIRED_DOCUMENT_TYPES.includes(type);
+            return (
+              <label
+                key={type}
+                className={`flex items-start gap-2.5 rounded-lg border p-3 cursor-pointer transition-colors ${
+                  checked
+                    ? "border-primary/50 bg-primary/10"
+                    : urgent
+                    ? "border-red-500/40 bg-red-500/20 hover:bg-red-500/30"
+                    : "border-white/10 bg-white/5 hover:bg-white/10"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => toggleFormTypeSelected(type)}
+                  className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                />
+                <span className="text-sm font-medium">{label}</span>
+              </label>
+            );
+          })}
+        </div>
+
+        <div className="px-4 pt-4">
+          <h3 className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">BM, SBS, Tech Director, Tech Assistant Director</h3>
+        </div>
+        <div className="p-4 pt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {MANAGEMENT_FORM_TYPES.map(({ type, label }) => {
             const checked = selectedFormTypes.has(type);
             const urgent = ROUTE_REQUIRED_DOCUMENT_TYPES.includes(type);
             return (
@@ -13139,11 +15650,18 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                     </td>
                     {onboardingDocColumns.map((doc) => {
                       const done = !!onboardingDocCategoriesByProfile.get(employee.id)?.has(doc);
+                      const viaSignature = !!onboardingSignedLabelsByProfile.get(employee.id)?.has(doc);
                       return (
                         <td key={doc} className="px-0.5 py-0.5 text-center">
                           <button
                             type="button"
-                            title={done ? `${doc} is filed — click to view` : `${doc} is missing — click to upload or link it`}
+                            title={
+                              viaSignature
+                                ? `${doc} — already e-signed through the app; click to file a copy too if you have one`
+                                : done
+                                ? `${doc} is filed — click to view`
+                                : `${doc} is missing — click to upload or link it`
+                            }
                             onClick={() => setOnboardingSelectedEmployee({ id: employee.id, name: employee.name, docList: getOnboardingDocListForEmployee(employee) })}
                             className={`w-full px-1 py-1.5 rounded text-[9px] font-bold transition-colors ${done ? "bg-green-500/20 text-green-300 hover:bg-green-500/30" : "bg-red-500/20 text-red-300 hover:bg-red-500/30"}`}
                           >
@@ -15206,7 +17724,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       <div className="panel p-0 overflow-hidden mt-4">
         <div className="px-4 py-4 border-b border-white/10">
           <h2 className="font-semibold text-sm">W-4 Sent History</h2>
-          <p className="text-[10px] text-muted-foreground mt-0.5">Track completion status.</p>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Track completion status. "Submitted" means the employee signed — fill in the employer fields to finalize.</p>
         </div>
         {w4ActionError && (
           <p className="mx-4 mt-3 text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{w4ActionError}</p>
@@ -15245,11 +17763,12 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                       <td className="px-4 py-3 text-muted-foreground">{doc.createdByName ?? "—"}</td>
                       <td className="px-4 py-3">
                         <span className={`px-2 py-1 rounded text-xs font-semibold ${
-                          doc.status === "signed" ? "bg-green-500/20 text-green-300"
+                          doc.status === "confirmed" ? "bg-green-500/20 text-green-300"
+                          : doc.status === "signed" ? "bg-blue-500/20 text-blue-300"
                           : doc.status === "cancelled" ? "bg-slate-500/20 text-slate-400"
                           : "bg-yellow-500/20 text-yellow-300"
                         }`}>
-                          {doc.status === "signed" ? "Submitted" : doc.status === "cancelled" ? "Cancelled" : "Awaiting Completion"}
+                          {doc.status === "confirmed" ? "Completed" : doc.status === "signed" ? "Submitted" : doc.status === "cancelled" ? "Cancelled" : "Awaiting Completion"}
                         </span>
                       </td>
                       <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{new Date(doc.createdAt).toLocaleDateString()}</td>
@@ -15266,8 +17785,8 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                             </button>
                           )}
                           {doc.status === "signed" && (
-                            <button type="button" onClick={() => handleOpenW4EmployerDialog(doc)} className="btn text-[10px] px-2 py-1">
-                              Fill Employer Info
+                            <button type="button" onClick={() => handleOpenW4EmployerDialog(doc)} className="btn text-[10px] px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white">
+                              Fill Employer Info →
                             </button>
                           )}
                           <button
@@ -15889,6 +18408,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                           {doc.pdfUrl && (
                             <button type="button" onClick={() => handleDownloadI9Pdf(doc)} className="text-blue-300 hover:text-blue-200 underline text-xs">
                               Download PDF
+                            </button>
+                          )}
+                          {doc.status === "confirmed" && (
+                            <button type="button" onClick={() => handleReopenI9Section2(doc)} className="btn text-[10px] px-2 py-1" title="Redo Section 2 — keeps the employee's Section 1 signature">
+                              Re-sign
                             </button>
                           )}
                           <button
@@ -16744,6 +19268,210 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       </>
       )}
 
+      {activeTab === "ndaForm" && (
+      <>
+      <div className="panel p-0 overflow-visible mt-4 relative z-20">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Send Non-Disclosure Agreement</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Pick a teammate — they'll get a link to fill in their information and sign the Non-Disclosure Agreement. It comes back to you here automatically once submitted.</p>
+        </div>
+        <div className="p-4 flex flex-col md:flex-row gap-6">
+          <div className="flex flex-col gap-3 w-full md:max-w-sm md:shrink-0">
+          <div className="flex flex-col gap-1.5 pb-3 border-b border-white/10">
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">External Link (no login needed)</label>
+            {ndaSentLink ? (
+              <div className="flex flex-col gap-2">
+                <div className="rounded-md border border-green-500/30 bg-green-500/10 px-3 py-2.5">
+                  <p className="text-xs font-semibold text-green-300">Link generated for {ndaSentLink.recipientName}</p>
+                </div>
+                <div className="flex gap-2">
+                  <input type="text" readOnly value={ndaSentLink.link} onFocus={(e) => e.target.select()} className="glass-input text-xs py-1.5 px-3 rounded-md flex-1" />
+                  <button onClick={handleCopyNdaSentLink} className="btn text-xs px-3 py-1.5 shrink-0">{ndaSentLinkCopied ? "Copied!" : "Copy"}</button>
+                </div>
+                <button onClick={() => setNdaSentLink(null)} className="btn text-xs px-3 py-1.5 w-fit">Done</button>
+              </div>
+            ) : (
+              <>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={ndaExternalName}
+                    onChange={(e) => setNdaExternalName(e.target.value)}
+                    placeholder="Type their name (optional)…"
+                    className="glass-input text-sm py-1.5 px-3 rounded-md flex-1"
+                  />
+                  <button
+                    onClick={handleGenerateExternalNda}
+                    disabled={ndaSending}
+                    className="btn text-sm px-3 py-1.5 disabled:opacity-50 shrink-0"
+                  >
+                    {ndaSending ? "Generating…" : "Generate Link"}
+                  </button>
+                </div>
+                <p className="text-[10px] text-muted-foreground">No AHS account needed — they can open the link and fill it in without logging in.</p>
+              </>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-1 relative">
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recipient (AHS teammate)</label>
+            <input
+              type="text"
+              value={ndaRecipientSearch}
+              onChange={(e) => { setNdaRecipientSearch(e.target.value); setNdaRecipientId(""); setNdaRecipientDropdownOpen(true); }}
+              onFocus={() => setNdaRecipientDropdownOpen(true)}
+              onBlur={() => setTimeout(() => setNdaRecipientDropdownOpen(false), 150)}
+              placeholder="Search a teammate…"
+              className="glass-input text-sm py-1.5 px-3 rounded-md"
+            />
+            {ndaRecipientDropdownOpen && (
+              <div className="absolute z-50 top-full mt-1 w-full max-h-96 overflow-y-auto rounded-md border border-white/15 bg-slate-900 shadow-2xl">
+                {filteredNdaRecipients.length === 0 ? (
+                  <p className="px-3 py-2 text-xs text-muted-foreground">No matching teammates.</p>
+                ) : (
+                  filteredNdaRecipients.map((e) => (
+                    <button
+                      key={e.id}
+                      type="button"
+                      onMouseDown={(ev) => ev.preventDefault()}
+                      onClick={() => {
+                        setNdaRecipientId(e.id);
+                        setNdaRecipientSearch(`${e.name} — ${ROLE_LABELS[normalizeRole(e.position)] ?? e.position}`);
+                        setNdaRecipientDropdownOpen(false);
+                      }}
+                      className={`w-full text-left px-3 py-2 text-sm hover:bg-white/10 ${ndaRecipientId === e.id ? "bg-blue-500/20 text-blue-300" : ""}`}
+                    >
+                      {e.name} <span className="text-muted-foreground text-xs">— {ROLE_LABELS[normalizeRole(e.position)] ?? e.position}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+
+          {ndaSendError && (
+            <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{ndaSendError}</p>
+          )}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={toggleNdaPreview}
+              className="btn text-sm px-4 py-2 flex items-center gap-1.5"
+            >
+              Preview <ChevronDown className={`h-3.5 w-3.5 transition-transform ${ndaPreviewOpen ? "rotate-180" : ""}`} />
+            </button>
+            <button
+              onClick={handleSendNda}
+              disabled={!ndaRecipientId || ndaSending}
+              className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
+            >
+              {ndaSending ? "Sending…" : "Send Request"}
+            </button>
+          </div>
+          </div>
+
+          <div className="flex-1 min-w-0">
+            {ndaPreviewOpen ? (
+              <div className="border border-white/10 rounded-md overflow-hidden bg-white/5 h-full" style={{ minHeight: 560 }}>
+                {ndaPreviewLoading || !ndaPreviewPdfUrl ? (
+                  <div className="h-full flex items-center justify-center text-sm text-muted-foreground" style={{ minHeight: 560 }}>Loading preview…</div>
+                ) : (
+                  <iframe src={ndaPreviewPdfUrl} title="Non-Disclosure Agreement Preview" className="w-full border-0" style={{ height: 560 }} />
+                )}
+              </div>
+            ) : (
+              <div className="border border-dashed border-white/15 rounded-md flex items-center justify-center text-sm text-muted-foreground" style={{ minHeight: 560 }}>
+                Click "Preview" to see the document here.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="panel p-0 overflow-hidden mt-4">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Sent Non-Disclosure Agreement Forms</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Track completion status.</p>
+        </div>
+        {ndaActionError && (
+          <p className="mx-4 mt-3 text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{ndaActionError}</p>
+        )}
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-white/10 bg-white/5">
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Employee</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Branch</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Sent By</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Status</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Sent</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sentNdaForms.length === 0 ? (
+                <tr><td colSpan={6} className="px-4 py-8 text-center text-muted-foreground text-sm">No requests sent yet.</td></tr>
+              ) : (
+                sentNdaForms.map((doc) => {
+                  const data = doc.formData as { employeeName?: string; branch?: string };
+                  const recipient = employees.find((e) => e.id === doc.recipientId);
+                  const busy = ndaActionBusyId === doc.id;
+                  return (
+                    <tr key={doc.id} className="border-b border-white/5 hover:bg-white/5">
+                      <td className="px-4 py-3 font-medium">
+                        {doc.pdfUrl ? (
+                          <button type="button" onClick={() => setNdaDocPreview(doc)} className="text-blue-300 hover:text-blue-200 hover:underline text-left">
+                            {data.employeeName || recipient?.name || doc.recipientName || "—"}
+                          </button>
+                        ) : (
+                          data.employeeName || recipient?.name || doc.recipientName || "—"
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-muted-foreground">{data.branch || "—"}</td>
+                      <td className="px-4 py-3 text-muted-foreground">{doc.createdByName ?? "—"}</td>
+                      <td className="px-4 py-3">
+                        <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                          doc.status === "signed" ? "bg-green-500/20 text-green-300"
+                          : doc.status === "cancelled" ? "bg-slate-500/20 text-slate-400"
+                          : "bg-yellow-500/20 text-yellow-300"
+                        }`}>
+                          {doc.status === "signed" ? "Submitted" : doc.status === "cancelled" ? "Cancelled" : "Awaiting Completion"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{new Date(doc.createdAt).toLocaleDateString()}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {doc.status === "pending_signature" && (
+                            <button type="button" onClick={() => handleCopyNdaLink(doc)} className="btn text-[10px] px-2 py-1">
+                              Copy Link
+                            </button>
+                          )}
+                          {doc.pdfUrl && (
+                            <button type="button" onClick={() => handleDownloadNdaPdf(doc)} className="text-blue-300 hover:text-blue-200 underline text-xs">
+                              Download PDF
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => handleDeleteNda(doc)}
+                            title="Permanently delete this request"
+                            className="text-muted-foreground hover:text-red-300 disabled:opacity-50"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      </>
+      )}
+
       {activeTab === "substanceScreening" && (
       <>
       <div className="panel p-0 overflow-visible mt-4 relative z-20">
@@ -16934,6 +19662,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                           {doc.pdfUrl && (
                             <button type="button" onClick={() => handleDownloadSubstanceScreeningPdf(doc)} className="text-blue-300 hover:text-blue-200 underline text-xs">
                               Download PDF
+                            </button>
+                          )}
+                          {doc.status === "confirmed" && (
+                            <button type="button" onClick={() => handleReopenSubstanceScreeningEmployer(doc)} className="btn text-[10px] px-2 py-1" title="Redo the employer signature — keeps the employee's original signature">
+                              Re-sign
                             </button>
                           )}
                           <button
@@ -17728,6 +20461,24 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
           <h2 className="font-semibold text-sm">Sent Mileage & Fuel Policy Agreement Forms</h2>
           <p className="text-[10px] text-muted-foreground mt-0.5">Track completion status. "Awaiting Employer Signature" means the employee finished — add your signature to finalize.</p>
         </div>
+        <div className="px-4 py-3 border-b border-white/10 bg-white/5 flex flex-wrap items-end gap-3">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+            <input
+              type="text"
+              value={mileageFuelSentSearch}
+              onChange={(e) => setMileageFuelSentSearch(e.target.value)}
+              placeholder="Name or branch…"
+              className="glass-input text-sm py-1.5 pl-8 pr-3 rounded-md w-56"
+            />
+          </div>
+          {mileageFuelSentSearch && (
+            <button onClick={() => setMileageFuelSentSearch("")} className="btn text-sm px-3 py-1.5">Clear</button>
+          )}
+          <span className="text-xs text-muted-foreground mb-1.5 ml-auto">
+            {sortedSentMileageFuelForms.length}{mileageFuelSentSearch ? ` of ${sentMileageFuelForms.length}` : ""} forms
+          </span>
+        </div>
         {mileageFuelActionError && (
           <p className="mx-4 mt-3 text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{mileageFuelActionError}</p>
         )}
@@ -17735,19 +20486,43 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-white/10 bg-white/5">
-                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Employee</th>
-                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Branch</th>
-                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Sent By</th>
-                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Status</th>
-                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Sent</th>
+                <SortableTh column="employee" label="Employee" sortColumn={mileageFuelSentSortColumn} sortDir={mileageFuelSentSortDir} onSort={handleMileageFuelSentSort} />
+                <FilterableTh
+                  column="branch" label="Branch"
+                  sortColumn={mileageFuelSentSortColumn} sortDir={mileageFuelSentSortDir} onSort={handleMileageFuelSentSort}
+                  options={mileageFuelFilterOptionsFor("branch")}
+                  isChecked={(v) => mileageFuelIsValueChecked("branch", v)}
+                  onToggleValue={(v) => mileageFuelToggleFilterValue("branch", v)}
+                  onClear={() => mileageFuelClearColumnFilter("branch")}
+                  isFiltered={mileageFuelIsColumnFiltered("branch")}
+                />
+                <FilterableTh
+                  column="sentBy" label="Sent By"
+                  sortColumn={mileageFuelSentSortColumn} sortDir={mileageFuelSentSortDir} onSort={handleMileageFuelSentSort}
+                  options={mileageFuelFilterOptionsFor("sentBy")}
+                  isChecked={(v) => mileageFuelIsValueChecked("sentBy", v)}
+                  onToggleValue={(v) => mileageFuelToggleFilterValue("sentBy", v)}
+                  onClear={() => mileageFuelClearColumnFilter("sentBy")}
+                  isFiltered={mileageFuelIsColumnFiltered("sentBy")}
+                />
+                <FilterableTh
+                  column="status" label="Status"
+                  sortColumn={mileageFuelSentSortColumn} sortDir={mileageFuelSentSortDir} onSort={handleMileageFuelSentSort}
+                  options={mileageFuelFilterOptionsFor("status")}
+                  isChecked={(v) => mileageFuelIsValueChecked("status", v)}
+                  onToggleValue={(v) => mileageFuelToggleFilterValue("status", v)}
+                  onClear={() => mileageFuelClearColumnFilter("status")}
+                  isFiltered={mileageFuelIsColumnFiltered("status")}
+                />
+                <SortableTh column="sent" label="Sent" sortColumn={mileageFuelSentSortColumn} sortDir={mileageFuelSentSortDir} onSort={handleMileageFuelSentSort} />
                 <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Actions</th>
               </tr>
             </thead>
             <tbody>
-              {sentMileageFuelForms.length === 0 ? (
-                <tr><td colSpan={6} className="px-4 py-8 text-center text-muted-foreground text-sm">No requests sent yet.</td></tr>
+              {sortedSentMileageFuelForms.length === 0 ? (
+                <tr><td colSpan={6} className="px-4 py-8 text-center text-muted-foreground text-sm">{sentMileageFuelForms.length === 0 ? "No requests sent yet." : "No forms match this search/filter."}</td></tr>
               ) : (
-                sentMileageFuelForms.map((doc) => {
+                sortedSentMileageFuelForms.map((doc) => {
                   const data = doc.formData as Partial<MileageFuelFormData>;
                   const recipient = employees.find((e) => e.id === doc.recipientId);
                   const busy = mileageFuelActionBusyId === doc.id;
@@ -17772,7 +20547,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                           : doc.status === "cancelled" ? "bg-slate-500/20 text-slate-400"
                           : "bg-yellow-500/20 text-yellow-300"
                         }`}>
-                          {doc.status === "confirmed" ? "Completed" : awaitingEmployer ? "Awaiting Employer Signature" : doc.status === "cancelled" ? "Cancelled" : "Awaiting Employee"}
+                          {mileageFuelStatusLabel(doc)}
                         </span>
                       </td>
                       <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{new Date(doc.createdAt).toLocaleDateString()}</td>
@@ -17823,6 +20598,318 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
         </div>
       </div>
       </>
+      )}
+
+      {activeTab === "masterW2Agreement" && (
+      <>
+      <div className="panel p-0 overflow-visible mt-4 relative z-20">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Send Master W-2 Technician Agreement Request</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Pick a teammate — they'll get a link to fill in their info, upload a license/SSN card photo, and sign. Once they submit, it lands back here for HR to add the employer signature. Covers wage, breaks, location consent, mileage/fuel, Car IQ, vehicle use, damage/parts, PTO, confidentiality, and substance screening in one document.</p>
+        </div>
+        <div className="p-4 flex flex-col md:flex-row gap-6">
+          <div className="flex flex-col gap-3 w-full md:max-w-sm md:shrink-0">
+            <div className="flex flex-col gap-1 relative">
+              <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recipient (AHS teammate)</label>
+              <input
+                type="text"
+                value={masterW2AgreementRecipientSearch}
+                onChange={(e) => { setMasterW2AgreementRecipientSearch(e.target.value); setMasterW2AgreementRecipientId(""); setMasterW2AgreementRecipientDropdownOpen(true); }}
+                onFocus={() => setMasterW2AgreementRecipientDropdownOpen(true)}
+                onBlur={() => setTimeout(() => setMasterW2AgreementRecipientDropdownOpen(false), 150)}
+                placeholder="Search a teammate…"
+                className="glass-input text-sm py-1.5 px-3 rounded-md"
+              />
+              {masterW2AgreementRecipientDropdownOpen && (
+                <div className="absolute z-50 top-full mt-1 w-full max-h-96 overflow-y-auto rounded-md border border-white/15 bg-slate-900 shadow-2xl">
+                  {filteredMasterW2AgreementRecipients.length === 0 ? (
+                    <p className="px-3 py-2 text-xs text-muted-foreground">No matching teammates.</p>
+                  ) : (
+                    filteredMasterW2AgreementRecipients.map((e) => (
+                      <button
+                        key={e.id}
+                        type="button"
+                        onMouseDown={(ev) => ev.preventDefault()}
+                        onClick={() => {
+                          setMasterW2AgreementRecipientId(e.id);
+                          setMasterW2AgreementRecipientSearch(`${e.name} — ${ROLE_LABELS[normalizeRole(e.position)] ?? e.position}`);
+                          setMasterW2AgreementRecipientDropdownOpen(false);
+                        }}
+                        className={`w-full text-left px-3 py-2 text-sm hover:bg-white/10 ${masterW2AgreementRecipientId === e.id ? "bg-blue-500/20 text-blue-300" : ""}`}
+                      >
+                        {e.name} <span className="text-muted-foreground text-xs">— {ROLE_LABELS[normalizeRole(e.position)] ?? e.position}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+
+            {masterW2AgreementSendError && (
+              <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{masterW2AgreementSendError}</p>
+            )}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={toggleMasterW2AgreementPreview}
+                className="btn text-sm px-4 py-2 flex items-center gap-1.5"
+              >
+                Preview <ChevronDown className={`h-3.5 w-3.5 transition-transform ${masterW2AgreementPreviewExpanded ? "rotate-180" : ""}`} />
+              </button>
+              <button
+                onClick={handleSendMasterW2Agreement}
+                disabled={!masterW2AgreementRecipientId || masterW2AgreementSending}
+                className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
+              >
+                {masterW2AgreementSending ? "Sending…" : "Send Request"}
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 min-w-0">
+            {masterW2AgreementPreviewExpanded ? (
+              <div className="border border-white/10 rounded-md overflow-hidden bg-white/5 h-full" style={{ minHeight: 560 }}>
+                {masterW2AgreementPreviewLoading || !masterW2AgreementPreviewPdfUrl ? (
+                  <div className="h-full flex items-center justify-center text-sm text-muted-foreground" style={{ minHeight: 560 }}>Loading preview…</div>
+                ) : (
+                  <iframe src={masterW2AgreementPreviewPdfUrl} title="Master W-2 Technician Agreement Preview" className="w-full border-0" style={{ height: 560 }} />
+                )}
+              </div>
+            ) : (
+              <div className="border border-dashed border-white/15 rounded-md flex items-center justify-center text-sm text-muted-foreground" style={{ minHeight: 560 }}>
+                Click "Preview" to see the document here.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="panel p-0 overflow-hidden mt-4">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Sent Master W-2 Technician Agreement Forms</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Track completion status. "Awaiting Employer Signature" means the employee finished — add your signature to finalize.</p>
+        </div>
+        <div className="px-4 py-3 border-b border-white/10 bg-white/5 flex flex-wrap items-end gap-3">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+            <input
+              type="text"
+              value={masterW2AgreementSentSearch}
+              onChange={(e) => setMasterW2AgreementSentSearch(e.target.value)}
+              placeholder="Name or branch…"
+              className="glass-input text-sm py-1.5 pl-8 pr-3 rounded-md w-56"
+            />
+          </div>
+          {masterW2AgreementSentSearch && (
+            <button onClick={() => setMasterW2AgreementSentSearch("")} className="btn text-sm px-3 py-1.5">Clear</button>
+          )}
+          <span className="text-xs text-muted-foreground mb-1.5 ml-auto">
+            {sortedSentMasterW2AgreementForms.length}{masterW2AgreementSentSearch ? ` of ${sentMasterW2AgreementForms.length}` : ""} forms
+          </span>
+        </div>
+        {masterW2AgreementActionError && (
+          <p className="mx-4 mt-3 text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{masterW2AgreementActionError}</p>
+        )}
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-white/10 bg-white/5">
+                <SortableTh column="employee" label="Employee" sortColumn={masterW2AgreementSentSortColumn} sortDir={masterW2AgreementSentSortDir} onSort={handleMasterW2AgreementSentSort} />
+                <FilterableTh
+                  column="branch" label="Branch"
+                  sortColumn={masterW2AgreementSentSortColumn} sortDir={masterW2AgreementSentSortDir} onSort={handleMasterW2AgreementSentSort}
+                  options={masterW2AgreementFilterOptionsFor("branch")}
+                  isChecked={(v) => masterW2AgreementIsValueChecked("branch", v)}
+                  onToggleValue={(v) => masterW2AgreementToggleFilterValue("branch", v)}
+                  onClear={() => masterW2AgreementClearColumnFilter("branch")}
+                  isFiltered={masterW2AgreementIsColumnFiltered("branch")}
+                />
+                <FilterableTh
+                  column="sentBy" label="Sent By"
+                  sortColumn={masterW2AgreementSentSortColumn} sortDir={masterW2AgreementSentSortDir} onSort={handleMasterW2AgreementSentSort}
+                  options={masterW2AgreementFilterOptionsFor("sentBy")}
+                  isChecked={(v) => masterW2AgreementIsValueChecked("sentBy", v)}
+                  onToggleValue={(v) => masterW2AgreementToggleFilterValue("sentBy", v)}
+                  onClear={() => masterW2AgreementClearColumnFilter("sentBy")}
+                  isFiltered={masterW2AgreementIsColumnFiltered("sentBy")}
+                />
+                <FilterableTh
+                  column="status" label="Status"
+                  sortColumn={masterW2AgreementSentSortColumn} sortDir={masterW2AgreementSentSortDir} onSort={handleMasterW2AgreementSentSort}
+                  options={masterW2AgreementFilterOptionsFor("status")}
+                  isChecked={(v) => masterW2AgreementIsValueChecked("status", v)}
+                  onToggleValue={(v) => masterW2AgreementToggleFilterValue("status", v)}
+                  onClear={() => masterW2AgreementClearColumnFilter("status")}
+                  isFiltered={masterW2AgreementIsColumnFiltered("status")}
+                />
+                <SortableTh column="sent" label="Sent" sortColumn={masterW2AgreementSentSortColumn} sortDir={masterW2AgreementSentSortDir} onSort={handleMasterW2AgreementSentSort} />
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">ID Documents</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedSentMasterW2AgreementForms.length === 0 ? (
+                <tr><td colSpan={7} className="px-4 py-8 text-center text-muted-foreground text-sm">{sentMasterW2AgreementForms.length === 0 ? "No requests sent yet." : "No forms match this search/filter."}</td></tr>
+              ) : (
+                sortedSentMasterW2AgreementForms.map((doc) => {
+                  const data = doc.formData as Partial<MasterW2AgreementFormData>;
+                  const recipient = employees.find((e) => e.id === doc.recipientId);
+                  const busy = masterW2AgreementActionBusyId === doc.id;
+                  const awaitingEmployer = isAwaitingEmployerStep(doc);
+                  return (
+                    <tr key={doc.id} className="border-b border-white/5 hover:bg-white/5">
+                      <td className="px-4 py-3 font-medium">
+                        {doc.pdfUrl ? (
+                          <button type="button" onClick={() => setMasterW2AgreementDocPreview(doc)} className="text-blue-300 hover:text-blue-200 hover:underline text-left">
+                            {data.employeeName || recipient?.name || doc.recipientName || "—"}
+                          </button>
+                        ) : (
+                          data.employeeName || recipient?.name || doc.recipientName || "—"
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-muted-foreground">{data.branch || "—"}</td>
+                      <td className="px-4 py-3 text-muted-foreground">{doc.createdByName ?? "—"}</td>
+                      <td className="px-4 py-3">
+                        <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                          doc.status === "confirmed" ? "bg-green-500/20 text-green-300"
+                          : awaitingEmployer ? "bg-orange-500/20 text-orange-300"
+                          : doc.status === "cancelled" ? "bg-slate-500/20 text-slate-400"
+                          : "bg-yellow-500/20 text-yellow-300"
+                        }`}>
+                          {masterW2AgreementStatusLabel(doc)}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{new Date(doc.createdAt).toLocaleDateString()}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {data.licensePhotoPath && (
+                            <button
+                              type="button"
+                              onClick={() => getTechnicianIdDocumentUrl(data.licensePhotoPath!).then((url) => window.open(url, "_blank", "noopener,noreferrer")).catch((err) => setMasterW2AgreementActionError(err instanceof Error ? err.message : "Failed to open license photo."))}
+                              className="text-blue-300 hover:text-blue-200 underline text-xs"
+                            >
+                              License
+                            </button>
+                          )}
+                          {data.ssnCardPhotoPath && (
+                            <button
+                              type="button"
+                              onClick={() => getTechnicianIdDocumentUrl(data.ssnCardPhotoPath!).then((url) => window.open(url, "_blank", "noopener,noreferrer")).catch((err) => setMasterW2AgreementActionError(err instanceof Error ? err.message : "Failed to open SSN card photo."))}
+                              className="text-blue-300 hover:text-blue-200 underline text-xs"
+                            >
+                              SSN Card
+                            </button>
+                          )}
+                          {!data.licensePhotoPath && !data.ssnCardPhotoPath && <span className="text-muted-foreground text-xs">—</span>}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {doc.status === "pending_signature" && doc.recipientSlot === "employee" && (
+                            <button type="button" onClick={() => handleCopyMasterW2AgreementLink(doc)} className="btn text-[10px] px-2 py-1">
+                              Copy Link
+                            </button>
+                          )}
+                          {awaitingEmployer && (
+                            <>
+                              <button type="button" onClick={() => handleOpenMasterW2AgreementEmployerDialog(doc)} className="btn text-[10px] px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white">
+                                Add Employer Signature →
+                              </button>
+                              <button type="button" onClick={() => handleOpenEmployerReassign(doc)} className="btn text-[10px] px-2 py-1">
+                                Send to Employer
+                              </button>
+                            </>
+                          )}
+                          {doc.pdfUrl && (
+                            <button type="button" onClick={() => handleDownloadMasterW2AgreementPdf(doc)} className="text-blue-300 hover:text-blue-200 underline text-xs">
+                              Download PDF
+                            </button>
+                          )}
+                          {doc.status === "confirmed" && (
+                            <button type="button" onClick={() => handleReopenMasterW2AgreementEmployer(doc)} className="btn text-[10px] px-2 py-1" title="Redo the employer signature — keeps the employee's original signature">
+                              Re-sign
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => handleDeleteMasterW2Agreement(doc)}
+                            title="Permanently delete this request"
+                            className="text-muted-foreground hover:text-red-300 disabled:opacity-50"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      </>
+      )}
+
+      {masterW2AgreementEmployerDialog && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-800 border border-white/10 rounded-lg p-6 max-w-sm w-full">
+            <h3 className="text-lg font-bold mb-2">Add Employer Signature</h3>
+            <p className="text-sm text-muted-foreground mb-4">
+              Employer representative signature for{" "}
+              <span className="font-semibold text-white">{(masterW2AgreementEmployerDialog.formData as Partial<MasterW2AgreementFormData>).employeeName || "—"}</span>'s
+              Master W-2 Technician Comprehensive Policy, Consent &amp; Agreement.
+            </p>
+
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2 block">Add your signature</label>
+            <canvas
+              {...masterW2AgreementEmployerSigPad.canvasProps}
+              className={`bg-white rounded-md border border-white/15 w-full ${masterW2AgreementEmployerSigPad.canvasProps.className}`}
+            />
+            <div className="flex justify-center mt-2">
+              <SignaturePadControls pad={masterW2AgreementEmployerSigPad} />
+            </div>
+
+            {masterW2AgreementEmployerError && (
+              <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2 mt-3">{masterW2AgreementEmployerError}</p>
+            )}
+            <div className="flex gap-2 justify-end mt-4">
+              <button onClick={() => setMasterW2AgreementEmployerDialog(null)} className="btn text-sm px-4 py-2">Cancel</button>
+              <button
+                onClick={handleSaveMasterW2AgreementEmployerSignature}
+                disabled={masterW2AgreementEmployerSaving}
+                className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
+              >
+                {masterW2AgreementEmployerSaving ? "Saving…" : "Complete & Sign"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Master W-2 Technician Agreement Sent History PDF preview — same inline-frame pattern used for the other Sent History tables */}
+      {masterW2AgreementDocPreview && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setMasterW2AgreementDocPreview(null)}>
+          <div className="bg-slate-900 border border-white/10 rounded-lg shadow-2xl w-full max-w-6xl h-[92vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold">{(masterW2AgreementDocPreview.formData as Partial<MasterW2AgreementFormData>).employeeName || "—"}</p>
+                <p className="text-[10px] text-muted-foreground">
+                  {masterW2AgreementDocPreview.status === "confirmed" ? "Completed" : "Submitted"} {new Date(masterW2AgreementDocPreview.signedAt ?? masterW2AgreementDocPreview.createdAt).toLocaleString()}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {masterW2AgreementDocPreview.pdfUrl && (
+                  <a href={masterW2AgreementDocPreview.pdfUrl} target="_blank" rel="noopener noreferrer" className="btn text-xs px-2.5 py-1.5 flex items-center gap-1"><Download className="h-3 w-3" /> Download</a>
+                )}
+                <button type="button" onClick={() => setMasterW2AgreementDocPreview(null)} className="btn text-xs px-2.5 py-1.5">Close</button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-hidden bg-slate-950">
+              {masterW2AgreementDocPreview.pdfUrl && <iframe src={masterW2AgreementDocPreview.pdfUrl} title="Master W-2 Technician Agreement" className="w-full h-full min-h-[70vh] border-0" />}
+            </div>
+          </div>
+        </div>
       )}
 
       {activeTab === "flashTechnicianTravel" && (
@@ -19036,6 +22123,414 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       </>
       )}
 
+      {activeTab === "contractorDataUs" && (
+      <>
+      <div className="panel p-0 overflow-visible mt-4 relative z-20">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Send Contractor Data (US) Request</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Pick a teammate — they'll get a link to fill in their contact/address/identity info, upload photos of their SSN card and driver's license, and sign. It comes back to you here automatically once submitted.</p>
+        </div>
+        <div className="p-4 flex flex-col md:flex-row gap-6">
+          <div className="flex flex-col gap-3 w-full md:max-w-sm md:shrink-0">
+            <div className="flex flex-col gap-1.5 pb-3 border-b border-white/10">
+              <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">External Link (no login needed)</label>
+              {contractorDataUsSentLink ? (
+                <div className="flex flex-col gap-2">
+                  <div className="rounded-md border border-green-500/30 bg-green-500/10 px-3 py-2.5">
+                    <p className="text-xs font-semibold text-green-300">Link generated for {contractorDataUsSentLink.recipientName}</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <input type="text" readOnly value={contractorDataUsSentLink.link} onFocus={(e) => e.target.select()} className="glass-input text-xs py-1.5 px-3 rounded-md flex-1" />
+                    <button onClick={handleCopyContractorDataUsSentLink} className="btn text-xs px-3 py-1.5 shrink-0">{contractorDataUsSentLinkCopied ? "Copied!" : "Copy"}</button>
+                  </div>
+                  <button onClick={() => setContractorDataUsSentLink(null)} className="btn text-xs px-3 py-1.5 w-fit">Done</button>
+                </div>
+              ) : (
+                <>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={contractorDataUsExternalName}
+                      onChange={(e) => setContractorDataUsExternalName(e.target.value)}
+                      placeholder="Type their name (optional)…"
+                      className="glass-input text-sm py-1.5 px-3 rounded-md flex-1"
+                    />
+                    <button
+                      onClick={handleGenerateExternalContractorDataUs}
+                      disabled={contractorDataUsSending}
+                      className="btn text-sm px-3 py-1.5 disabled:opacity-50 shrink-0"
+                    >
+                      {contractorDataUsSending ? "Generating…" : "Generate Link"}
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground">No AHS account needed — they can open the link and fill it in without logging in.</p>
+                </>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-1 relative">
+              <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recipient (AHS teammate)</label>
+              <input
+                type="text"
+                value={contractorDataUsRecipientSearch}
+                onChange={(e) => { setContractorDataUsRecipientSearch(e.target.value); setContractorDataUsRecipientId(""); setContractorDataUsRecipientDropdownOpen(true); }}
+                onFocus={() => setContractorDataUsRecipientDropdownOpen(true)}
+                onBlur={() => setTimeout(() => setContractorDataUsRecipientDropdownOpen(false), 150)}
+                placeholder="Search a teammate…"
+                className="glass-input text-sm py-1.5 px-3 rounded-md"
+              />
+              {contractorDataUsRecipientDropdownOpen && (
+                <div className="absolute z-50 top-full mt-1 w-full max-h-96 overflow-y-auto rounded-md border border-white/15 bg-slate-900 shadow-2xl">
+                  {filteredContractorDataUsRecipients.length === 0 ? (
+                    <p className="px-3 py-2 text-xs text-muted-foreground">No matching teammates.</p>
+                  ) : (
+                    filteredContractorDataUsRecipients.map((e) => (
+                      <button
+                        key={e.id}
+                        type="button"
+                        onMouseDown={(ev) => ev.preventDefault()}
+                        onClick={() => {
+                          setContractorDataUsRecipientId(e.id);
+                          setContractorDataUsRecipientSearch(`${e.name} — ${ROLE_LABELS[normalizeRole(e.position)] ?? e.position}`);
+                          setContractorDataUsRecipientDropdownOpen(false);
+                        }}
+                        className={`w-full text-left px-3 py-2 text-sm hover:bg-white/10 ${contractorDataUsRecipientId === e.id ? "bg-blue-500/20 text-blue-300" : ""}`}
+                      >
+                        {e.name} <span className="text-muted-foreground text-xs">— {ROLE_LABELS[normalizeRole(e.position)] ?? e.position}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+
+            {contractorDataUsSendError && (
+              <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{contractorDataUsSendError}</p>
+            )}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={toggleContractorDataUsPreview}
+                className="btn text-sm px-4 py-2 flex items-center gap-1.5"
+              >
+                Preview <ChevronDown className={`h-3.5 w-3.5 transition-transform ${contractorDataUsPreviewExpanded ? "rotate-180" : ""}`} />
+              </button>
+              <button
+                onClick={handleSendContractorDataUs}
+                disabled={!contractorDataUsRecipientId || contractorDataUsSending}
+                className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
+              >
+                {contractorDataUsSending ? "Sending…" : "Send Request"}
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 min-w-0">
+            {contractorDataUsPreviewExpanded ? (
+              <div className="border border-white/10 rounded-md overflow-hidden bg-white/5 h-full" style={{ minHeight: 560 }}>
+                {contractorDataUsPreviewLoading || !contractorDataUsPreviewPdfUrl ? (
+                  <div className="h-full flex items-center justify-center text-sm text-muted-foreground" style={{ minHeight: 560 }}>Loading preview…</div>
+                ) : (
+                  <iframe src={contractorDataUsPreviewPdfUrl} title="Contractor Data (US) Preview" className="w-full border-0" style={{ height: 560 }} />
+                )}
+              </div>
+            ) : (
+              <div className="border border-dashed border-white/15 rounded-md flex items-center justify-center text-sm text-muted-foreground" style={{ minHeight: 560 }}>
+                Click "Preview" to see the document here.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="panel p-0 overflow-hidden mt-4">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Sent Contractor Data (US) Forms</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Track completion status.</p>
+        </div>
+        {contractorDataUsActionError && (
+          <p className="mx-4 mt-3 text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{contractorDataUsActionError}</p>
+        )}
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-white/10 bg-white/5">
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Employee</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Branch</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Sent By</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Status</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Sent</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sentContractorDataUsForms.length === 0 ? (
+                <tr><td colSpan={6} className="px-4 py-8 text-center text-muted-foreground text-sm">No requests sent yet.</td></tr>
+              ) : (
+                sentContractorDataUsForms.map((doc) => {
+                  const data = doc.formData as Partial<ContractorDataUsFormData>;
+                  const recipient = employees.find((e) => e.id === doc.recipientId);
+                  const busy = contractorDataUsActionBusyId === doc.id;
+                  return (
+                    <tr key={doc.id} className="border-b border-white/5 hover:bg-white/5">
+                      <td className="px-4 py-3 font-medium">
+                        {doc.pdfUrl ? (
+                          <button type="button" onClick={() => setContractorDataUsDocPreview(doc)} className="text-blue-300 hover:text-blue-200 hover:underline text-left">
+                            {data.employeeName || recipient?.name || doc.recipientName || "—"}
+                          </button>
+                        ) : (
+                          data.employeeName || recipient?.name || doc.recipientName || "—"
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-muted-foreground">{data.branch || "—"}</td>
+                      <td className="px-4 py-3 text-muted-foreground">{doc.createdByName ?? "—"}</td>
+                      <td className="px-4 py-3">
+                        <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                          doc.status === "signed" ? "bg-green-500/20 text-green-300"
+                          : doc.status === "cancelled" ? "bg-slate-500/20 text-slate-400"
+                          : "bg-yellow-500/20 text-yellow-300"
+                        }`}>
+                          {doc.status === "signed" ? "Submitted" : doc.status === "cancelled" ? "Cancelled" : "Awaiting Completion"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{new Date(doc.createdAt).toLocaleDateString()}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {doc.status === "pending_signature" && (
+                            <button type="button" onClick={() => handleCopyContractorDataUsLink(doc)} className="btn text-[10px] px-2 py-1">
+                              Copy Link
+                            </button>
+                          )}
+                          {doc.pdfUrl && (
+                            <button type="button" onClick={() => handleDownloadContractorDataUsPdf(doc)} className="text-blue-300 hover:text-blue-200 underline text-xs">
+                              Download PDF
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => handleDeleteContractorDataUs(doc)}
+                            title="Permanently delete this request"
+                            className="text-muted-foreground hover:text-red-300 disabled:opacity-50"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      </>
+      )}
+
+      {activeTab === "vehicleUseAgreement" && (
+      <>
+      <div className="panel p-0 overflow-visible mt-4 relative z-20">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Send Vehicle Use Agreement Request</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Pick a teammate — they'll get a link to fill in their name, date, and branch, and sign. It comes back to you here automatically once submitted.</p>
+        </div>
+        <div className="p-4 flex flex-col md:flex-row gap-6">
+          <div className="flex flex-col gap-3 w-full md:max-w-sm md:shrink-0">
+            <div className="flex flex-col gap-1.5 pb-3 border-b border-white/10">
+              <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">External Link (no login needed)</label>
+              {vehicleUseAgreementSentLink ? (
+                <div className="flex flex-col gap-2">
+                  <div className="rounded-md border border-green-500/30 bg-green-500/10 px-3 py-2.5">
+                    <p className="text-xs font-semibold text-green-300">Link generated for {vehicleUseAgreementSentLink.recipientName}</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <input type="text" readOnly value={vehicleUseAgreementSentLink.link} onFocus={(e) => e.target.select()} className="glass-input text-xs py-1.5 px-3 rounded-md flex-1" />
+                    <button onClick={handleCopyVehicleUseAgreementSentLink} className="btn text-xs px-3 py-1.5 shrink-0">{vehicleUseAgreementSentLinkCopied ? "Copied!" : "Copy"}</button>
+                  </div>
+                  <button onClick={() => setVehicleUseAgreementSentLink(null)} className="btn text-xs px-3 py-1.5 w-fit">Done</button>
+                </div>
+              ) : (
+                <>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={vehicleUseAgreementExternalName}
+                      onChange={(e) => setVehicleUseAgreementExternalName(e.target.value)}
+                      placeholder="Type their name (optional)…"
+                      className="glass-input text-sm py-1.5 px-3 rounded-md flex-1"
+                    />
+                    <button
+                      onClick={handleGenerateExternalVehicleUseAgreement}
+                      disabled={vehicleUseAgreementSending}
+                      className="btn text-sm px-3 py-1.5 disabled:opacity-50 shrink-0"
+                    >
+                      {vehicleUseAgreementSending ? "Generating…" : "Generate Link"}
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground">No AHS account needed — they can open the link and fill it in without logging in.</p>
+                </>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-1 relative">
+              <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recipient (AHS teammate)</label>
+              <input
+                type="text"
+                value={vehicleUseAgreementRecipientSearch}
+                onChange={(e) => { setVehicleUseAgreementRecipientSearch(e.target.value); setVehicleUseAgreementRecipientId(""); setVehicleUseAgreementRecipientDropdownOpen(true); }}
+                onFocus={() => setVehicleUseAgreementRecipientDropdownOpen(true)}
+                onBlur={() => setTimeout(() => setVehicleUseAgreementRecipientDropdownOpen(false), 150)}
+                placeholder="Search a teammate…"
+                className="glass-input text-sm py-1.5 px-3 rounded-md"
+              />
+              {vehicleUseAgreementRecipientDropdownOpen && (
+                <div className="absolute z-50 top-full mt-1 w-full max-h-96 overflow-y-auto rounded-md border border-white/15 bg-slate-900 shadow-2xl">
+                  {filteredVehicleUseAgreementRecipients.length === 0 ? (
+                    <p className="px-3 py-2 text-xs text-muted-foreground">No matching teammates.</p>
+                  ) : (
+                    filteredVehicleUseAgreementRecipients.map((e) => (
+                      <button
+                        key={e.id}
+                        type="button"
+                        onMouseDown={(ev) => ev.preventDefault()}
+                        onClick={() => {
+                          setVehicleUseAgreementRecipientId(e.id);
+                          setVehicleUseAgreementRecipientSearch(`${e.name} — ${ROLE_LABELS[normalizeRole(e.position)] ?? e.position}`);
+                          setVehicleUseAgreementRecipientDropdownOpen(false);
+                        }}
+                        className={`w-full text-left px-3 py-2 text-sm hover:bg-white/10 ${vehicleUseAgreementRecipientId === e.id ? "bg-blue-500/20 text-blue-300" : ""}`}
+                      >
+                        {e.name} <span className="text-muted-foreground text-xs">— {ROLE_LABELS[normalizeRole(e.position)] ?? e.position}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+
+            {vehicleUseAgreementSendError && (
+              <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{vehicleUseAgreementSendError}</p>
+            )}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={toggleVehicleUseAgreementPreview}
+                className="btn text-sm px-4 py-2 flex items-center gap-1.5"
+              >
+                Preview <ChevronDown className={`h-3.5 w-3.5 transition-transform ${vehicleUseAgreementPreviewExpanded ? "rotate-180" : ""}`} />
+              </button>
+              <button
+                onClick={handleSendVehicleUseAgreement}
+                disabled={!vehicleUseAgreementRecipientId || vehicleUseAgreementSending}
+                className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
+              >
+                {vehicleUseAgreementSending ? "Sending…" : "Send Request"}
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 min-w-0">
+            {vehicleUseAgreementPreviewExpanded ? (
+              <div className="border border-white/10 rounded-md overflow-hidden bg-white/5 h-full" style={{ minHeight: 560 }}>
+                {vehicleUseAgreementPreviewLoading || !vehicleUseAgreementPreviewPdfUrl ? (
+                  <div className="h-full flex items-center justify-center text-sm text-muted-foreground" style={{ minHeight: 560 }}>Loading preview…</div>
+                ) : (
+                  <iframe src={vehicleUseAgreementPreviewPdfUrl} title="Vehicle Use Agreement Preview" className="w-full border-0" style={{ height: 560 }} />
+                )}
+              </div>
+            ) : (
+              <div className="border border-dashed border-white/15 rounded-md flex items-center justify-center text-sm text-muted-foreground" style={{ minHeight: 560 }}>
+                Click "Preview" to see the document here.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="panel p-0 overflow-hidden mt-4">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Sent Vehicle Use Agreement Forms</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Track completion status.</p>
+        </div>
+        {vehicleUseAgreementActionError && (
+          <p className="mx-4 mt-3 text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{vehicleUseAgreementActionError}</p>
+        )}
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-white/10 bg-white/5">
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Employee</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Branch</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Sent By</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Status</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Sent</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sentVehicleUseAgreementForms.length === 0 ? (
+                <tr><td colSpan={6} className="px-4 py-8 text-center text-muted-foreground text-sm">No requests sent yet.</td></tr>
+              ) : (
+                sentVehicleUseAgreementForms.map((doc) => {
+                  const data = doc.formData as Partial<VehicleUseAgreementFormData>;
+                  const recipient = employees.find((e) => e.id === doc.recipientId);
+                  const busy = vehicleUseAgreementActionBusyId === doc.id;
+                  return (
+                    <tr key={doc.id} className="border-b border-white/5 hover:bg-white/5">
+                      <td className="px-4 py-3 font-medium">
+                        {doc.pdfUrl ? (
+                          <button type="button" onClick={() => setVehicleUseAgreementDocPreview(doc)} className="text-blue-300 hover:text-blue-200 hover:underline text-left">
+                            {data.employeeName || recipient?.name || doc.recipientName || "—"}
+                          </button>
+                        ) : (
+                          data.employeeName || recipient?.name || doc.recipientName || "—"
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-muted-foreground">{data.branch || "—"}</td>
+                      <td className="px-4 py-3 text-muted-foreground">{doc.createdByName ?? "—"}</td>
+                      <td className="px-4 py-3">
+                        <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                          doc.status === "signed" ? "bg-green-500/20 text-green-300"
+                          : doc.status === "cancelled" ? "bg-slate-500/20 text-slate-400"
+                          : "bg-yellow-500/20 text-yellow-300"
+                        }`}>
+                          {doc.status === "signed" ? "Submitted" : doc.status === "cancelled" ? "Cancelled" : "Awaiting Completion"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{new Date(doc.createdAt).toLocaleDateString()}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {doc.status === "pending_signature" && (
+                            <button type="button" onClick={() => handleCopyVehicleUseAgreementLink(doc)} className="btn text-[10px] px-2 py-1">
+                              Copy Link
+                            </button>
+                          )}
+                          {doc.pdfUrl && (
+                            <button type="button" onClick={() => handleDownloadVehicleUseAgreementPdf(doc)} className="text-blue-300 hover:text-blue-200 underline text-xs">
+                              Download PDF
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => handleDeleteVehicleUseAgreement(doc)}
+                            title="Permanently delete this request"
+                            className="text-muted-foreground hover:text-red-300 disabled:opacity-50"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      </>
+      )}
+
       {activeTab === "directDeposit" && (
       <>
       <div className="panel p-0 overflow-visible mt-4 relative z-20">
@@ -19409,6 +22904,29 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
             </div>
             <div className="flex-1 overflow-hidden bg-slate-950">
               {confidentialityDocPreview.pdfUrl && <iframe src={confidentialityDocPreview.pdfUrl} title="Employee Confidentiality Agreement" className="w-full h-full min-h-[70vh] border-0" />}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Non-Disclosure Agreement Sent History — PDF preview, same inline-frame pattern used for W-8BEN/W-4/W-9/W-4R/Car IQ/Vehicle Agreement/Employee Confidentiality Sent History */}
+      {ndaDocPreview && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setNdaDocPreview(null)}>
+          <div className="bg-slate-900 border border-white/10 rounded-lg shadow-2xl w-full max-w-6xl h-[92vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold">{(ndaDocPreview.formData as { employeeName?: string }).employeeName || "—"}</p>
+                <p className="text-[10px] text-muted-foreground">Submitted {new Date(ndaDocPreview.signedAt ?? ndaDocPreview.createdAt).toLocaleString()}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                {ndaDocPreview.pdfUrl && (
+                  <a href={ndaDocPreview.pdfUrl} target="_blank" rel="noopener noreferrer" className="btn text-xs px-2.5 py-1.5 flex items-center gap-1"><Download className="h-3 w-3" /> Download</a>
+                )}
+                <button type="button" onClick={() => setNdaDocPreview(null)} className="btn text-xs px-2.5 py-1.5">Close</button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-hidden bg-slate-950">
+              {ndaDocPreview.pdfUrl && <iframe src={ndaDocPreview.pdfUrl} title="Non-Disclosure Agreement" className="w-full h-full min-h-[70vh] border-0" />}
             </div>
           </div>
         </div>
@@ -19886,6 +23404,52 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
             </div>
             <div className="flex-1 overflow-hidden bg-slate-950">
               {contractorDataDocPreview.pdfUrl && <iframe src={contractorDataDocPreview.pdfUrl} title="Employee Data" className="w-full h-full min-h-[70vh] border-0" />}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Contractor Data (US) Sent History PDF preview — same inline-frame pattern used for the other Sent History tables */}
+      {contractorDataUsDocPreview && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setContractorDataUsDocPreview(null)}>
+          <div className="bg-slate-900 border border-white/10 rounded-lg shadow-2xl w-full max-w-6xl h-[92vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold">{(contractorDataUsDocPreview.formData as Partial<ContractorDataUsFormData>).employeeName || "—"}</p>
+                <p className="text-[10px] text-muted-foreground">Submitted {new Date(contractorDataUsDocPreview.signedAt ?? contractorDataUsDocPreview.createdAt).toLocaleString()}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                {contractorDataUsDocPreview.pdfUrl && (
+                  <a href={contractorDataUsDocPreview.pdfUrl} target="_blank" rel="noopener noreferrer" className="btn text-xs px-2.5 py-1.5 flex items-center gap-1"><Download className="h-3 w-3" /> Download</a>
+                )}
+                <button type="button" onClick={() => setContractorDataUsDocPreview(null)} className="btn text-xs px-2.5 py-1.5">Close</button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-hidden bg-slate-950">
+              {contractorDataUsDocPreview.pdfUrl && <iframe src={contractorDataUsDocPreview.pdfUrl} title="Contractor Data (US)" className="w-full h-full min-h-[70vh] border-0" />}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Vehicle Use Agreement Sent History PDF preview — same inline-frame pattern used for the other Sent History tables */}
+      {vehicleUseAgreementDocPreview && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setVehicleUseAgreementDocPreview(null)}>
+          <div className="bg-slate-900 border border-white/10 rounded-lg shadow-2xl w-full max-w-6xl h-[92vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold">{(vehicleUseAgreementDocPreview.formData as Partial<VehicleUseAgreementFormData>).employeeName || "—"}</p>
+                <p className="text-[10px] text-muted-foreground">Submitted {new Date(vehicleUseAgreementDocPreview.signedAt ?? vehicleUseAgreementDocPreview.createdAt).toLocaleString()}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                {vehicleUseAgreementDocPreview.pdfUrl && (
+                  <a href={vehicleUseAgreementDocPreview.pdfUrl} target="_blank" rel="noopener noreferrer" className="btn text-xs px-2.5 py-1.5 flex items-center gap-1"><Download className="h-3 w-3" /> Download</a>
+                )}
+                <button type="button" onClick={() => setVehicleUseAgreementDocPreview(null)} className="btn text-xs px-2.5 py-1.5">Close</button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-hidden bg-slate-950">
+              {vehicleUseAgreementDocPreview.pdfUrl && <iframe src={vehicleUseAgreementDocPreview.pdfUrl} title="Vehicle Use Agreement" className="w-full h-full min-h-[70vh] border-0" />}
             </div>
           </div>
         </div>
@@ -21497,37 +25061,233 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
               type="date"
               value={statusDateDialog.date}
               onChange={(e) => setStatusDateDialog({ ...statusDateDialog, date: e.target.value })}
-              className="glass-input text-sm py-1.5 px-3 rounded-md w-full mb-4"
+              className={`glass-input text-sm py-1.5 px-3 rounded-md w-full ${statusDateDialog.status === "interviewing" || statusDateDialog.status === "training" ? "mb-3" : "mb-4"}`}
             />
+            {statusDateDialog.status === "interviewing" && (
+              <>
+                <p className="text-sm text-muted-foreground mb-1">Interview time (optional):</p>
+                <div className="flex gap-2 mb-4">
+                  <input
+                    type="time"
+                    value={statusDateDialog.time}
+                    onChange={(e) => setStatusDateDialog({ ...statusDateDialog, time: e.target.value })}
+                    className="glass-input text-sm py-1.5 px-3 rounded-md flex-1"
+                  />
+                  <select
+                    value={statusDateDialog.timezone}
+                    onChange={(e) => setStatusDateDialog({ ...statusDateDialog, timezone: e.target.value as "CST" | "EST" })}
+                    className="glass-input text-sm py-1.5 px-3 rounded-md w-24"
+                  >
+                    <option value="CST">CST</option>
+                    <option value="EST">EST</option>
+                  </select>
+                </div>
+              </>
+            )}
+            {statusDateDialog.status === "training" && (
+              <>
+                <p className="text-sm text-muted-foreground mb-1">Training end date (optional):</p>
+                <input
+                  type="date"
+                  value={statusDateDialog.endDate}
+                  min={statusDateDialog.date}
+                  onChange={(e) => setStatusDateDialog({ ...statusDateDialog, endDate: e.target.value })}
+                  className="glass-input text-sm py-1.5 px-3 rounded-md w-full mb-3"
+                />
+                <p className="text-sm text-muted-foreground mb-1">Trainer:</p>
+                <div className="relative mb-4">
+                  <input
+                    type="text"
+                    value={trainerSearch}
+                    onChange={(e) => {
+                      setTrainerSearch(e.target.value);
+                      setStatusDateDialog({ ...statusDateDialog, trainerId: "" });
+                      setTrainerDropdownOpen(true);
+                    }}
+                    onFocus={() => setTrainerDropdownOpen(true)}
+                    onBlur={() => setTimeout(() => setTrainerDropdownOpen(false), 150)}
+                    placeholder="Search a trainer…"
+                    className="glass-input text-sm py-1.5 px-3 rounded-md w-full"
+                  />
+                  {trainerDropdownOpen && (
+                    <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto rounded-md border border-white/15 bg-slate-800 shadow-lg">
+                      {filteredTrainerOptions.length === 0 ? (
+                        <p className="px-3 py-2 text-xs text-muted-foreground">No matching employees.</p>
+                      ) : (
+                        filteredTrainerOptions.map((t) => (
+                          <button
+                            key={t.id}
+                            type="button"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => {
+                              setStatusDateDialog({ ...statusDateDialog, trainerId: t.id });
+                              setTrainerSearch(t.name);
+                              setTrainerDropdownOpen(false);
+                            }}
+                            className={`w-full text-left px-3 py-2 text-sm hover:bg-white/10 ${statusDateDialog.trainerId === t.id ? "bg-blue-500/20 text-blue-300" : ""}`}
+                          >
+                            {t.name} {t.branch && <span className="text-muted-foreground text-xs">— {t.branch}</span>}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
             <div className="flex gap-2 justify-end">
               <button onClick={() => setStatusDateDialog(null)} className="btn text-sm px-4 py-2">Cancel</button>
-              <button onClick={handleConfirmStatusDate} className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white">Save</button>
+              <button
+                onClick={handleConfirmStatusDate}
+                disabled={statusDateDialog.status === "training" && !statusDateDialog.trainerId}
+                className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
+              >
+                Save
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Forward CV to a manager — sends a link via the internal messenger (Team Messenger) */}
+      {/* Forms column — pick which onboarding form types apply to this
+          candidate. No fixed company-wide required-forms list exists, so
+          this is a per-candidate checklist (migration 0224); the "X/Y"
+          badge is then computed live from whichever of these types have a
+          signed/confirmed document for their matched profile. */}
+      {formsDialog && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-800 border border-white/10 rounded-lg p-6 max-w-md w-full">
+            <h3 className="text-lg font-bold mb-1">Required Forms</h3>
+            <p className="text-sm text-muted-foreground mb-3">
+              Which forms apply to <span className="font-semibold text-white">{formsDialog.candidateName}</span>?
+            </p>
+            <div className="relative mb-2">
+              <Search className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <input
+                type="text"
+                autoFocus
+                value={formsDialogSearch}
+                onChange={(e) => setFormsDialogSearch(e.target.value)}
+                placeholder="Filter forms…"
+                className="glass-input text-sm py-1.5 pl-8 pr-3 rounded-md w-full"
+              />
+            </div>
+            <div className="max-h-80 overflow-y-auto border border-white/10 rounded-md divide-y divide-white/5 mb-4">
+              {(() => {
+                const q = formsDialogSearch.trim().toLowerCase();
+                const types = (Object.keys(SIGNABLE_DOCUMENT_REGISTRY) as SignableDocumentType[]).filter(
+                  (type) => !q || SIGNABLE_DOCUMENT_REGISTRY[type].label.toLowerCase().includes(q)
+                );
+                if (types.length === 0) {
+                  return <div className="px-3 py-4 text-sm text-muted-foreground text-center">No forms match "{formsDialogSearch}".</div>;
+                }
+                const dialogCandidate = candidates.find((c) => c.id === formsDialog.candidateId);
+                const dialogProfileId = dialogCandidate?.email ? profileIdByEmail.get(dialogCandidate.email.trim().toLowerCase()) : undefined;
+                const signedTypes = dialogProfileId ? completeDocTypesByProfileId.get(dialogProfileId) : undefined;
+                const pendingTypes = dialogProfileId ? pendingDocTypesByProfileId.get(dialogProfileId) : undefined;
+                return types.map((type) => {
+                  const checked = formsDialog.selected.has(type);
+                  const isSigned = signedTypes?.has(type) ?? false;
+                  const isPending = !isSigned && (pendingTypes?.has(type) ?? false);
+                  return (
+                    <div key={type} className="px-3 py-2">
+                      <div className="flex items-center gap-2 -mx-3 px-3 py-0.5 hover:bg-white/5">
+                        <label className="flex items-center gap-2 text-sm text-slate-200 cursor-pointer flex-1">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => {
+                              const next = new Set(formsDialog.selected);
+                              if (next.has(type)) next.delete(type);
+                              else next.add(type);
+                              setFormsDialog({ ...formsDialog, selected: next });
+                            }}
+                            className="h-3.5 w-3.5 accent-blue-500 shrink-0"
+                          />
+                          {SIGNABLE_DOCUMENT_REGISTRY[type].label}
+                        </label>
+                        {isSigned && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/15 text-green-300 border border-green-500/30 shrink-0">Signed</span>
+                        )}
+                        {isPending && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/15 text-yellow-300 border border-yellow-500/30 shrink-0">Sent</span>
+                        )}
+                        {checked && (
+                          <button
+                            type="button"
+                            onClick={() => void handleSendType(type)}
+                            disabled={savingFormsDialog}
+                            className="text-xs text-blue-400 hover:text-blue-300 underline disabled:opacity-40 shrink-0"
+                          >
+                            Send →
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+            {formsDialog.selected.size > 0 && (
+              <button
+                type="button"
+                onClick={() => void handleSendAllSelected()}
+                disabled={savingFormsDialog}
+                className="w-full mb-3 text-xs px-3 py-2 rounded-md border border-blue-500/30 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20 disabled:opacity-40 flex items-center justify-center gap-1.5"
+              >
+                <Link2 className="h-3.5 w-3.5" /> Send All Selected via Bulk Form Send
+              </button>
+            )}
+            <div className="flex gap-2 justify-between items-center">
+              <span className="text-xs text-muted-foreground">{formsDialog.selected.size} selected</span>
+              <div className="flex gap-2">
+                <button onClick={() => setFormsDialog(null)} disabled={savingFormsDialog} className="btn text-sm px-4 py-2">Cancel</button>
+                <button onClick={handleSaveFormsDialog} disabled={savingFormsDialog} className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50">
+                  {savingFormsDialog ? "Saving…" : "Save"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Forward candidate details to a manager — sends name/position/branch/contact/status (plus the CV link, if one's on file) via the internal messenger (Team Messenger) */}
       {forwardCvDialog && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-slate-800 border border-white/10 rounded-lg p-6 max-w-sm w-full">
-            <h3 className="text-lg font-bold mb-2">Forward CV</h3>
+            <h3 className="text-lg font-bold mb-2">Forward Candidate</h3>
             <p className="text-sm text-muted-foreground mb-4">
-              Send <span className="font-semibold text-white">{forwardCvDialog.name}</span>'s CV to a manager via the internal messenger.
+              Send <span className="font-semibold text-white">{forwardCvDialog.name}</span>'s details{forwardCvDialog.cvPath ? " and CV" : ""} to one or more managers via the internal messenger.
             </p>
-            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recipient</label>
-            <div className="relative mt-1 mb-4">
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recipients</label>
+            {forwardRecipients.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mt-1.5">
+                {forwardRecipients.map((r) => (
+                  <span key={r.id} className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full bg-blue-500/15 text-blue-300 text-xs border border-blue-500/25">
+                    {r.name}
+                    <button
+                      type="button"
+                      onClick={() => setForwardRecipientIds((prev) => { const next = new Set(prev); next.delete(r.id); return next; })}
+                      className="hover:text-white leading-none px-0.5"
+                      title="Remove"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="relative mt-1.5 mb-4">
               <input
                 type="text"
                 value={forwardRecipientSearch}
                 onChange={(e) => {
                   setForwardRecipientSearch(e.target.value);
-                  setForwardRecipientId("");
                   setForwardRecipientDropdownOpen(true);
                 }}
                 onFocus={() => setForwardRecipientDropdownOpen(true)}
                 onBlur={() => setTimeout(() => setForwardRecipientDropdownOpen(false), 150)}
-                placeholder="Search a manager…"
+                placeholder="Add another manager…"
                 className="glass-input text-sm py-1.5 px-3 rounded-md w-full"
               />
               {forwardRecipientDropdownOpen && (
@@ -21541,11 +25301,10 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                         type="button"
                         onMouseDown={(e) => e.preventDefault()}
                         onClick={() => {
-                          setForwardRecipientId(m.id);
-                          setForwardRecipientSearch(`${m.name} — ${ROLE_LABELS[normalizeRole(m.position)] ?? m.position}`);
-                          setForwardRecipientDropdownOpen(false);
+                          setForwardRecipientIds((prev) => new Set(prev).add(m.id));
+                          setForwardRecipientSearch("");
                         }}
-                        className={`w-full text-left px-3 py-2 text-sm hover:bg-white/10 ${forwardRecipientId === m.id ? "bg-blue-500/20 text-blue-300" : ""}`}
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-white/10"
                       >
                         {m.name} <span className="text-muted-foreground text-xs">— {ROLE_LABELS[normalizeRole(m.position)] ?? m.position}</span>
                       </button>
@@ -21558,10 +25317,10 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
               <p className="text-xs text-yellow-300 mb-4">No manager accounts found in this company.</p>
             )}
             <div className="flex gap-2 justify-end">
-              <button onClick={() => { setForwardCvDialog(null); setForwardRecipientId(""); setForwardRecipientSearch(""); }} className="btn text-sm px-4 py-2">Cancel</button>
+              <button onClick={() => { setForwardCvDialog(null); setForwardRecipientIds(new Set()); setForwardRecipientSearch(""); }} className="btn text-sm px-4 py-2">Cancel</button>
               <button
                 onClick={handleForwardCv}
-                disabled={!forwardRecipientId || forwardSending}
+                disabled={forwardRecipientIds.size === 0 || forwardSending}
                 className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
               >
                 {forwardSending ? "Sending…" : "Send"}

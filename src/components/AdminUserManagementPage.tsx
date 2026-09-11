@@ -15,6 +15,8 @@ import { useAllRoleOptions } from "@/lib/customRoles";
 import { auth as firebaseAuth } from "@/lib/firebase/config";
 import { ActivityLogPanel } from "@/components/ActivityLogPanel";
 import { logModuleActivity } from "@/lib/supabase/moduleActivityLog";
+import { getCompanyWeeklyPasswordResetEnabled, setCompanyWeeklyPasswordResetEnabled } from "@/lib/supabase/companySettings";
+import { Switch } from "@/components/ui/switch";
 import { seedOnboardingTasks } from "@/lib/supabase/employeeOnboarding";
 import { ManageWorkingHoursModal } from "@/components/ManageWorkingHoursModal";
 import { getBranchRoleSchedules, type BranchRoleScheduleRow } from "@/lib/supabase/branchSchedules";
@@ -82,6 +84,8 @@ interface NewUserFormData {
   workingHours: string;
   mealMinutes: string;
   selectedOffDays: number[];
+  /** Master List's "Trainee" tab is cross-cutting (employment_type, not department) — see MASTER_LIST_TRAINEE_TAB in ReportHRDaily.tsx. Their department (role-inferred, or set later in Master List) stays whatever it is regardless of this flag. */
+  isTrainee: boolean;
 }
 
 // Display order only (a work week reads naturally Monday-first). The actual
@@ -754,6 +758,40 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
   useEffect(() => {
     getBranchRoleSchedules().then(setBranchSchedules).catch(() => {});
   }, []);
+  // Company-wide opt-out for the automatic weekly forced password reset
+  // (migrations 0235/0236) — shown next to the Activity Log button, on both
+  // /m/admin/user-management and /m/hr/user-management (same component).
+  // SUPERADMIN only, per the user's explicit call — hidden entirely (not
+  // just disabled) for everyone else, and enforced server-side too by
+  // set_company_weekly_password_reset so it can't be flipped by a raw
+  // request from someone who isn't SUPERADMIN either.
+  const canManagePasswordResetSetting = normalizeRole(auth.role) === "SUPERADMIN";
+  const [weeklyPasswordResetEnabled, setWeeklyPasswordResetEnabledState] = useState(true);
+  const [savingPasswordResetSetting, setSavingPasswordResetSetting] = useState(false);
+  useEffect(() => {
+    if (!canManagePasswordResetSetting) return;
+    getCompanyWeeklyPasswordResetEnabled().then(setWeeklyPasswordResetEnabledState).catch(() => {});
+  }, [canManagePasswordResetSetting]);
+  const handleToggleWeeklyPasswordReset = async (next: boolean) => {
+    if (!canManagePasswordResetSetting || savingPasswordResetSetting) return;
+    const prev = weeklyPasswordResetEnabled;
+    setWeeklyPasswordResetEnabledState(next);
+    setSavingPasswordResetSetting(true);
+    try {
+      await setCompanyWeeklyPasswordResetEnabled(next);
+      void logModuleActivity({
+        module: "user-management",
+        actorName: auth.displayName || auth.email || "Admin",
+        action: next ? "weekly_password_reset_enabled" : "weekly_password_reset_disabled",
+        targetType: "company",
+      });
+    } catch (err) {
+      console.error("Failed to update weekly password reset setting:", err);
+      setWeeklyPasswordResetEnabledState(prev);
+    } finally {
+      setSavingPasswordResetSetting(false);
+    }
+  };
   const [creatingUser, setCreatingUser] = useState(false);
   const [deactivateTarget, setDeactivateTarget] = useState<UserRow | null>(null);
   const [togglingActive, setTogglingActive] = useState(false);
@@ -783,6 +821,7 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
     workingHours: "",
     mealMinutes: "",
     selectedOffDays: [0, 6], // Sunday and Saturday by default
+    isTrainee: false,
   });
 
   // Load users from Supabase on mount (RLS scopes to the caller's company).
@@ -1194,6 +1233,7 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
         requiredCheckOut: newUserForm.requiredCheckOut,
         workingHours: newUserForm.workingHours.trim() ? Number(newUserForm.workingHours) : undefined,
         mealMinutes: newUserForm.mealMinutes.trim() ? Number(newUserForm.mealMinutes) : undefined,
+        employmentType: newUserForm.isTrainee ? "trainee" : "regular",
       });
 
       // Save schedule / off-days / PO initials to localStorage (until employees domain is wired)
@@ -1249,6 +1289,7 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
         workingHours: "",
         mealMinutes: "",
         selectedOffDays: [0, 6],
+        isTrainee: false,
       });
       setShowAddUserModal(false);
     } catch (error: any) {
@@ -1312,8 +1353,22 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
             </div>
           </div>
 
-          <div className="mt-4">
+          <div className="mt-4 flex flex-wrap items-center gap-3">
             <ActivityLogPanel module="user-management" title="User Management Activity Log" />
+            {canManagePasswordResetSetting && (
+              <div
+                className="flex items-center gap-2 rounded-lg border border-white/15 bg-slate-900/80 px-3 py-2 text-sm"
+                title="Every Monday, everyone is automatically forced to change their password on next login. Turn this off to stop that."
+              >
+                <KeyRound className="h-4 w-4 text-slate-400 shrink-0" />
+                <span className="text-slate-300 whitespace-nowrap">Weekly forced password change</span>
+                <Switch
+                  checked={weeklyPasswordResetEnabled}
+                  disabled={savingPasswordResetSetting}
+                  onCheckedChange={handleToggleWeeklyPasswordReset}
+                />
+              </div>
+            )}
           </div>
 
           <div className="mt-5 flex flex-wrap items-end gap-4">
@@ -1653,6 +1708,34 @@ export function AdminUserManagementPage({ mod, sub }: { mod: ModuleDef; sub: Sub
                         userType: next[0] || "",
                       }))}
                     />
+                  </label>
+                  <label className="space-y-2 text-sm text-slate-200">
+                    <span className="block text-xs uppercase tracking-[0.08em] text-slate-400">Employment Type</span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={newUserForm.isTrainee}
+                      onClick={() => handleAddUserFormChange("isTrainee", !newUserForm.isTrainee)}
+                      className="flex items-center gap-2.5 rounded-lg border border-white/10 bg-slate-700 px-3 py-2 w-fit hover:border-white/30 transition"
+                    >
+                      <span
+                        className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+                          newUserForm.isTrainee ? "bg-amber-400" : "bg-slate-500"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                            newUserForm.isTrainee ? "translate-x-4" : "translate-x-1"
+                          }`}
+                        />
+                      </span>
+                      <span className={`text-xs font-semibold ${newUserForm.isTrainee ? "text-amber-300" : "text-slate-300"}`}>
+                        {newUserForm.isTrainee ? "Trainee" : "Regular"}
+                      </span>
+                    </button>
+                    {newUserForm.isTrainee && (
+                      <span className="block text-[11px] text-amber-300/80">Goes under Master List's Trainee tab — department/user type stay as set above.</span>
+                    )}
                   </label>
                 </div>
               </div>

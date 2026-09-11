@@ -33,6 +33,9 @@ import { Route as SignTerminationFormDocIdRouteImport } from './routes/sign-term
 import { Route as SignTerminationExternalDocIdRouteImport } from './routes/sign-termination-external.$docId'
 import { Route as SignPromotionFormDocIdRouteImport } from './routes/sign-promotion-form.$docId'
 import { Route as SignPromotionExternalDocIdRouteImport } from './routes/sign-promotion-external.$docId'
+import { Route as SignNdaFormDocIdRouteImport } from './routes/sign-nda-form.$docId'
+import { Route as SignNdaExternalDocIdRouteImport } from './routes/sign-nda-external.$docId'
+import { Route as SignManagerReviewDocIdRouteImport } from './routes/sign-manager-review.$docId'
 import { Route as SignExternalDocIdRouteImport } from './routes/sign-external.$docId'
 import { Route as SignDocumentDocIdRouteImport } from './routes/sign-document.$docId'
 import { Route as SignContractorAddendumDocIdRouteImport } from './routes/sign-contractor-addendum.$docId'
@@ -50,6 +53,8 @@ import { Route as FillW4rDocIdRouteImport } from './routes/fill-w4r.$docId'
 import { Route as FillW4rExternalDocIdRouteImport } from './routes/fill-w4r-external.$docId'
 import { Route as FillW4DocIdRouteImport } from './routes/fill-w4.$docId'
 import { Route as FillW4ExternalDocIdRouteImport } from './routes/fill-w4-external.$docId'
+import { Route as FillVehicleUseAgreementDocIdRouteImport } from './routes/fill-vehicle-use-agreement.$docId'
+import { Route as FillVehicleUseAgreementExternalDocIdRouteImport } from './routes/fill-vehicle-use-agreement-external.$docId'
 import { Route as FillVehicleAgreementDocIdRouteImport } from './routes/fill-vehicle-agreement.$docId'
 import { Route as FillVehicleAgreementExternalDocIdRouteImport } from './routes/fill-vehicle-agreement-external.$docId'
 import { Route as FillSubstanceScreeningDocIdRouteImport } from './routes/fill-substance-screening.$docId'
@@ -62,6 +67,7 @@ import { Route as FillMileageFuelDocIdRouteImport } from './routes/fill-mileage-
 import { Route as FillMileageFuelExternalDocIdRouteImport } from './routes/fill-mileage-fuel-external.$docId'
 import { Route as FillMealRestBreakDocIdRouteImport } from './routes/fill-meal-rest-break.$docId'
 import { Route as FillMealRestBreakExternalDocIdRouteImport } from './routes/fill-meal-rest-break-external.$docId'
+import { Route as FillMasterW2AgreementDocIdRouteImport } from './routes/fill-master-w2-agreement.$docId'
 import { Route as FillLocationConsentDocIdRouteImport } from './routes/fill-location-consent.$docId'
 import { Route as FillLocationConsentExternalDocIdRouteImport } from './routes/fill-location-consent-external.$docId'
 import { Route as FillI9DocIdRouteImport } from './routes/fill-i9.$docId'
@@ -76,6 +82,8 @@ import { Route as FillDirectDepositExternalDocIdRouteImport } from './routes/fil
 import { Route as FillDamageDocIdRouteImport } from './routes/fill-damage.$docId'
 import { Route as FillDamageExternalDocIdRouteImport } from './routes/fill-damage-external.$docId'
 import { Route as FillContractorDataDocIdRouteImport } from './routes/fill-contractor-data.$docId'
+import { Route as FillContractorDataUsDocIdRouteImport } from './routes/fill-contractor-data-us.$docId'
+import { Route as FillContractorDataUsExternalDocIdRouteImport } from './routes/fill-contractor-data-us-external.$docId'
 import { Route as FillContractorDataExternalDocIdRouteImport } from './routes/fill-contractor-data-external.$docId'
 import { Route as FillContractorAddendumDocIdRouteImport } from './routes/fill-contractor-addendum.$docId'
 import { Route as FillContractorAddendumExternalDocIdRouteImport } from './routes/fill-contractor-addendum-external.$docId'
@@ -212,6 +220,21 @@ const SignPromotionExternalDocIdRoute =
     path: '/sign-promotion-external/$docId',
     getParentRoute: () => rootRouteImport,
   } as any)
+const SignNdaFormDocIdRoute = SignNdaFormDocIdRouteImport.update({
+  id: '/sign-nda-form/$docId',
+  path: '/sign-nda-form/$docId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SignNdaExternalDocIdRoute = SignNdaExternalDocIdRouteImport.update({
+  id: '/sign-nda-external/$docId',
+  path: '/sign-nda-external/$docId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SignManagerReviewDocIdRoute = SignManagerReviewDocIdRouteImport.update({
+  id: '/sign-manager-review/$docId',
+  path: '/sign-manager-review/$docId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SignExternalDocIdRoute = SignExternalDocIdRouteImport.update({
   id: '/sign-external/$docId',
   path: '/sign-external/$docId',
@@ -301,6 +324,18 @@ const FillW4ExternalDocIdRoute = FillW4ExternalDocIdRouteImport.update({
   path: '/fill-w4-external/$docId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const FillVehicleUseAgreementDocIdRoute =
+  FillVehicleUseAgreementDocIdRouteImport.update({
+    id: '/fill-vehicle-use-agreement/$docId',
+    path: '/fill-vehicle-use-agreement/$docId',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const FillVehicleUseAgreementExternalDocIdRoute =
+  FillVehicleUseAgreementExternalDocIdRouteImport.update({
+    id: '/fill-vehicle-use-agreement-external/$docId',
+    path: '/fill-vehicle-use-agreement-external/$docId',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const FillVehicleAgreementDocIdRoute =
   FillVehicleAgreementDocIdRouteImport.update({
     id: '/fill-vehicle-agreement/$docId',
@@ -367,6 +402,12 @@ const FillMealRestBreakExternalDocIdRoute =
   FillMealRestBreakExternalDocIdRouteImport.update({
     id: '/fill-meal-rest-break-external/$docId',
     path: '/fill-meal-rest-break-external/$docId',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const FillMasterW2AgreementDocIdRoute =
+  FillMasterW2AgreementDocIdRouteImport.update({
+    id: '/fill-master-w2-agreement/$docId',
+    path: '/fill-master-w2-agreement/$docId',
     getParentRoute: () => rootRouteImport,
   } as any)
 const FillLocationConsentDocIdRoute =
@@ -446,6 +487,18 @@ const FillContractorDataDocIdRoute = FillContractorDataDocIdRouteImport.update({
   path: '/fill-contractor-data/$docId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const FillContractorDataUsDocIdRoute =
+  FillContractorDataUsDocIdRouteImport.update({
+    id: '/fill-contractor-data-us/$docId',
+    path: '/fill-contractor-data-us/$docId',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const FillContractorDataUsExternalDocIdRoute =
+  FillContractorDataUsExternalDocIdRouteImport.update({
+    id: '/fill-contractor-data-us-external/$docId',
+    path: '/fill-contractor-data-us-external/$docId',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const FillContractorDataExternalDocIdRoute =
   FillContractorDataExternalDocIdRouteImport.update({
     id: '/fill-contractor-data-external/$docId',
@@ -540,6 +593,8 @@ export interface FileRoutesByFullPath {
   '/fill-contractor-addendum-external/$docId': typeof FillContractorAddendumExternalDocIdRoute
   '/fill-contractor-addendum/$docId': typeof FillContractorAddendumDocIdRoute
   '/fill-contractor-data-external/$docId': typeof FillContractorDataExternalDocIdRoute
+  '/fill-contractor-data-us-external/$docId': typeof FillContractorDataUsExternalDocIdRoute
+  '/fill-contractor-data-us/$docId': typeof FillContractorDataUsDocIdRoute
   '/fill-contractor-data/$docId': typeof FillContractorDataDocIdRoute
   '/fill-damage-external/$docId': typeof FillDamageExternalDocIdRoute
   '/fill-damage/$docId': typeof FillDamageDocIdRoute
@@ -554,6 +609,7 @@ export interface FileRoutesByFullPath {
   '/fill-i9/$docId': typeof FillI9DocIdRoute
   '/fill-location-consent-external/$docId': typeof FillLocationConsentExternalDocIdRoute
   '/fill-location-consent/$docId': typeof FillLocationConsentDocIdRoute
+  '/fill-master-w2-agreement/$docId': typeof FillMasterW2AgreementDocIdRoute
   '/fill-meal-rest-break-external/$docId': typeof FillMealRestBreakExternalDocIdRoute
   '/fill-meal-rest-break/$docId': typeof FillMealRestBreakDocIdRoute
   '/fill-mileage-fuel-external/$docId': typeof FillMileageFuelExternalDocIdRoute
@@ -566,6 +622,8 @@ export interface FileRoutesByFullPath {
   '/fill-substance-screening/$docId': typeof FillSubstanceScreeningDocIdRoute
   '/fill-vehicle-agreement-external/$docId': typeof FillVehicleAgreementExternalDocIdRoute
   '/fill-vehicle-agreement/$docId': typeof FillVehicleAgreementDocIdRoute
+  '/fill-vehicle-use-agreement-external/$docId': typeof FillVehicleUseAgreementExternalDocIdRoute
+  '/fill-vehicle-use-agreement/$docId': typeof FillVehicleUseAgreementDocIdRoute
   '/fill-w4-external/$docId': typeof FillW4ExternalDocIdRoute
   '/fill-w4/$docId': typeof FillW4DocIdRoute
   '/fill-w4r-external/$docId': typeof FillW4rExternalDocIdRoute
@@ -583,6 +641,9 @@ export interface FileRoutesByFullPath {
   '/sign-contractor-addendum/$docId': typeof SignContractorAddendumDocIdRoute
   '/sign-document/$docId': typeof SignDocumentDocIdRoute
   '/sign-external/$docId': typeof SignExternalDocIdRoute
+  '/sign-manager-review/$docId': typeof SignManagerReviewDocIdRoute
+  '/sign-nda-external/$docId': typeof SignNdaExternalDocIdRoute
+  '/sign-nda-form/$docId': typeof SignNdaFormDocIdRoute
   '/sign-promotion-external/$docId': typeof SignPromotionExternalDocIdRoute
   '/sign-promotion-form/$docId': typeof SignPromotionFormDocIdRoute
   '/sign-termination-external/$docId': typeof SignTerminationExternalDocIdRoute
@@ -621,6 +682,8 @@ export interface FileRoutesByTo {
   '/fill-contractor-addendum-external/$docId': typeof FillContractorAddendumExternalDocIdRoute
   '/fill-contractor-addendum/$docId': typeof FillContractorAddendumDocIdRoute
   '/fill-contractor-data-external/$docId': typeof FillContractorDataExternalDocIdRoute
+  '/fill-contractor-data-us-external/$docId': typeof FillContractorDataUsExternalDocIdRoute
+  '/fill-contractor-data-us/$docId': typeof FillContractorDataUsDocIdRoute
   '/fill-contractor-data/$docId': typeof FillContractorDataDocIdRoute
   '/fill-damage-external/$docId': typeof FillDamageExternalDocIdRoute
   '/fill-damage/$docId': typeof FillDamageDocIdRoute
@@ -635,6 +698,7 @@ export interface FileRoutesByTo {
   '/fill-i9/$docId': typeof FillI9DocIdRoute
   '/fill-location-consent-external/$docId': typeof FillLocationConsentExternalDocIdRoute
   '/fill-location-consent/$docId': typeof FillLocationConsentDocIdRoute
+  '/fill-master-w2-agreement/$docId': typeof FillMasterW2AgreementDocIdRoute
   '/fill-meal-rest-break-external/$docId': typeof FillMealRestBreakExternalDocIdRoute
   '/fill-meal-rest-break/$docId': typeof FillMealRestBreakDocIdRoute
   '/fill-mileage-fuel-external/$docId': typeof FillMileageFuelExternalDocIdRoute
@@ -647,6 +711,8 @@ export interface FileRoutesByTo {
   '/fill-substance-screening/$docId': typeof FillSubstanceScreeningDocIdRoute
   '/fill-vehicle-agreement-external/$docId': typeof FillVehicleAgreementExternalDocIdRoute
   '/fill-vehicle-agreement/$docId': typeof FillVehicleAgreementDocIdRoute
+  '/fill-vehicle-use-agreement-external/$docId': typeof FillVehicleUseAgreementExternalDocIdRoute
+  '/fill-vehicle-use-agreement/$docId': typeof FillVehicleUseAgreementDocIdRoute
   '/fill-w4-external/$docId': typeof FillW4ExternalDocIdRoute
   '/fill-w4/$docId': typeof FillW4DocIdRoute
   '/fill-w4r-external/$docId': typeof FillW4rExternalDocIdRoute
@@ -664,6 +730,9 @@ export interface FileRoutesByTo {
   '/sign-contractor-addendum/$docId': typeof SignContractorAddendumDocIdRoute
   '/sign-document/$docId': typeof SignDocumentDocIdRoute
   '/sign-external/$docId': typeof SignExternalDocIdRoute
+  '/sign-manager-review/$docId': typeof SignManagerReviewDocIdRoute
+  '/sign-nda-external/$docId': typeof SignNdaExternalDocIdRoute
+  '/sign-nda-form/$docId': typeof SignNdaFormDocIdRoute
   '/sign-promotion-external/$docId': typeof SignPromotionExternalDocIdRoute
   '/sign-promotion-form/$docId': typeof SignPromotionFormDocIdRoute
   '/sign-termination-external/$docId': typeof SignTerminationExternalDocIdRoute
@@ -703,6 +772,8 @@ export interface FileRoutesById {
   '/fill-contractor-addendum-external/$docId': typeof FillContractorAddendumExternalDocIdRoute
   '/fill-contractor-addendum/$docId': typeof FillContractorAddendumDocIdRoute
   '/fill-contractor-data-external/$docId': typeof FillContractorDataExternalDocIdRoute
+  '/fill-contractor-data-us-external/$docId': typeof FillContractorDataUsExternalDocIdRoute
+  '/fill-contractor-data-us/$docId': typeof FillContractorDataUsDocIdRoute
   '/fill-contractor-data/$docId': typeof FillContractorDataDocIdRoute
   '/fill-damage-external/$docId': typeof FillDamageExternalDocIdRoute
   '/fill-damage/$docId': typeof FillDamageDocIdRoute
@@ -717,6 +788,7 @@ export interface FileRoutesById {
   '/fill-i9/$docId': typeof FillI9DocIdRoute
   '/fill-location-consent-external/$docId': typeof FillLocationConsentExternalDocIdRoute
   '/fill-location-consent/$docId': typeof FillLocationConsentDocIdRoute
+  '/fill-master-w2-agreement/$docId': typeof FillMasterW2AgreementDocIdRoute
   '/fill-meal-rest-break-external/$docId': typeof FillMealRestBreakExternalDocIdRoute
   '/fill-meal-rest-break/$docId': typeof FillMealRestBreakDocIdRoute
   '/fill-mileage-fuel-external/$docId': typeof FillMileageFuelExternalDocIdRoute
@@ -729,6 +801,8 @@ export interface FileRoutesById {
   '/fill-substance-screening/$docId': typeof FillSubstanceScreeningDocIdRoute
   '/fill-vehicle-agreement-external/$docId': typeof FillVehicleAgreementExternalDocIdRoute
   '/fill-vehicle-agreement/$docId': typeof FillVehicleAgreementDocIdRoute
+  '/fill-vehicle-use-agreement-external/$docId': typeof FillVehicleUseAgreementExternalDocIdRoute
+  '/fill-vehicle-use-agreement/$docId': typeof FillVehicleUseAgreementDocIdRoute
   '/fill-w4-external/$docId': typeof FillW4ExternalDocIdRoute
   '/fill-w4/$docId': typeof FillW4DocIdRoute
   '/fill-w4r-external/$docId': typeof FillW4rExternalDocIdRoute
@@ -746,6 +820,9 @@ export interface FileRoutesById {
   '/sign-contractor-addendum/$docId': typeof SignContractorAddendumDocIdRoute
   '/sign-document/$docId': typeof SignDocumentDocIdRoute
   '/sign-external/$docId': typeof SignExternalDocIdRoute
+  '/sign-manager-review/$docId': typeof SignManagerReviewDocIdRoute
+  '/sign-nda-external/$docId': typeof SignNdaExternalDocIdRoute
+  '/sign-nda-form/$docId': typeof SignNdaFormDocIdRoute
   '/sign-promotion-external/$docId': typeof SignPromotionExternalDocIdRoute
   '/sign-promotion-form/$docId': typeof SignPromotionFormDocIdRoute
   '/sign-termination-external/$docId': typeof SignTerminationExternalDocIdRoute
@@ -786,6 +863,8 @@ export interface FileRouteTypes {
     | '/fill-contractor-addendum-external/$docId'
     | '/fill-contractor-addendum/$docId'
     | '/fill-contractor-data-external/$docId'
+    | '/fill-contractor-data-us-external/$docId'
+    | '/fill-contractor-data-us/$docId'
     | '/fill-contractor-data/$docId'
     | '/fill-damage-external/$docId'
     | '/fill-damage/$docId'
@@ -800,6 +879,7 @@ export interface FileRouteTypes {
     | '/fill-i9/$docId'
     | '/fill-location-consent-external/$docId'
     | '/fill-location-consent/$docId'
+    | '/fill-master-w2-agreement/$docId'
     | '/fill-meal-rest-break-external/$docId'
     | '/fill-meal-rest-break/$docId'
     | '/fill-mileage-fuel-external/$docId'
@@ -812,6 +892,8 @@ export interface FileRouteTypes {
     | '/fill-substance-screening/$docId'
     | '/fill-vehicle-agreement-external/$docId'
     | '/fill-vehicle-agreement/$docId'
+    | '/fill-vehicle-use-agreement-external/$docId'
+    | '/fill-vehicle-use-agreement/$docId'
     | '/fill-w4-external/$docId'
     | '/fill-w4/$docId'
     | '/fill-w4r-external/$docId'
@@ -829,6 +911,9 @@ export interface FileRouteTypes {
     | '/sign-contractor-addendum/$docId'
     | '/sign-document/$docId'
     | '/sign-external/$docId'
+    | '/sign-manager-review/$docId'
+    | '/sign-nda-external/$docId'
+    | '/sign-nda-form/$docId'
     | '/sign-promotion-external/$docId'
     | '/sign-promotion-form/$docId'
     | '/sign-termination-external/$docId'
@@ -867,6 +952,8 @@ export interface FileRouteTypes {
     | '/fill-contractor-addendum-external/$docId'
     | '/fill-contractor-addendum/$docId'
     | '/fill-contractor-data-external/$docId'
+    | '/fill-contractor-data-us-external/$docId'
+    | '/fill-contractor-data-us/$docId'
     | '/fill-contractor-data/$docId'
     | '/fill-damage-external/$docId'
     | '/fill-damage/$docId'
@@ -881,6 +968,7 @@ export interface FileRouteTypes {
     | '/fill-i9/$docId'
     | '/fill-location-consent-external/$docId'
     | '/fill-location-consent/$docId'
+    | '/fill-master-w2-agreement/$docId'
     | '/fill-meal-rest-break-external/$docId'
     | '/fill-meal-rest-break/$docId'
     | '/fill-mileage-fuel-external/$docId'
@@ -893,6 +981,8 @@ export interface FileRouteTypes {
     | '/fill-substance-screening/$docId'
     | '/fill-vehicle-agreement-external/$docId'
     | '/fill-vehicle-agreement/$docId'
+    | '/fill-vehicle-use-agreement-external/$docId'
+    | '/fill-vehicle-use-agreement/$docId'
     | '/fill-w4-external/$docId'
     | '/fill-w4/$docId'
     | '/fill-w4r-external/$docId'
@@ -910,6 +1000,9 @@ export interface FileRouteTypes {
     | '/sign-contractor-addendum/$docId'
     | '/sign-document/$docId'
     | '/sign-external/$docId'
+    | '/sign-manager-review/$docId'
+    | '/sign-nda-external/$docId'
+    | '/sign-nda-form/$docId'
     | '/sign-promotion-external/$docId'
     | '/sign-promotion-form/$docId'
     | '/sign-termination-external/$docId'
@@ -948,6 +1041,8 @@ export interface FileRouteTypes {
     | '/fill-contractor-addendum-external/$docId'
     | '/fill-contractor-addendum/$docId'
     | '/fill-contractor-data-external/$docId'
+    | '/fill-contractor-data-us-external/$docId'
+    | '/fill-contractor-data-us/$docId'
     | '/fill-contractor-data/$docId'
     | '/fill-damage-external/$docId'
     | '/fill-damage/$docId'
@@ -962,6 +1057,7 @@ export interface FileRouteTypes {
     | '/fill-i9/$docId'
     | '/fill-location-consent-external/$docId'
     | '/fill-location-consent/$docId'
+    | '/fill-master-w2-agreement/$docId'
     | '/fill-meal-rest-break-external/$docId'
     | '/fill-meal-rest-break/$docId'
     | '/fill-mileage-fuel-external/$docId'
@@ -974,6 +1070,8 @@ export interface FileRouteTypes {
     | '/fill-substance-screening/$docId'
     | '/fill-vehicle-agreement-external/$docId'
     | '/fill-vehicle-agreement/$docId'
+    | '/fill-vehicle-use-agreement-external/$docId'
+    | '/fill-vehicle-use-agreement/$docId'
     | '/fill-w4-external/$docId'
     | '/fill-w4/$docId'
     | '/fill-w4r-external/$docId'
@@ -991,6 +1089,9 @@ export interface FileRouteTypes {
     | '/sign-contractor-addendum/$docId'
     | '/sign-document/$docId'
     | '/sign-external/$docId'
+    | '/sign-manager-review/$docId'
+    | '/sign-nda-external/$docId'
+    | '/sign-nda-form/$docId'
     | '/sign-promotion-external/$docId'
     | '/sign-promotion-form/$docId'
     | '/sign-termination-external/$docId'
@@ -1030,6 +1131,8 @@ export interface RootRouteChildren {
   FillContractorAddendumExternalDocIdRoute: typeof FillContractorAddendumExternalDocIdRoute
   FillContractorAddendumDocIdRoute: typeof FillContractorAddendumDocIdRoute
   FillContractorDataExternalDocIdRoute: typeof FillContractorDataExternalDocIdRoute
+  FillContractorDataUsExternalDocIdRoute: typeof FillContractorDataUsExternalDocIdRoute
+  FillContractorDataUsDocIdRoute: typeof FillContractorDataUsDocIdRoute
   FillContractorDataDocIdRoute: typeof FillContractorDataDocIdRoute
   FillDamageExternalDocIdRoute: typeof FillDamageExternalDocIdRoute
   FillDamageDocIdRoute: typeof FillDamageDocIdRoute
@@ -1044,6 +1147,7 @@ export interface RootRouteChildren {
   FillI9DocIdRoute: typeof FillI9DocIdRoute
   FillLocationConsentExternalDocIdRoute: typeof FillLocationConsentExternalDocIdRoute
   FillLocationConsentDocIdRoute: typeof FillLocationConsentDocIdRoute
+  FillMasterW2AgreementDocIdRoute: typeof FillMasterW2AgreementDocIdRoute
   FillMealRestBreakExternalDocIdRoute: typeof FillMealRestBreakExternalDocIdRoute
   FillMealRestBreakDocIdRoute: typeof FillMealRestBreakDocIdRoute
   FillMileageFuelExternalDocIdRoute: typeof FillMileageFuelExternalDocIdRoute
@@ -1056,6 +1160,8 @@ export interface RootRouteChildren {
   FillSubstanceScreeningDocIdRoute: typeof FillSubstanceScreeningDocIdRoute
   FillVehicleAgreementExternalDocIdRoute: typeof FillVehicleAgreementExternalDocIdRoute
   FillVehicleAgreementDocIdRoute: typeof FillVehicleAgreementDocIdRoute
+  FillVehicleUseAgreementExternalDocIdRoute: typeof FillVehicleUseAgreementExternalDocIdRoute
+  FillVehicleUseAgreementDocIdRoute: typeof FillVehicleUseAgreementDocIdRoute
   FillW4ExternalDocIdRoute: typeof FillW4ExternalDocIdRoute
   FillW4DocIdRoute: typeof FillW4DocIdRoute
   FillW4rExternalDocIdRoute: typeof FillW4rExternalDocIdRoute
@@ -1073,6 +1179,9 @@ export interface RootRouteChildren {
   SignContractorAddendumDocIdRoute: typeof SignContractorAddendumDocIdRoute
   SignDocumentDocIdRoute: typeof SignDocumentDocIdRoute
   SignExternalDocIdRoute: typeof SignExternalDocIdRoute
+  SignManagerReviewDocIdRoute: typeof SignManagerReviewDocIdRoute
+  SignNdaExternalDocIdRoute: typeof SignNdaExternalDocIdRoute
+  SignNdaFormDocIdRoute: typeof SignNdaFormDocIdRoute
   SignPromotionExternalDocIdRoute: typeof SignPromotionExternalDocIdRoute
   SignPromotionFormDocIdRoute: typeof SignPromotionFormDocIdRoute
   SignTerminationExternalDocIdRoute: typeof SignTerminationExternalDocIdRoute
@@ -1251,6 +1360,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SignPromotionExternalDocIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/sign-nda-form/$docId': {
+      id: '/sign-nda-form/$docId'
+      path: '/sign-nda-form/$docId'
+      fullPath: '/sign-nda-form/$docId'
+      preLoaderRoute: typeof SignNdaFormDocIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sign-nda-external/$docId': {
+      id: '/sign-nda-external/$docId'
+      path: '/sign-nda-external/$docId'
+      fullPath: '/sign-nda-external/$docId'
+      preLoaderRoute: typeof SignNdaExternalDocIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sign-manager-review/$docId': {
+      id: '/sign-manager-review/$docId'
+      path: '/sign-manager-review/$docId'
+      fullPath: '/sign-manager-review/$docId'
+      preLoaderRoute: typeof SignManagerReviewDocIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/sign-external/$docId': {
       id: '/sign-external/$docId'
       path: '/sign-external/$docId'
@@ -1370,6 +1500,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof FillW4ExternalDocIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/fill-vehicle-use-agreement/$docId': {
+      id: '/fill-vehicle-use-agreement/$docId'
+      path: '/fill-vehicle-use-agreement/$docId'
+      fullPath: '/fill-vehicle-use-agreement/$docId'
+      preLoaderRoute: typeof FillVehicleUseAgreementDocIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/fill-vehicle-use-agreement-external/$docId': {
+      id: '/fill-vehicle-use-agreement-external/$docId'
+      path: '/fill-vehicle-use-agreement-external/$docId'
+      fullPath: '/fill-vehicle-use-agreement-external/$docId'
+      preLoaderRoute: typeof FillVehicleUseAgreementExternalDocIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/fill-vehicle-agreement/$docId': {
       id: '/fill-vehicle-agreement/$docId'
       path: '/fill-vehicle-agreement/$docId'
@@ -1452,6 +1596,13 @@ declare module '@tanstack/react-router' {
       path: '/fill-meal-rest-break-external/$docId'
       fullPath: '/fill-meal-rest-break-external/$docId'
       preLoaderRoute: typeof FillMealRestBreakExternalDocIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/fill-master-w2-agreement/$docId': {
+      id: '/fill-master-w2-agreement/$docId'
+      path: '/fill-master-w2-agreement/$docId'
+      fullPath: '/fill-master-w2-agreement/$docId'
+      preLoaderRoute: typeof FillMasterW2AgreementDocIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/fill-location-consent/$docId': {
@@ -1550,6 +1701,20 @@ declare module '@tanstack/react-router' {
       path: '/fill-contractor-data/$docId'
       fullPath: '/fill-contractor-data/$docId'
       preLoaderRoute: typeof FillContractorDataDocIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/fill-contractor-data-us/$docId': {
+      id: '/fill-contractor-data-us/$docId'
+      path: '/fill-contractor-data-us/$docId'
+      fullPath: '/fill-contractor-data-us/$docId'
+      preLoaderRoute: typeof FillContractorDataUsDocIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/fill-contractor-data-us-external/$docId': {
+      id: '/fill-contractor-data-us-external/$docId'
+      path: '/fill-contractor-data-us-external/$docId'
+      fullPath: '/fill-contractor-data-us-external/$docId'
+      preLoaderRoute: typeof FillContractorDataUsExternalDocIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/fill-contractor-data-external/$docId': {
@@ -1702,6 +1867,9 @@ const rootRouteChildren: RootRouteChildren = {
     FillContractorAddendumExternalDocIdRoute,
   FillContractorAddendumDocIdRoute: FillContractorAddendumDocIdRoute,
   FillContractorDataExternalDocIdRoute: FillContractorDataExternalDocIdRoute,
+  FillContractorDataUsExternalDocIdRoute:
+    FillContractorDataUsExternalDocIdRoute,
+  FillContractorDataUsDocIdRoute: FillContractorDataUsDocIdRoute,
   FillContractorDataDocIdRoute: FillContractorDataDocIdRoute,
   FillDamageExternalDocIdRoute: FillDamageExternalDocIdRoute,
   FillDamageDocIdRoute: FillDamageDocIdRoute,
@@ -1718,6 +1886,7 @@ const rootRouteChildren: RootRouteChildren = {
   FillI9DocIdRoute: FillI9DocIdRoute,
   FillLocationConsentExternalDocIdRoute: FillLocationConsentExternalDocIdRoute,
   FillLocationConsentDocIdRoute: FillLocationConsentDocIdRoute,
+  FillMasterW2AgreementDocIdRoute: FillMasterW2AgreementDocIdRoute,
   FillMealRestBreakExternalDocIdRoute: FillMealRestBreakExternalDocIdRoute,
   FillMealRestBreakDocIdRoute: FillMealRestBreakDocIdRoute,
   FillMileageFuelExternalDocIdRoute: FillMileageFuelExternalDocIdRoute,
@@ -1733,6 +1902,9 @@ const rootRouteChildren: RootRouteChildren = {
   FillVehicleAgreementExternalDocIdRoute:
     FillVehicleAgreementExternalDocIdRoute,
   FillVehicleAgreementDocIdRoute: FillVehicleAgreementDocIdRoute,
+  FillVehicleUseAgreementExternalDocIdRoute:
+    FillVehicleUseAgreementExternalDocIdRoute,
+  FillVehicleUseAgreementDocIdRoute: FillVehicleUseAgreementDocIdRoute,
   FillW4ExternalDocIdRoute: FillW4ExternalDocIdRoute,
   FillW4DocIdRoute: FillW4DocIdRoute,
   FillW4rExternalDocIdRoute: FillW4rExternalDocIdRoute,
@@ -1751,6 +1923,9 @@ const rootRouteChildren: RootRouteChildren = {
   SignContractorAddendumDocIdRoute: SignContractorAddendumDocIdRoute,
   SignDocumentDocIdRoute: SignDocumentDocIdRoute,
   SignExternalDocIdRoute: SignExternalDocIdRoute,
+  SignManagerReviewDocIdRoute: SignManagerReviewDocIdRoute,
+  SignNdaExternalDocIdRoute: SignNdaExternalDocIdRoute,
+  SignNdaFormDocIdRoute: SignNdaFormDocIdRoute,
   SignPromotionExternalDocIdRoute: SignPromotionExternalDocIdRoute,
   SignPromotionFormDocIdRoute: SignPromotionFormDocIdRoute,
   SignTerminationExternalDocIdRoute: SignTerminationExternalDocIdRoute,

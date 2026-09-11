@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+﻿import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useAuth } from "@/lib/auth";
 import { setDesktopOverride } from "@/lib/device";
@@ -25,6 +25,9 @@ import {
 // actual desktop browser.
 import {
   getCompanyTickets,
+  getTicketsForTechnicianCandidates,
+  getTicketsForBranches,
+  getTicketByNumber,
   getTicketVisits,
   updateTicketVisit,
   updateTicketStatus,
@@ -58,7 +61,7 @@ import {
 import { getTicketBilling, saveTicketBilling, type TicketBilling } from "@/lib/supabase/billing";
 import { getMyPayslips, payslipStatusLabel, type MyPayslipRow } from "@/lib/supabase/payslips";
 import { getMyProfileSchedule, getMonthEntries, getCompanyTimecardEntries, saveEntry as saveTimecardEntry, savePunch, clearPunch, canEditPunch, resolveScheduledShiftHours, type UITimeEntry, type CompanyTimecardEntry, type PunchField } from "@/lib/supabase/timecards";
-import { getTraineeEntryForDate, saveTraineePunch, clearTraineePunch, type TraineeTimecardStatus } from "@/lib/supabase/traineeTimecards";
+import { getTraineeEntryForDate, saveTraineePunch, clearTraineePunch, getPendingTraineeReviewCount, type TraineeTimecardStatus } from "@/lib/supabase/traineeTimecards";
 import { resolveTeamLeadOrManager } from "@/lib/notifyRouting";
 import { visibleAttendanceProfileIds } from "@/lib/notifyRouting";
 import { getCsrTeamComposition, type CsrTeamComposition } from "@/lib/supabase/csrTeams";
@@ -91,7 +94,9 @@ import { NotificationCenterPanel } from "@/components/NotificationCenterPage";
 import { AnnouncementsMenu } from "@/components/AnnouncementsMenu";
 import { createOrUpdateTicketReschedule, getTicketReschedulesForTicketNos, type TicketRescheduleRow } from "@/lib/supabase/ticketReschedules";
 import { AnnouncementBanner } from "@/components/AnnouncementBanner";
+import { FrozenAccountModal } from "@/components/FrozenAccountModal";
 import { TraineeAttendanceMobileModal } from "@/components/mobile/TraineeAttendanceMobileModal";
+import { MobileTicketAttendanceView } from "@/components/mobile/MobileTicketAttendanceView";
 import { AnnouncementsPage } from "@/components/AnnouncementsPage";
 import {
   parseServicePerformed,
@@ -111,6 +116,7 @@ type View =
   | "payroll"
   | "timecard"
   | "clockinteam"
+  | "ticketattendance"
   | "parts"
   | "onhold"
   | "itsupport"
@@ -158,6 +164,33 @@ const MOBILE_REPAIR_STATUSES = [
 
 // Roles that see their OWN tickets directly (skip the technician roster).
 const SELF_ROLES = new Set(["TECHNICIAN"]);
+
+// Same name/alias variants myTickets' own tolerant client-side filter
+// checks a ticket's `technician` field against (full name, last-name-only,
+// email-local-part) — extracted so the same candidate list can also drive
+// the server-side scoped ticket fetch (getTicketsForTechnicianCandidates)
+// instead of pulling the whole company's ticket history just to filter it
+// down in JS afterward.
+//
+// Split into `exact` (matched only as a whole value, case-insensitive) vs
+// `fuzzy` (matched as a substring in either direction) — mirrors myTickets'
+// own split exactly, and for the same reason its comment gives: a bare
+// last name has to stay an EXACT-only candidate, or "Smith" would pull in
+// every Smith in the company (confirmed empirically — an early version of
+// this fetch that ilike'd the last name too pulled ~3x more tickets than
+// necessary for a common surname). Multi-word/email candidates are safe to
+// substring-match since they're specific enough not to collide.
+function technicianNameCandidates(name: string): { exact: string[]; fuzzy: string[] } {
+  const normalise = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+  const scope = normalise(name);
+  if (!scope) return { exact: [], fuzzy: [] };
+  const exact = new Set<string>([scope]);
+  const fuzzy = new Set<string>([scope]);
+  const parts = scope.split(" ");
+  if (parts.length >= 2) exact.add(parts[parts.length - 1]); // last-name-only: exact match only
+  if (scope.includes("@")) fuzzy.add(scope.split("@")[0]);
+  return { exact: Array.from(exact), fuzzy: Array.from(fuzzy) };
+}
 
 // How far back On Hold Tickets' "Updated" sub-tab looks for a released hold.
 const RECENTLY_RELEASED_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
@@ -323,7 +356,7 @@ function buildDevTestFlashTechTrip(profileId: string): FlashTechTrip {
 }
 
 export function MobileTechApp() {
-  const { email, displayName, role, extraRoles, companyId, allowedLocations, logout, uid } = useAuth();
+  const { email, displayName, role, extraRoles, companyId, allowedLocations, logout, uid, isFrozen } = useAuth();
   const navigate = useNavigate();
 
   const [tickets, setTickets] = useState<Ticket[]>([]);
@@ -431,6 +464,7 @@ export function MobileTechApp() {
       "payroll",
       "timecard",
       "clockinteam",
+      "ticketattendance",
       "parts",
       "onhold",
       "itsupport",
@@ -569,7 +603,35 @@ export function MobileTechApp() {
     (async () => {
       try {
         setLoading(true);
-        const rows = await getCompanyTickets();
+        // Scoped by who's actually looking, not the company's entire ticket
+        // history — getCompanyTickets() (every ticket ever, full customer
+        // join) was showing up as one of the biggest queries in Supabase's
+        // own Query Performance report, and almost every mobile session is
+        // exactly the case that doesn't need it: a plain technician only
+        // ever needs their OWN tickets, and a branch manager/lead only needs
+        // their own branch's. A self-role tech who also leads direct
+        // reports gets those reports' tickets folded in separately (see the
+        // roster-scoped effect below, once `roster` itself is known) — this
+        // first pass only has `ownName` to go on. Only a SuperAdmin/Admin-
+        // tier mobile viewer (allowedLocations === null, "sees every
+        // branch") still gets the unbounded fetch, since there's no
+        // narrower scope to give them.
+        //
+        // isSelfRole alone isn't enough to trigger the own-name-only fetch:
+        // it fires off holding TECHNICIAN *anywhere* (role or extra_roles),
+        // and plenty of real managers (a Technical Assistant Director, say)
+        // carry TECHNICIAN in extra_roles without being limited to their own
+        // tickets — allowedLocations is null/branch-scoped for them, same as
+        // any other manager. Name-only scoping should only apply to someone
+        // who's actually just an individual technician, i.e. not also a
+        // manager-tier role — same split the roster-scoped effect below
+        // already uses to decide whether to fold in direct reports.
+        const isIndividualTechnician = isSelfRole && !isAttendanceManagerTierRole(role, extraRoles);
+        const rows = isIndividualTechnician
+          ? await getTicketsForTechnicianCandidates(technicianNameCandidates(ownName))
+          : allowedLocations !== null
+          ? await getTicketsForBranches(allowedLocations)
+          : await getCompanyTickets();
         // Overlay the latest visit-recorded technician onto tickets whose
         // `technician` is blank. Same rule the Work Map and Daily Schedule
         // already use — without this, a tech only sees the tickets where
@@ -762,6 +824,41 @@ export function MobileTechApp() {
       .sort(sortByName);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [users, profileId, csrComposition, isSelfRole, role, extraRoles, ownName]);
+
+  // A self-role lead's direct reports' tickets aren't covered by the main
+  // ticket-load effect above — that one only knows `ownName` at the time it
+  // runs, before `roster` (which needs the separately-fetched `users` list)
+  // is known. Once roster resolves to a non-empty direct-report list (only
+  // ever true for a self-role tech who is NOT manager-tier — see the
+  // `roster` memo's own branches), fetch those reports' tickets too and
+  // fold them into the same `tickets` array myTickets/onHoldTickets/etc.
+  // already read from, so drilling into a report (viewingReport below)
+  // keeps working exactly like it did when the whole company was loaded
+  // upfront. Runs once per roster change, not per report drilled into.
+  const reportRosterLoadedRef = useRef(false);
+  useEffect(() => {
+    if (!isSelfRole || isAttendanceManagerTierRole(role, extraRoles)) return;
+    if (roster.length === 0 || reportRosterLoadedRef.current) return;
+    reportRosterLoadedRef.current = true;
+    let cancelled = false;
+    const perReport = roster.map((r) => technicianNameCandidates(r.name));
+    const candidates = {
+      exact: perReport.flatMap((c) => c.exact),
+      fuzzy: perReport.flatMap((c) => c.fuzzy),
+    };
+    getTicketsForTechnicianCandidates(candidates)
+      .then((rows) => {
+        if (cancelled || rows.length === 0) return;
+        setTickets((prev) => {
+          // _id (the real Supabase row id) is runtime-only, not part of Ticket's declared type.
+          const byId = new Map(prev.map((t) => [(t as any)._id, t] as const));
+          for (const t of rows) { const id = (t as any)._id; if (!byId.has(id)) byId.set(id, t); }
+          return Array.from(byId.values());
+        });
+      })
+      .catch((err) => console.warn("Mobile: failed to load direct reports' tickets", err));
+    return () => { cancelled = true; };
+  }, [roster, isSelfRole, role, extraRoles]);
 
   // A self-role Technician who's also a working lead can drill into one of
   // their direct reports (see the `roster` memo below) to track that
@@ -986,6 +1083,27 @@ export function MobileTechApp() {
     [tickets, activeTicketNo]
   );
 
+  // Fallback for a persisted/deep-linked activeTicketNo that isn't in the
+  // now-scoped `tickets` array — e.g. a manager's stale nav-state pointing
+  // at a ticket outside their branch, or (briefly, before the roster-scoped
+  // effect above resolves) a self-role lead's persisted selection of a
+  // direct report's ticket. Only one specific ticket, not a reason to widen
+  // the whole app's fetch back out.
+  const activeTicketFetchAttemptedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeTicketNo || activeTicket || loading) return;
+    if (activeTicketFetchAttemptedRef.current === activeTicketNo) return;
+    activeTicketFetchAttemptedRef.current = activeTicketNo;
+    let cancelled = false;
+    getTicketByNumber(activeTicketNo)
+      .then((t) => {
+        if (cancelled || !t) return;
+        setTickets((prev) => (prev.some((p) => (p as any)._id === (t as any)._id) ? prev : [...prev, t]));
+      })
+      .catch((err) => console.warn("Mobile: failed to load deep-linked ticket", err));
+    return () => { cancelled = true; };
+  }, [activeTicketNo, activeTicket, loading]);
+
   // On Hold Tickets bottom-nav tab (replaces the old Tech Sheets stub) —
   // joins mileageEntries' payroll-hold flag back to the real Ticket by
   // ticket #, so the card can show full details and still open into the
@@ -1077,30 +1195,40 @@ export function MobileTechApp() {
     // no in-header back needed.
   };
 
+  // Frozen accounts (see migration 0223) can still log in but are
+  // restricted to Chat only — same "Messages only" restriction as desktop's
+  // isFrozen gate, so a frozen technician can still complete pending forms
+  // via DM. This is a pure render-time override: `view` itself is left
+  // alone (so whatever they were on is still there if later unfrozen), only
+  // what actually renders is forced to "chat". Ticket writes and timecard
+  // punches are also blocked server-side regardless of what renders here.
+  const effectiveView: View = isFrozen ? "chat" : view;
+
   // Show the in-header back arrow only for detail (ticket report sub-view).
   // Route map is a bottom-nav primary destination so no back needed there.
-  const showTopBack = view === "detail";
+  const showTopBack = effectiveView === "detail";
 
   // The five primary tabs shown in the bottom nav.
   const activeBottomTab: BottomTab =
-    view === "chat"
+    effectiveView === "chat"
       ? "chat"
-      : view === "onhold"
+      : effectiveView === "onhold"
       ? "onhold"
-      : view === "payroll"
+      : effectiveView === "payroll"
       ? "payroll"
-      : view === "map"
+      : effectiveView === "map"
       ? "route"
-      : view === "home" ||
-        view === "timecard" ||
-        view === "clockinteam" ||
-        view === "itsupport" ||
-        view === "payrolldispute" ||
-        view === "timeoff" ||
-        view === "tickettimedispute" ||
-        view === "correction" ||
-        view === "notifications" ||
-        view === "announcements"
+      : effectiveView === "home" ||
+        effectiveView === "timecard" ||
+        effectiveView === "clockinteam" ||
+        effectiveView === "ticketattendance" ||
+        effectiveView === "itsupport" ||
+        effectiveView === "payrolldispute" ||
+        effectiveView === "timeoff" ||
+        effectiveView === "tickettimedispute" ||
+        effectiveView === "correction" ||
+        effectiveView === "notifications" ||
+        effectiveView === "announcements"
       ? "home" // Home's own quick-action tiles reach all of these sub-pages
       : "tickets"; // tickets, roster, detail, parts all highlight Tickets
 
@@ -1166,29 +1294,46 @@ export function MobileTechApp() {
         top="calc(var(--mt-header-h, 52px) + 0.75rem)"
       />
 
-      {/* Mobile-native Trainee Attendance review — appears ONLY right after
-          this viewer's own Check Out (see MobileHomeView's onSelfCheckedOut,
-          which bumps traineeReviewTrigger), so a manager with a trainee
-          reviews the whole day (Time In AND Time Out, usually both already
-          in by their own end-of-shift) in one pass instead of being
-          interrupted mid-day. Exclusive to the trainee's own resolved
-          direct manager (isDirectTraineeManager) — a fallback reviewer
-          (Admin/HR/SuperAdmin/Finance/Senior Branch Manager) can still act
-          from the Trainee Attendance tab, but is never forced into this
-          unclosable popup for someone else's trainee; a manager with no
-          trainees under them never sees it at all. Can only be dismissed
-          by Approving/Rejecting each pending day (no X/close), but never
-          blocks or fails the manager's own checkout, which has already
-          completed by the time this fires. */}
+      {/* Mobile-native Trainee Attendance review — appears the moment this
+          viewer ATTEMPTS their own Check Out (see MobileHomeView's
+          persistPunch, which now checks getPendingTraineeReviewCount and
+          bumps traineeReviewTrigger BEFORE saving), so a manager with a
+          trainee reviews the whole day (Time In AND Time Out, usually both
+          already in by their own end-of-shift) in one pass. Per the user's
+          explicit call, the Check Out itself is held — not recorded — until
+          every pending trainee day is resolved; tapping Time Out again
+          afterward succeeds normally. Exclusive to the trainee's own
+          resolved direct manager (isDirectTraineeManager) — a fallback
+          reviewer (Admin/HR/SuperAdmin/Finance/Senior Branch Manager) can
+          still act from the Trainee Attendance tab without ever being
+          gated by this; a manager with no trainees under them never sees
+          it and their checkout is never held. Can only be dismissed by
+          Approving/Rejecting each pending day (no X/close). */}
       <TraineeAttendanceMobileModal
         myProfileId={profileId}
-        users={users}
         trigger={traineeReviewTrigger}
       />
 
+      {isFrozen && <FrozenAccountModal />}
+
       {/* ── Scrollable content area ────────────────────────────────── */}
       <div className="mtech-content">
-        {view === "roster" && (
+        {isFrozen && (
+          <div
+            style={{
+              margin: "0.75rem",
+              padding: "0.75rem 1rem",
+              borderRadius: "0.75rem",
+              border: "1px solid rgba(56,189,248,0.4)",
+              background: "rgba(56,189,248,0.1)",
+              color: "#7dd3fc",
+              fontSize: "0.8rem",
+            }}
+          >
+            Your account has been frozen — you can still use Chat to complete any pending forms, but nothing else is available right now. Contact HR if you have questions.
+          </div>
+        )}
+        {effectiveView === "roster" && (
           <RosterView
             roster={roster}
             // A self-role lead gets a "back to my own day" row at the top;
@@ -1202,7 +1347,7 @@ export function MobileTechApp() {
           />
         )}
 
-        {view === "tickets" && (
+        {effectiveView === "tickets" && (
           <TicketsView
             loading={loading}
             tickets={visibleTickets}
@@ -1232,7 +1377,7 @@ export function MobileTechApp() {
           />
         )}
 
-        {view === "map" && (
+        {effectiveView === "map" && (
           <RouteMapView
             // Date filtering (which day's stops to show) lives inside
             // RouteMapView itself now, alongside its prev/next date
@@ -1253,7 +1398,7 @@ export function MobileTechApp() {
           />
         )}
 
-        {view === "detail" && activeTicket && (
+        {effectiveView === "detail" && activeTicket && (
           <DetailView
             ticket={activeTicket}
             tab={detailTab}
@@ -1265,14 +1410,14 @@ export function MobileTechApp() {
           />
         )}
 
-        {view === "chat" && (
+        {effectiveView === "chat" && (
           <ChatView
             firebaseUid={uid || ""}
             authorName={displayName || email || "User"}
           />
         )}
 
-        {view === "onhold" && (
+        {effectiveView === "onhold" && (
           <MobileOnHoldTicketsView
             onHoldTickets={onHoldTickets}
             updatedTickets={updatedTickets}
@@ -1289,11 +1434,11 @@ export function MobileTechApp() {
           />
         )}
 
-        {view === "payroll" && (
+        {effectiveView === "payroll" && (
           <MobilePayrollView userName={headerName} profileId={profileId} uid={uid} role={role} />
         )}
 
-        {view === "timecard" && (
+        {effectiveView === "timecard" && (
           <MobileTimecardView
             uid={uid}
             profileId={profileId}
@@ -1302,15 +1447,19 @@ export function MobileTechApp() {
           />
         )}
 
-        {view === "clockinteam" && (
+        {effectiveView === "clockinteam" && (
           <MobileClockInTeamView profileId={profileId} />
         )}
 
-        {view === "itsupport" && (
+        {effectiveView === "ticketattendance" && (
+          <MobileTicketAttendanceView profileId={profileId} />
+        )}
+
+        {effectiveView === "itsupport" && (
           <MobileItSupportView userName={headerName} />
         )}
 
-        {view === "payrolldispute" && (
+        {effectiveView === "payrolldispute" && (
           <MobilePayrollDisputeView
             userName={headerName}
             profileId={profileId}
@@ -1320,11 +1469,11 @@ export function MobileTechApp() {
           />
         )}
 
-        {view === "timeoff" && (
+        {effectiveView === "timeoff" && (
           <MobileTimeOffView userName={headerName} profileId={profileId} />
         )}
 
-        {view === "tickettimedispute" && (
+        {effectiveView === "tickettimedispute" && (
           <MobileTicketTimeDisputeView
             userName={headerName}
             profileId={profileId}
@@ -1335,11 +1484,11 @@ export function MobileTechApp() {
           />
         )}
 
-        {view === "correction" && (
+        {effectiveView === "correction" && (
           <MobileTimeCorrectionView userName={headerName} profileId={profileId} prefillDate={correctionPrefillDate} />
         )}
 
-        {view === "notifications" && (
+        {effectiveView === "notifications" && (
           <div className="mtech-scroll">
             <div className="mtech-payroll-heading">
               <div className="mtech-payroll-name">Notifications</div>
@@ -1349,14 +1498,14 @@ export function MobileTechApp() {
           </div>
         )}
 
-        {view === "announcements" && (
+        {effectiveView === "announcements" && (
           <div className="mtech-scroll">
             <AnnouncementsPage />
           </div>
         )}
 
         {/* parts sub-view still reachable but not in bottom nav — redirect to tickets */}
-        {view === "home" && (
+        {effectiveView === "home" && (
           <MobileHomeView
             userName={headerName}
             role={role}
@@ -1374,6 +1523,7 @@ export function MobileTechApp() {
             onOpenTicketTimeDispute={() => setView("tickettimedispute")}
             onOpenCorrection={() => { setCorrectionPrefillDate(null); setView("correction"); }}
             onOpenTimecard={() => setView("timecard")}
+            onOpenTicketAttendance={() => setView("ticketattendance")}
             arrivedAt={arrivedAt}
             setArrivedAt={setArrivedAt}
             doneAt={doneAt}
@@ -1387,7 +1537,7 @@ export function MobileTechApp() {
           />
         )}
 
-        {view === "parts" && (
+        {effectiveView === "parts" && (
           <MobileStubView
             title="Part Pickup"
             message="Part pickup workflows are being redesigned for mobile. Use the desktop site to record part pickups."
@@ -1400,7 +1550,9 @@ export function MobileTechApp() {
         active={activeBottomTab}
         unreadDmCount={unreadDmCount}
         missingTimestampCount={missingTimestampTicketNos.size}
+        tabs={isFrozen ? BOTTOM_TABS.filter((t) => t.id === "chat") : BOTTOM_TABS}
         onSelect={(tab) => {
+          if (isFrozen) return; // account frozen — Chat is the only reachable tab
           if (tab === "tickets") setView(isSelfRole ? "tickets" : "roster");
           else if (tab === "route") setView("map");
           else setView(tab);
@@ -1718,16 +1870,19 @@ function BottomNav({
   unreadDmCount,
   missingTimestampCount,
   onSelect,
+  tabs = BOTTOM_TABS,
 }: {
   active: BottomTab;
   unreadDmCount: number;
   /** Tickets flagged CL-Ready to Complete with no Work Start/Work Done recorded (this technician's own, last 14 days — same scope as the Done tab's badge). */
   missingTimestampCount: number;
   onSelect: (tab: BottomTab) => void;
+  /** Frozen accounts get a Chat-only bar — see isFrozen handling in MobileTechApp. */
+  tabs?: typeof BOTTOM_TABS;
 }) {
   return (
     <nav className="mtech-bottom-nav" aria-label="Main navigation">
-      {BOTTOM_TABS.map((tab) => {
+      {tabs.map((tab) => {
         const badgeCount = tab.id === "chat" ? unreadDmCount : tab.id === "tickets" ? missingTimestampCount : 0;
         return (
         <button
@@ -5615,6 +5770,7 @@ function MobileHomeView({
   onOpenTicketTimeDispute,
   onOpenCorrection,
   onOpenTimecard,
+  onOpenTicketAttendance,
   arrivedAt,
   setArrivedAt,
   doneAt,
@@ -5642,6 +5798,7 @@ function MobileHomeView({
   onOpenTicketTimeDispute: () => void;
   onOpenCorrection: () => void;
   onOpenTimecard: () => void;
+  onOpenTicketAttendance: () => void;
   arrivedAt: Record<string, string>;
   setArrivedAt: Dispatch<SetStateAction<Record<string, string>>>;
   doneAt: Record<string, string>;
@@ -5654,7 +5811,7 @@ function MobileHomeView({
    * card (a write surface for whoever is physically on site) is hidden. */
   viewingReportName?: string | null;
   onExitReport?: () => void;
-  /** Fired once this viewer's OWN Check Out just saved (or queued) successfully — see persistPunch. Used to surface the Trainee Attendance review right at end-of-shift instead of interrupting mid-day (see TraineeAttendanceMobileModal). */
+  /** Fired both when this viewer ATTEMPTS their own Check Out (to surface any pending trainee review that's now holding it) and again once it actually saves (or queued) successfully — see persistPunch. Used to trigger TraineeAttendanceMobileModal's check. */
   onSelfCheckedOut?: () => void;
 }) {
   const hourNow = new Date().getHours();
@@ -5775,6 +5932,25 @@ function MobileHomeView({
       alert("Could not resolve your profile. Please re-login.");
       return;
     }
+    // Reviewing a trainee now takes priority over this viewer's own sign-
+    // out completing — if they still have a trainee day pending, Check Out
+    // itself is held (not saved) until every one of those is Approved or
+    // Rejected. The review screen pops up right here to make that
+    // actionable, instead of just leaving them stuck with no explanation.
+    if (field === "checkOut") {
+      try {
+        const pendingCount = await getPendingTraineeReviewCount(scheduleProfileId);
+        if (pendingCount > 0) {
+          onSelfCheckedOut?.();
+          alert(`You have ${pendingCount} trainee day${pendingCount === 1 ? "" : "s"} awaiting your review — resolve ${pendingCount === 1 ? "it" : "them"} before you can time out.`);
+          return;
+        }
+      } catch (err) {
+        // Fail OPEN — a network hiccup checking for pending trainees must
+        // never itself block a legitimate checkout.
+        console.error("Failed to check pending trainee review before checkout:", err);
+      }
+    }
     setSaving(true);
     // Only true once the punch has genuinely landed somewhere (saved, or
     // queued for later sync) — a total failure (both the save AND the
@@ -5826,12 +6002,10 @@ function MobileHomeView({
       setSaving(false);
     }
     // Tied specifically to THIS viewer's own Check Out (not Time In/Meal),
-    // and only once it actually went through — see the user's ask: reviewing
-    // a trainee's pending day should happen once at the manager's own
-    // end-of-shift (when both the trainee's Time In AND Time Out are
-    // usually already in), not interrupt them mid-day, and it must never
-    // block or fail their own checkout if they don't act on it. A manager
-    // with no trainees just gets a no-op fetch that finds nothing pending —
+    // and only once it actually went through. By this point the pending-
+    // review gate above has already let this checkout proceed — reaching
+    // here means there was nothing pending, or it's a no-op re-check. A
+    // manager with no trainees just gets a no-op fetch that finds nothing —
     // see TraineeAttendanceMobileModal's own trigger effect.
     if (persisted && field === "checkOut") onSelfCheckedOut?.();
   };
@@ -5975,6 +6149,11 @@ function MobileHomeView({
       key: "timecard", label: "Monitor My Attendance",
       description: "See your monthly check-in/out calendar",
       onClick: onOpenTimecard, show: true,
+    },
+    {
+      key: "ticketattendance", label: "Ticket Attendance",
+      description: "Who checked into their scheduled tickets today",
+      onClick: onOpenTicketAttendance, show: true,
     },
   ].filter((t) => t.show);
 

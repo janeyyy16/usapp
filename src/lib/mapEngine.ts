@@ -863,7 +863,7 @@ export interface DailyRouteMilesResult {
   /** One entry per input `stops`, same order/length — ONLY the distance
    *  from the PREVIOUS stop (or the branch, for index 0) to that stop, never
    *  anything else folded in. `null` when that stop failed to geocode
-   *  (silently skipped, same as always). Migration 0221: this used to have
+   *  (silently skipped, same as always). Migration 0237: this used to have
    *  the day's final "way home" leg folded into the last resolved stop's
    *  own value — moved out to `homeLegMiles` below so a ticket's own number
    *  never silently includes an unrelated commute-home distance (confirmed
@@ -976,7 +976,7 @@ async function computeDailyRouteMilesGoogle(
 
   // Final leg home — or back to the starting point if no home address is on
   // file. Kept separate from every stop's own legMiles entry (migration
-  // 0221) — still added into `total` (the day's real drive), just not
+  // 0237) — still added into `total` (the day's real drive), just not
   // merged into whichever stop happened to be last.
   const homeLeg = homeCandidates.length > 0 ? await distanceMatrixLeg(service, maps, currentOrigin, homeCandidates) : null;
   let homeMiles: number | null = null;
@@ -1054,7 +1054,7 @@ async function computeDailyRouteMilesLeaflet(
   // Each resolved stop's own leg only — legMilesRaw[0..resolvedStopIndexes.length)
   // are branch->stop1, stop1->stop2, ..., stopN-1->stopN; the final element
   // (stopN->home) is kept out and returned separately as homeLegMiles
-  // (migration 0221), never folded into any one stop's own figure.
+  // (migration 0237), never folded into any one stop's own figure.
   const legMiles: (number | null)[] = new Array(stopCandidates.length).fill(null);
   resolvedStopIndexes.forEach((origIdx, i) => { legMiles[origIdx] = legMilesRaw[i]; });
   const homeLegMiles = resolvedStopIndexes.length > 0 ? legMilesRaw[legMilesRaw.length - 1] ?? null : null;
