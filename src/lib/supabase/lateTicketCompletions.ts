@@ -8,7 +8,7 @@
  * Flow: LateTicketCompletionModal.tsx (blocking popup for Claims-role users)
  * calls getPendingLateTicketCompletions()/resolveLateTicketCompletion();
  * confirming also fires the Accounting alert via notifyRequestReviewers()
- * (employeeRequests.ts). techPayroll.ts's getCarryoverRepairCounts() reads
+ * (employeeRequests.ts). techPayroll.ts's getCarryoverTickets() reads
  * confirmed-but-not-yet-paid rows directly (joined against tickets/visits
  * for pricing) so AccountingDashboard.tsx can fold them into whichever
  * payroll run generates next for that technician; its Generate Payroll
