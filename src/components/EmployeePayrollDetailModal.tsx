@@ -1036,6 +1036,7 @@ export function EmployeePayrollDetailModal({
         state: value,
       });
       await load({ current: false });
+      onRateChanged?.();
     } catch (err) {
       alert(`Failed to save state: ${err instanceof Error ? err.message : "Unknown error"}`);
       setStateEdits((prev) => {
