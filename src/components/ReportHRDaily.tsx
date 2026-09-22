@@ -2,10 +2,21 @@ import { useState, useMemo, useEffect, useRef, Fragment } from "react";
 import { createPortal } from "react-dom";
 import { Link, useSearch, useNavigate } from "@tanstack/react-router";
 import { useSmartBack } from "@/hooks/useSmartBack";
-import { ChevronLeft, ChevronDown, ChevronUp, ChevronRight, Plus, Trash2, AlertTriangle, CheckCircle, XCircle, Paperclip, Users, Clock, UserCheck, UserX, UserMinus, Search, Bell, Download, Forward, History, FileText, ClipboardList, Landmark, GripVertical, FileCheck, Link2, Copy, Calendar, Check, Pencil, Filter, Columns3, Mail, PenLine, X, ExternalLink, Loader2, Send, GraduationCap, LogOut, PhoneCall } from "lucide-react";
+import { ChevronLeft, ChevronDown, ChevronUp, ChevronRight, Plus, Trash2, AlertTriangle, CheckCircle, XCircle, Paperclip, Users, Clock, UserCheck, UserX, UserMinus, UserPlus, Search, Bell, Download, Forward, History, FileText, ClipboardList, Landmark, GripVertical, FileCheck, Link2, Copy, Calendar, Check, Pencil, Filter, Columns3, Mail, PenLine, X, ExternalLink, Loader2, Send, ShieldCheck, GraduationCap, LogOut, PhoneCall, Briefcase, Star } from "lucide-react";
 import { useSignaturePad } from "@/hooks/useSignaturePad";
 import { SignaturePadControls } from "@/components/SignaturePad";
 import { StickyHorizontalScrollbar } from "@/components/StickyHorizontalScrollbar";
+import { TicketColumnFilter } from "@/components/TicketColumnFilter";
+import {
+  getHrJobPostings,
+  addHrJobPosting,
+  updateHrJobPosting,
+  deleteHrJobPosting,
+  type HrJobPosting,
+  type HrJobPostingPlatform,
+  type HrJobPostingStatus,
+} from "@/lib/supabase/hrJobPostings";
+import { getHrBranchPostingStatuses, setHrBranchPostingStatus } from "@/lib/supabase/hrBranchPostingStatus";
 import { getGmailConnectionStatus, disconnectGmail, sendHiringCredentialsEmail, type GmailConnectionStatus } from "@/lib/supabase/gmailConnection";
 
 /** Shared shape for a sidebar/header-dropdown nav tab entry — broad enough to structurally match every tabGroups[].tabs literal (they all share this key/label/count/icon shape, just with different literal `key`/`label` string types per group), so renderSidebarTabButton/renderDropdownTabButton can be called with tabs from any group. */
@@ -70,8 +81,9 @@ import {
   type OnboardingDocumentColumn,
   type OnboardingGroupKey,
 } from "@/lib/supabase/onboardingDocumentColumns";
-import { uploadCoeCertificate, uploadWarningForm, uploadPromotionForm, uploadActionPlanForm, uploadTerminationForm, uploadW8benForm, uploadW4Form, uploadW4RForm, uploadI9Form, uploadWageAckForm, uploadCarIqAgreementForm, uploadVehicleAgreementForm, uploadEmployeeConfidentialityForm, uploadMealRestBreakForm, uploadPtoAckForm, uploadPartsResponsibilityForm, uploadMileageFuelForm, uploadLocationConsentForm, uploadDamageForm, uploadContractorDataForm, uploadDirectDepositForm, uploadSubstanceScreeningForm, uploadFlashTechnicianTravelForm, uploadContractorAddendumForm, uploadMasterW2AgreementForm, uploadMasterW2OfficeAgreementForm, uploadMasterPhContractorAgreementForm, uploadMasterW2ExecutiveAgreementForm, uploadSignableDocumentSignature, refreshStorageAuthToken } from "@/lib/firebase/storage";
-import { captureHtmlToPdfBlob, captureHtmlPagesToPdfBlob, loadAssetDataUrl as loadImageDataUrl } from "@/lib/pdfCapture";
+import { uploadCoeCertificate, uploadWarningForm, uploadPromotionForm, uploadActionPlanForm, uploadTerminationForm, uploadW8benForm, uploadW4Form, uploadW4RForm, uploadI9Form, uploadWageAckForm, uploadCarIqAgreementForm, uploadVehicleAgreementForm, uploadEmployeeConfidentialityForm, uploadMealRestBreakForm, uploadPtoAckForm, uploadPartsResponsibilityForm, uploadMileageFuelForm, uploadLocationConsentForm, uploadDamageForm, uploadContractorDataForm, uploadDirectDepositForm, uploadSubstanceScreeningForm, uploadFlashTechnicianTravelForm, uploadContractorAddendumForm, uploadMasterW2AgreementForm, uploadMasterW2OfficeAgreementForm, uploadMasterPhContractorAgreementForm, uploadMasterW2ExecutiveAgreementForm, uploadVehicleUseAgreementForm, uploadNdaForm, uploadSsnCardForm, uploadDriversLicenseForm, uploadValidIdForm, uploadSignableDocumentSignature, refreshStorageAuthToken } from "@/lib/firebase/storage";
+import { regenerateSimpleSignableDocumentPdf, regenerateMasterAgreementPdf } from "@/lib/regenerateSignableDocumentPdf";
+import { captureHtmlToPdfBlob, captureHtmlPagesToPdfBlob, resolveSignaturesForCapture, loadAssetDataUrl as loadImageDataUrl } from "@/lib/pdfCapture";
 import { downloadSignableDocumentPdf } from "@/lib/downloadSignableDocumentPdf";
 import { repairMultiSignerPdfs, type RepairResult } from "@/lib/repairMultiSignerSignatures";
 import { useSortableSearchTable } from "@/hooks/useSortableSearchTable";
@@ -137,6 +149,9 @@ import type { VehicleAgreementFormData } from "@/lib/vehicleAgreementFormTemplat
 import { fillVehicleAgreementPdf } from "@/lib/vehicleAgreementPdfFill";
 import type { EmployeeConfidentialityFormData } from "@/lib/employeeConfidentialityFormTemplate";
 import { fillEmployeeConfidentialityPdf } from "@/lib/employeeConfidentialityPdfFill";
+import { buildSsnCardFormBodyMarkup, ssnCardFormStyles, type SsnCardFormData } from "@/lib/ssnCardFormTemplate";
+import { buildDriversLicenseFormBodyMarkup, driversLicenseFormStyles, type DriversLicenseFormData } from "@/lib/driversLicenseFormTemplate";
+import { buildValidIdFormBodyMarkup, validIdFormStyles, type ValidIdFormData } from "@/lib/validIdFormTemplate";
 import { MEAL_REST_BREAK_BRANCHES, type MealRestBreakFormData } from "@/lib/mealRestBreakFormTemplate";
 import { fillMealRestBreakPdf } from "@/lib/mealRestBreakPdfFill";
 import { PTO_ACK_BRANCHES, type PtoAckFormData } from "@/lib/ptoAckFormTemplate";
@@ -299,6 +314,21 @@ const CANDIDATE_STATUS_COLOR: Record<CandidateStatus, string> = {
 function candidateStatusTextColor(status: CandidateStatus): string {
   return CANDIDATE_STATUS_COLOR[status].split(" ").find((c) => c.startsWith("text-")) ?? "text-muted-foreground";
 }
+/** Recruitment Site tab's Job status badge — same colored-<select> convention as CANDIDATE_STATUS_COLOR above. */
+const JOB_POSTING_STATUS_COLOR: Record<HrJobPostingStatus, string> = {
+  open: "bg-green-500/20 text-green-300",
+  paused: "bg-amber-500/20 text-amber-300",
+  closed: "bg-red-500/20 text-red-300",
+};
+const JOB_POSTING_STATUS_LABEL: Record<HrJobPostingStatus, string> = {
+  open: "Open",
+  paused: "Paused",
+  closed: "Closed",
+};
+const JOB_POSTING_PLATFORM_LABEL: Record<HrJobPostingPlatform, string> = {
+  zip_recruiter: "Zip Recruiter",
+  indeed: "Indeed",
+};
 /** "John Smith" -> "John.Smith" — this company's Login Name convention, used to pre-fill Add User's Login Name field from a candidate's name. Middle names are dropped (first + last token only); a single-word name is used as-is. */
 function deriveLoginName(fullName: string): string {
   const parts = fullName.trim().split(/\s+/).filter(Boolean);
@@ -417,6 +447,7 @@ const PH_ONBOARDING_DOCS = [
   "CSR Duty Agreement",
   "Employee Off Days Agreement",
   "W-8BEN",
+  "Valid ID",
 ];
 
 // "New Onboarding Documents" — the same paperwork tracker, but split into 4
@@ -467,7 +498,7 @@ const ONBOARDING_GROUP_KEY_LABELS: Record<OnboardingGroupKey, string> = {
  * for why some of these are ambiguous. This can only ever ADD a "YES" a
  * human hasn't gotten to yet; it never removes one a human already set.
  */
-const ONBOARDING_COLUMN_TO_DOCUMENT_TYPE: Record<string, SignableDocumentType> = {
+const ONBOARDING_COLUMN_TO_DOCUMENT_TYPE: Record<string, SignableDocumentType | SignableDocumentType[]> = {
   "Contractor Data Sheet": "contractor_data",
   "Direct Deposit Authorization": "direct_deposit",
   "Non-Disclosure Agreement": "nda_form",
@@ -487,6 +518,20 @@ const ONBOARDING_COLUMN_TO_DOCUMENT_TYPE: Record<string, SignableDocumentType> =
   "Substance Screening & Conduct Agreement": "substance_screening",
   "W-4R": "w4r",
   "I-9": "i9",
+  // Standalone as of ssn_card_form/drivers_license_form (SSN Card / Driver's
+  // License tabs), but a signed OLD combined form (Contractor Data Sheet or
+  // either Master W-2 Agreement — both require uploading BOTH the SSN card
+  // AND the license before they'll let you submit, see their own validate()
+  // functions) already proves the same document was collected, so those
+  // count here too — an employee who submitted one of the old forms before
+  // this split shows "YES" immediately instead of HR re-requesting it.
+  "Driver's License": ["drivers_license_form", "contractor_data", "contractor_data_us", "master_w2_agreement", "master_w2_office_agreement"],
+  "Social Security": ["ssn_card_form", "contractor_data", "contractor_data_us", "master_w2_agreement", "master_w2_office_agreement"],
+  // Standalone as of valid_id_form (PH "Valid ID" tab), but a signed OLD
+  // Master PH Contractor Agreement already proves a government ID was
+  // collected (its own validate() requires the photo upload) — same
+  // backward-compatible pull-forward as Driver's License/Social Security.
+  "Valid ID": ["valid_id_form", "master_ph_contractor_agreement"],
 };
 
 // Job Title options for the Generate COE tab — every real role in the
@@ -1050,7 +1095,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   // Reviews, the Approved log, the department trend chart, and the full
   // Employee Directory all on top of each other, forcing a long scroll to
   // reach anything below Hiring.
-  const [activeTab, setActiveTab] = useState<"hiring" | "warnings" | "masterList" | "leaders" | "jotform" | "jotformDocuments" | "customForms" | "onboarding" | "hiringReports" | "report" | "coe" | "warningForm" | "promotionForm" | "actionPlanForm" | "terminationForm" | "employeeRequestManager" | "w8ben" | "i9" | "wageAck" | "carIqAgreement" | "vehicleAgreement" | "vehicleUseAgreement" | "employeeConfidentiality" | "mealRestBreak" | "ptoAck" | "partsResponsibility" | "mileageFuel" | "locationConsent" | "damage" | "contractorData" | "contractorDataUs" | "directDeposit" | "substanceScreening" | "flashTechnicianTravel" | "contractorAddendum" | "combineForms" | "employerQueue" | "ndaForm" | "calendar" | "interviewCalendar" | "masterW2Agreement" | "newW4" | "masterW2OfficeAgreement" | "newW8ben" | "masterPhContractorAgreement" | "newI9" | "newDirectDeposit" | "newCombineForms" | "newOnboardingDocuments" | "newW9" | "newContractorAddendum" | "masterW2ExecutiveAgreement">(paperworksOnly ? "combineForms" : "hiring");
+  const [activeTab, setActiveTab] = useState<"hiring" | "recruitmentSite" | "warnings" | "masterList" | "leaders" | "jotform" | "jotformDocuments" | "customForms" | "onboarding" | "hiringReports" | "report" | "coe" | "warningForm" | "promotionForm" | "actionPlanForm" | "terminationForm" | "employeeRequestManager" | "w8ben" | "i9" | "wageAck" | "carIqAgreement" | "vehicleAgreement" | "vehicleUseAgreement" | "employeeConfidentiality" | "mealRestBreak" | "ptoAck" | "partsResponsibility" | "mileageFuel" | "locationConsent" | "damage" | "contractorData" | "contractorDataUs" | "directDeposit" | "substanceScreening" | "flashTechnicianTravel" | "contractorAddendum" | "combineForms" | "employerQueue" | "ndaForm" | "calendar" | "interviewCalendar" | "masterW2Agreement" | "newW4" | "masterW2OfficeAgreement" | "newW8ben" | "masterPhContractorAgreement" | "newI9" | "newDirectDeposit" | "newCombineForms" | "newOnboardingDocuments" | "newW9" | "newContractorAddendum" | "masterW2ExecutiveAgreement" | "ssnCard" | "driversLicense" | "validId">(paperworksOnly ? "combineForms" : "hiring");
   const [openCategory, setOpenCategory] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // Which floating-sidebar section headers (Automated Forms/Generate
@@ -1074,7 +1119,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const navigate = useNavigate();
   const hrSearchParams = (useSearch({ strict: false }) as { tab?: string; submissionId?: string; profileId?: string; docId?: string; viewCvCandidateId?: string }) ?? {};
   const initialHrSearchRef = useRef(hrSearchParams);
-  const VALID_HR_TABS = ["hiring", "warnings", "masterList", "leaders", "jotform", "jotformDocuments", "customForms", "onboarding", "hiringReports", "report", "coe", "warningForm", "promotionForm", "actionPlanForm", "terminationForm", "employeeRequestManager", "w8ben", "i9", "newI9", "wageAck", "carIqAgreement", "vehicleAgreement", "vehicleUseAgreement", "employeeConfidentiality", "mealRestBreak", "ptoAck", "partsResponsibility", "mileageFuel", "locationConsent", "damage", "contractorData", "contractorDataUs", "directDeposit", "substanceScreening", "flashTechnicianTravel", "combineForms", "newCombineForms", "employerQueue"] as const;
+  const VALID_HR_TABS = ["hiring", "warnings", "masterList", "leaders", "jotform", "jotformDocuments", "customForms", "onboarding", "hiringReports", "report", "coe", "warningForm", "promotionForm", "actionPlanForm", "terminationForm", "employeeRequestManager", "w8ben", "i9", "newI9", "wageAck", "carIqAgreement", "vehicleAgreement", "vehicleUseAgreement", "employeeConfidentiality", "mealRestBreak", "ptoAck", "partsResponsibility", "mileageFuel", "locationConsent", "damage", "contractorData", "contractorDataUs", "directDeposit", "substanceScreening", "flashTechnicianTravel", "combineForms", "newCombineForms", "employerQueue", "ssnCard", "driversLicense", "validId"] as const;
   useEffect(() => {
     const tab = initialHrSearchRef.current.tab;
     if (tab && (VALID_HR_TABS as readonly string[]).includes(tab)) setActiveTab(tab as typeof activeTab);
@@ -1795,7 +1840,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       .catch((err) => setError(err instanceof Error ? err.message : "Failed to open CV."));
   }, [candidates]);
   const [showAddCandidate, setShowAddCandidate] = useState(false);
-  const [newCandidate, setNewCandidate] = useState({ name: "", phone: "", email: "", position: "", branch: "", department: "", branchManagerId: "", assignedInterviewerId: "", source: "", sourceOther: "" });
+  const [newCandidate, setNewCandidate] = useState({ name: "", phone: "", email: "", position: "", branch: "", department: "", branchManagerId: "", assignedInterviewerId: "", jobPostingId: "", source: "", sourceOther: "" });
   const [cvFile, setCvFile] = useState<File | null>(null);
   const [savingCandidate, setSavingCandidate] = useState(false);
   const [hiringSearch, setHiringSearch] = useState("");
@@ -1924,6 +1969,97 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const loadCandidatesDebounced = () => {
     if (loadCandidatesDebounceRef.current) window.clearTimeout(loadCandidatesDebounceRef.current);
     loadCandidatesDebounceRef.current = window.setTimeout(() => { void loadCandidates(); }, 800);
+  };
+
+  // Recruitment Site tab — a manually-kept mirror of HR's real ZipRecruiter/
+  // Indeed job postings (migration 0294). jobPostings itself loads
+  // unconditionally on mount (not gated on the tab being open) since Add
+  // Candidate's own "Job Posting" dropdown on the Hiring tab needs it too
+  // (migration 0296) — only branchPostingStatus stays lazy, since nothing
+  // outside Recruitment Site reads it. "Branch" is a third, unrelated view
+  // within the same tab (migration 0295) — not a job posting, just an
+  // Open/Closed-for-posting toggle per real branch — so recruitmentPlatform's
+  // type is a superset of HrJobPostingPlatform rather than that type itself.
+  const [jobPostings, setJobPostings] = useState<HrJobPosting[]>([]);
+  const [jobPostingsLoading, setJobPostingsLoading] = useState(false);
+  const [recruitmentPlatform, setRecruitmentPlatform] = useState<HrJobPostingPlatform | "branch">("zip_recruiter");
+  const [branchPostingStatus, setBranchPostingStatus] = useState<Map<string, boolean>>(new Map());
+  const [branchStatusLoading, setBranchStatusLoading] = useState(false);
+  // Clicking All/New/CVs on a posting's Candidates cell opens this — the
+  // actual list of linked candidates in that bucket, not just the count.
+  const [postingCandidatesModal, setPostingCandidatesModal] = useState<{ posting: HrJobPosting; bucket: "all" | "new" | "cvs" } | null>(null);
+  const loadJobPostings = async () => {
+    setJobPostingsLoading(true);
+    try {
+      setJobPostings(await getHrJobPostings());
+    } catch (err) {
+      console.error("Failed to load job postings:", err);
+    } finally {
+      setJobPostingsLoading(false);
+    }
+  };
+  const loadBranchPostingStatus = async () => {
+    setBranchStatusLoading(true);
+    try {
+      setBranchPostingStatus(await getHrBranchPostingStatuses());
+    } catch (err) {
+      console.error("Failed to load branch posting status:", err);
+    } finally {
+      setBranchStatusLoading(false);
+    }
+  };
+  // Loaded unconditionally (not gated on the Recruitment Site tab being
+  // open) — Add Candidate's own "Job Posting" dropdown, on the Hiring tab,
+  // needs this list too.
+  useEffect(() => {
+    void loadJobPostings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    if (activeTab === "recruitmentSite") {
+      void loadBranchPostingStatus();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  const handleAddJobPosting = async () => {
+    if (recruitmentPlatform === "branch") return;
+    try {
+      const created = await addHrJobPosting(recruitmentPlatform);
+      setJobPostings((prev) => [created, ...prev]);
+    } catch (err) {
+      alert(`Failed to add job posting: ${err instanceof Error ? err.message : "Unknown error"}`);
+    }
+  };
+  const handleToggleBranchOpen = async (branch: string, currentlyOpen: boolean) => {
+    const nextOpen = !currentlyOpen;
+    setBranchPostingStatus((prev) => new Map(prev).set(branch, nextOpen));
+    try {
+      await setHrBranchPostingStatus(branch, nextOpen);
+    } catch (err) {
+      alert(`Failed to save: ${err instanceof Error ? err.message : "Unknown error"}`);
+      setBranchPostingStatus((prev) => new Map(prev).set(branch, currentlyOpen));
+    }
+  };
+  const handleUpdateJobPostingField = async (id: string, patch: Parameters<typeof updateHrJobPosting>[1]) => {
+    setJobPostings((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+    try {
+      await updateHrJobPosting(id, patch);
+    } catch (err) {
+      console.error("Failed to save job posting:", err);
+      void loadJobPostings();
+    }
+  };
+  const handleDeleteJobPosting = async (id: string) => {
+    if (!confirm("Remove this job posting?")) return;
+    const prev = jobPostings;
+    setJobPostings((p) => p.filter((row) => row.id !== id));
+    try {
+      await deleteHrJobPosting(id);
+    } catch (err) {
+      alert(`Failed to delete: ${err instanceof Error ? err.message : "Unknown error"}`);
+      setJobPostings(prev);
+    }
   };
 
   // Forms column — every signed/pending document company-wide (one bulk
@@ -2354,6 +2490,9 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     master_ph_contractor_agreement: "masterPhContractorAgreement",
     master_w2_executive_agreement: "masterW2ExecutiveAgreement",
     certificate_of_employment: "coe",
+    ssn_card_form: "ssnCard",
+    drivers_license_form: "driversLicense",
+    valid_id_form: "validId",
   };
 
   // Forms popup — checkbox list of every SignableDocumentType, letting HR
@@ -4847,6 +4986,23 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     await downloadSignableDocumentPdf(doc.pdfUrl, `Master W-2 Technician Agreement - ${name}.pdf`);
   };
 
+  /** Re-renders this document's PDF from its already-stored data (employee/employer signatures are inline data: URLs in form_data, no CORS resolution needed) — see regenerateSignableDocumentPdf.ts's header comment. */
+  const handleRegenerateMasterW2AgreementPdf = async (doc: SignableDocument) => {
+    const name = (doc.formData as Partial<MasterW2AgreementFormData>).employeeName || doc.recipientName || "master-w2-agreement";
+    setMasterW2AgreementActionBusyId(doc.id);
+    setMasterW2AgreementActionError(null);
+    try {
+      const logo = masterW2AgreementLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      if (!masterW2AgreementLogoDataUrl) setMasterW2AgreementLogoDataUrl(logo);
+      await regenerateMasterAgreementPdf(doc, logo, buildMasterW2AgreementBodyMarkup, masterW2AgreementStyles, uploadMasterW2AgreementForm, name);
+      await loadSentMasterW2AgreementForms();
+    } catch (err) {
+      setMasterW2AgreementActionError(err instanceof Error ? err.message : "Failed to regenerate PDF.");
+    } finally {
+      setMasterW2AgreementActionBusyId(null);
+    }
+  };
+
   const handleReopenMasterW2AgreementEmployer = async (doc: SignableDocument) => {
     if (!window.confirm("Re-open this for a new employer signature? The employee's signature stays as-is.")) return;
     setMasterW2AgreementActionBusyId(doc.id);
@@ -5130,6 +5286,23 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     await downloadSignableDocumentPdf(doc.pdfUrl, `Master W-2 Office Agreement - ${name}.pdf`);
   };
 
+  /** Re-renders this document's PDF from its already-stored data (employee/employer signatures are inline data: URLs in form_data, no CORS resolution needed) — see regenerateSignableDocumentPdf.ts's header comment. */
+  const handleRegenerateMasterW2OfficeAgreementPdf = async (doc: SignableDocument) => {
+    const name = (doc.formData as Partial<MasterW2OfficeAgreementFormData>).employeeName || doc.recipientName || "master-w2-office-agreement";
+    setMasterW2OfficeAgreementActionBusyId(doc.id);
+    setMasterW2OfficeAgreementActionError(null);
+    try {
+      const logo = masterW2OfficeAgreementLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      if (!masterW2OfficeAgreementLogoDataUrl) setMasterW2OfficeAgreementLogoDataUrl(logo);
+      await regenerateMasterAgreementPdf(doc, logo, buildMasterW2OfficeAgreementBodyMarkup, masterW2OfficeAgreementStyles, uploadMasterW2OfficeAgreementForm, name);
+      await loadSentMasterW2OfficeAgreementForms();
+    } catch (err) {
+      setMasterW2OfficeAgreementActionError(err instanceof Error ? err.message : "Failed to regenerate PDF.");
+    } finally {
+      setMasterW2OfficeAgreementActionBusyId(null);
+    }
+  };
+
   const handleReopenMasterW2OfficeAgreementEmployer = async (doc: SignableDocument) => {
     if (!window.confirm("Re-open this for a new employer signature? The employee's signature stays as-is.")) return;
     setMasterW2OfficeAgreementActionBusyId(doc.id);
@@ -5404,6 +5577,23 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<MasterW2ExecutiveAgreementFormData>).employeeName || doc.recipientName || "master-w2-executive-agreement";
     await downloadSignableDocumentPdf(doc.pdfUrl, `W-2 Executive Exempt Management Agreement - ${name}.pdf`);
+  };
+
+  /** Re-renders this document's PDF from its already-stored data (employee/employer signatures are inline data: URLs in form_data, no CORS resolution needed) — see regenerateSignableDocumentPdf.ts's header comment. */
+  const handleRegenerateMasterW2ExecutiveAgreementPdf = async (doc: SignableDocument) => {
+    const name = (doc.formData as Partial<MasterW2ExecutiveAgreementFormData>).employeeName || doc.recipientName || "master-w2-executive-agreement";
+    setMasterW2ExecutiveAgreementActionBusyId(doc.id);
+    setMasterW2ExecutiveAgreementActionError(null);
+    try {
+      const logo = masterW2ExecutiveAgreementLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      if (!masterW2ExecutiveAgreementLogoDataUrl) setMasterW2ExecutiveAgreementLogoDataUrl(logo);
+      await regenerateMasterAgreementPdf(doc, logo, buildMasterW2ExecutiveAgreementBodyMarkup, masterW2ExecutiveAgreementStyles, uploadMasterW2ExecutiveAgreementForm, name);
+      await loadSentMasterW2ExecutiveAgreementForms();
+    } catch (err) {
+      setMasterW2ExecutiveAgreementActionError(err instanceof Error ? err.message : "Failed to regenerate PDF.");
+    } finally {
+      setMasterW2ExecutiveAgreementActionBusyId(null);
+    }
   };
 
   const handleReopenMasterW2ExecutiveAgreementEmployer = async (doc: SignableDocument) => {
@@ -5709,6 +5899,23 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<MasterPhContractorAgreementFormData>).employeeName || doc.recipientName || "master-ph-contractor-agreement";
     await downloadSignableDocumentPdf(doc.pdfUrl, `Master PH Contractor Agreement - ${name}.pdf`);
+  };
+
+  /** Re-renders this document's PDF from its already-stored data (employee/employer signatures are inline data: URLs in form_data, no CORS resolution needed) — see regenerateSignableDocumentPdf.ts's header comment. */
+  const handleRegenerateMasterPhContractorAgreementPdf = async (doc: SignableDocument) => {
+    const name = (doc.formData as Partial<MasterPhContractorAgreementFormData>).employeeName || doc.recipientName || "master-ph-contractor-agreement";
+    setMasterPhContractorAgreementActionBusyId(doc.id);
+    setMasterPhContractorAgreementActionError(null);
+    try {
+      const logo = masterPhContractorAgreementLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      if (!masterPhContractorAgreementLogoDataUrl) setMasterPhContractorAgreementLogoDataUrl(logo);
+      await regenerateMasterAgreementPdf(doc, logo, buildMasterPhContractorAgreementBodyMarkup, masterPhContractorAgreementStyles, uploadMasterPhContractorAgreementForm, name);
+      await loadSentMasterPhContractorAgreementForms();
+    } catch (err) {
+      setMasterPhContractorAgreementActionError(err instanceof Error ? err.message : "Failed to regenerate PDF.");
+    } finally {
+      setMasterPhContractorAgreementActionBusyId(null);
+    }
   };
 
   const handleReopenMasterPhContractorAgreementEmployer = async (doc: SignableDocument) => {
@@ -6895,6 +7102,472 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     }
   };
 
+  // ── SSN Card / Driver's License / Valid ID (PH) — standalone
+  // ID-document submissions, split out of Contractor Data Sheet / Master
+  // W-2 Technician & Office Agreements (US) and the Master PH Contractor
+  // Agreement (PH), which used to each embed their own ID upload field.
+  // Same single-recipient, no-HR-content, no-employer-cosignature shape as
+  // Employee Confidentiality above — the recipient fills in everything
+  // themselves on FillSsnCardPage.tsx / FillDriversLicensePage.tsx /
+  // FillValidIdPage.tsx. No live preview here (unlike Confidentiality,
+  // there's no real source PDF to render ahead of time) — the fill page
+  // itself already shows a live preview to whoever's actually filling it. ──
+  const [sentSsnCardForms, setSentSsnCardForms] = useState<SignableDocument[]>([]);
+  const loadSentSsnCardForms = async () => {
+    try {
+      setSentSsnCardForms(await getSignableDocuments("ssn_card_form"));
+    } catch (err) {
+      console.error("Failed to load sent SSN Card forms:", err);
+    }
+  };
+  useEffect(() => {
+    if (activeTab === "ssnCard" || activeTab === "jotformDocuments" || activeTab === "combineForms") void loadSentSsnCardForms();
+  }, [activeTab]);
+
+  const [ssnCardRecipientId, setSsnCardRecipientId] = useState("");
+  const [ssnCardRecipientSearch, setSsnCardRecipientSearch] = useState("");
+  const [ssnCardRecipientDropdownOpen, setSsnCardRecipientDropdownOpen] = useState(false);
+  const [ssnCardSending, setSsnCardSending] = useState(false);
+  const [ssnCardSendError, setSsnCardSendError] = useState<string | null>(null);
+  const [ssnCardActionBusyId, setSsnCardActionBusyId] = useState<string | null>(null);
+  const [ssnCardActionError, setSsnCardActionError] = useState<string | null>(null);
+  const [ssnCardExternalName, setSsnCardExternalName] = useState("");
+  const [ssnCardSentLink, setSsnCardSentLink] = useState<{ link: string; recipientName: string } | null>(null);
+  const [ssnCardSentLinkCopied, setSsnCardSentLinkCopied] = useState(false);
+  const filteredSsnCardRecipients = useMemo(
+    () => employees.filter((e) => e.status === "active" && e.name.toLowerCase().includes(ssnCardRecipientSearch.toLowerCase())),
+    [employees, ssnCardRecipientSearch]
+  );
+
+  const handleSendSsnCard = async () => {
+    if (!ssnCardRecipientId || !uid) return;
+    setSsnCardSending(true);
+    setSsnCardSendError(null);
+    try {
+      const recipient = employees.find((e) => e.id === ssnCardRecipientId);
+      if (!recipient) throw new Error("Select a recipient first.");
+
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["ssn_card_form"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has an SSN Card request on file. Send another one anyway?`)) {
+        return;
+      }
+
+      const doc = await createSignableDocument({
+        documentType: "ssn_card_form",
+        formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
+        recipientId: ssnCardRecipientId,
+        recipientSlot: "employee",
+        pdfUrl: "",
+      });
+
+      const myProfileId = await getMyProfileId(uid);
+      if (!myProfileId) throw new Error("Could not resolve your profile.");
+      const thread = await getOrCreateDmThread(myProfileId, ssnCardRecipientId);
+      const fillLink = `${getAppUrl()}/fill-ssn-card/${doc.id}`;
+      await sendMessage({
+        dmThreadId: thread.id,
+        senderId: myProfileId,
+        senderName: displayName || "HR",
+        body: `📋 Please submit your SSN Card: ${fillLink}`,
+      });
+
+      void logActivity({ action: "ssn_card_sent", targetType: "employee", targetId: recipient.id, targetLabel: recipient.name });
+
+      setSsnCardRecipientId("");
+      setSsnCardRecipientSearch("");
+      await loadSentSsnCardForms();
+    } catch (err) {
+      setSsnCardSendError(err instanceof Error ? err.message : "Failed to send request.");
+    } finally {
+      setSsnCardSending(false);
+    }
+  };
+
+  const handleGenerateExternalSsnCard = async () => {
+    setSsnCardSending(true);
+    setSsnCardSendError(null);
+    try {
+      const name = ssnCardExternalName.trim() || "External Recipient";
+      const doc = await createSignableDocument({
+        documentType: "ssn_card_form",
+        formData: { employeeId: "", employeeName: name } as unknown as Record<string, any>,
+        recipientName: name,
+        recipientSlot: "employee",
+        pdfUrl: "",
+      });
+
+      void logActivity({ action: "ssn_card_sent", targetType: "employee", targetLabel: name, details: { external: true } });
+
+      setSsnCardSentLink({ link: `${getAppUrl()}/fill-ssn-card-external/${doc.id}`, recipientName: name });
+      setSsnCardExternalName("");
+      await loadSentSsnCardForms();
+    } catch (err) {
+      setSsnCardSendError(err instanceof Error ? err.message : "Failed to generate link.");
+    } finally {
+      setSsnCardSending(false);
+    }
+  };
+
+  const handleCopySsnCardSentLink = async () => {
+    if (!ssnCardSentLink) return;
+    try {
+      await navigator.clipboard.writeText(ssnCardSentLink.link);
+      setSsnCardSentLinkCopied(true);
+      setTimeout(() => setSsnCardSentLinkCopied(false), 1500);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  const handleCopySsnCardLink = async (doc: SignableDocument) => {
+    try {
+      const path = doc.recipientId ? "fill-ssn-card" : "fill-ssn-card-external";
+      await navigator.clipboard.writeText(`${getAppUrl()}/${path}/${doc.id}`);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  const handleDownloadSsnCardPdf = async (doc: SignableDocument) => {
+    if (!doc.pdfUrl) return;
+    const name = (doc.formData as Partial<SsnCardFormData>).employeeName || doc.recipientName || "ssn-card";
+    await downloadSignableDocumentPdf(doc.pdfUrl, `SSN Card - ${name}.pdf`);
+  };
+
+  /** Re-renders this document's PDF from its already-stored data/signatures — see regenerateSignableDocumentPdf.ts's header comment (built for the date-rollback fmtDate fix, which only affects documents generated after the fix). */
+  const handleRegenerateSsnCardPdf = async (doc: SignableDocument) => {
+    const name = (doc.formData as Partial<SsnCardFormData>).employeeName || doc.recipientName || "ssn-card";
+    setSsnCardActionBusyId(doc.id);
+    setSsnCardActionError(null);
+    try {
+      const logo = await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png"));
+      await regenerateSimpleSignableDocumentPdf(doc, logo, buildSsnCardFormBodyMarkup, ssnCardFormStyles, uploadSsnCardForm, name);
+      await loadSentSsnCardForms();
+    } catch (err) {
+      setSsnCardActionError(err instanceof Error ? err.message : "Failed to regenerate PDF.");
+    } finally {
+      setSsnCardActionBusyId(null);
+    }
+  };
+
+  const handleDeleteSsnCard = async (doc: SignableDocument) => {
+    if (!window.confirm("Permanently delete this SSN Card request?")) return;
+    setSsnCardActionBusyId(doc.id);
+    setSsnCardActionError(null);
+    try {
+      await deleteSignableDocument(doc.id);
+      await loadSentSsnCardForms();
+    } catch (err) {
+      setSsnCardActionError(err instanceof Error ? err.message : "Failed to delete.");
+    } finally {
+      setSsnCardActionBusyId(null);
+    }
+  };
+
+  const [sentDriversLicenseForms, setSentDriversLicenseForms] = useState<SignableDocument[]>([]);
+  const loadSentDriversLicenseForms = async () => {
+    try {
+      setSentDriversLicenseForms(await getSignableDocuments("drivers_license_form"));
+    } catch (err) {
+      console.error("Failed to load sent Driver's License forms:", err);
+    }
+  };
+  useEffect(() => {
+    if (activeTab === "driversLicense" || activeTab === "jotformDocuments" || activeTab === "combineForms") void loadSentDriversLicenseForms();
+  }, [activeTab]);
+
+  const [driversLicenseRecipientId, setDriversLicenseRecipientId] = useState("");
+  const [driversLicenseRecipientSearch, setDriversLicenseRecipientSearch] = useState("");
+  const [driversLicenseRecipientDropdownOpen, setDriversLicenseRecipientDropdownOpen] = useState(false);
+  const [driversLicenseSending, setDriversLicenseSending] = useState(false);
+  const [driversLicenseSendError, setDriversLicenseSendError] = useState<string | null>(null);
+  const [driversLicenseActionBusyId, setDriversLicenseActionBusyId] = useState<string | null>(null);
+  const [driversLicenseActionError, setDriversLicenseActionError] = useState<string | null>(null);
+  const [driversLicenseExternalName, setDriversLicenseExternalName] = useState("");
+  const [driversLicenseSentLink, setDriversLicenseSentLink] = useState<{ link: string; recipientName: string } | null>(null);
+  const [driversLicenseSentLinkCopied, setDriversLicenseSentLinkCopied] = useState(false);
+  const filteredDriversLicenseRecipients = useMemo(
+    () => employees.filter((e) => e.status === "active" && e.name.toLowerCase().includes(driversLicenseRecipientSearch.toLowerCase())),
+    [employees, driversLicenseRecipientSearch]
+  );
+
+  const handleSendDriversLicense = async () => {
+    if (!driversLicenseRecipientId || !uid) return;
+    setDriversLicenseSending(true);
+    setDriversLicenseSendError(null);
+    try {
+      const recipient = employees.find((e) => e.id === driversLicenseRecipientId);
+      if (!recipient) throw new Error("Select a recipient first.");
+
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["drivers_license_form"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Driver's License request on file. Send another one anyway?`)) {
+        return;
+      }
+
+      const doc = await createSignableDocument({
+        documentType: "drivers_license_form",
+        formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
+        recipientId: driversLicenseRecipientId,
+        recipientSlot: "employee",
+        pdfUrl: "",
+      });
+
+      const myProfileId = await getMyProfileId(uid);
+      if (!myProfileId) throw new Error("Could not resolve your profile.");
+      const thread = await getOrCreateDmThread(myProfileId, driversLicenseRecipientId);
+      const fillLink = `${getAppUrl()}/fill-drivers-license/${doc.id}`;
+      await sendMessage({
+        dmThreadId: thread.id,
+        senderId: myProfileId,
+        senderName: displayName || "HR",
+        body: `📋 Please submit your Driver's License: ${fillLink}`,
+      });
+
+      void logActivity({ action: "drivers_license_sent", targetType: "employee", targetId: recipient.id, targetLabel: recipient.name });
+
+      setDriversLicenseRecipientId("");
+      setDriversLicenseRecipientSearch("");
+      await loadSentDriversLicenseForms();
+    } catch (err) {
+      setDriversLicenseSendError(err instanceof Error ? err.message : "Failed to send request.");
+    } finally {
+      setDriversLicenseSending(false);
+    }
+  };
+
+  const handleGenerateExternalDriversLicense = async () => {
+    setDriversLicenseSending(true);
+    setDriversLicenseSendError(null);
+    try {
+      const name = driversLicenseExternalName.trim() || "External Recipient";
+      const doc = await createSignableDocument({
+        documentType: "drivers_license_form",
+        formData: { employeeId: "", employeeName: name } as unknown as Record<string, any>,
+        recipientName: name,
+        recipientSlot: "employee",
+        pdfUrl: "",
+      });
+
+      void logActivity({ action: "drivers_license_sent", targetType: "employee", targetLabel: name, details: { external: true } });
+
+      setDriversLicenseSentLink({ link: `${getAppUrl()}/fill-drivers-license-external/${doc.id}`, recipientName: name });
+      setDriversLicenseExternalName("");
+      await loadSentDriversLicenseForms();
+    } catch (err) {
+      setDriversLicenseSendError(err instanceof Error ? err.message : "Failed to generate link.");
+    } finally {
+      setDriversLicenseSending(false);
+    }
+  };
+
+  const handleCopyDriversLicenseSentLink = async () => {
+    if (!driversLicenseSentLink) return;
+    try {
+      await navigator.clipboard.writeText(driversLicenseSentLink.link);
+      setDriversLicenseSentLinkCopied(true);
+      setTimeout(() => setDriversLicenseSentLinkCopied(false), 1500);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  const handleCopyDriversLicenseLink = async (doc: SignableDocument) => {
+    try {
+      const path = doc.recipientId ? "fill-drivers-license" : "fill-drivers-license-external";
+      await navigator.clipboard.writeText(`${getAppUrl()}/${path}/${doc.id}`);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  const handleDownloadDriversLicensePdf = async (doc: SignableDocument) => {
+    if (!doc.pdfUrl) return;
+    const name = (doc.formData as Partial<DriversLicenseFormData>).employeeName || doc.recipientName || "drivers-license";
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Driver's License - ${name}.pdf`);
+  };
+
+  /** Re-renders this document's PDF from its already-stored data/signatures — see regenerateSignableDocumentPdf.ts's header comment (built for the date-rollback fmtDate fix, which only affects documents generated after the fix). */
+  const handleRegenerateDriversLicensePdf = async (doc: SignableDocument) => {
+    const name = (doc.formData as Partial<DriversLicenseFormData>).employeeName || doc.recipientName || "drivers-license";
+    setDriversLicenseActionBusyId(doc.id);
+    setDriversLicenseActionError(null);
+    try {
+      const logo = await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png"));
+      await regenerateSimpleSignableDocumentPdf(doc, logo, buildDriversLicenseFormBodyMarkup, driversLicenseFormStyles, uploadDriversLicenseForm, name);
+      await loadSentDriversLicenseForms();
+    } catch (err) {
+      setDriversLicenseActionError(err instanceof Error ? err.message : "Failed to regenerate PDF.");
+    } finally {
+      setDriversLicenseActionBusyId(null);
+    }
+  };
+
+  const handleDeleteDriversLicense = async (doc: SignableDocument) => {
+    if (!window.confirm("Permanently delete this Driver's License request?")) return;
+    setDriversLicenseActionBusyId(doc.id);
+    setDriversLicenseActionError(null);
+    try {
+      await deleteSignableDocument(doc.id);
+      await loadSentDriversLicenseForms();
+    } catch (err) {
+      setDriversLicenseActionError(err instanceof Error ? err.message : "Failed to delete.");
+    } finally {
+      setDriversLicenseActionBusyId(null);
+    }
+  };
+
+  const [sentValidIdForms, setSentValidIdForms] = useState<SignableDocument[]>([]);
+  const loadSentValidIdForms = async () => {
+    try {
+      setSentValidIdForms(await getSignableDocuments("valid_id_form"));
+    } catch (err) {
+      console.error("Failed to load sent Valid ID forms:", err);
+    }
+  };
+  useEffect(() => {
+    if (activeTab === "validId" || activeTab === "jotformDocuments" || activeTab === "combineForms") void loadSentValidIdForms();
+  }, [activeTab]);
+
+  const [validIdRecipientId, setValidIdRecipientId] = useState("");
+  const [validIdRecipientSearch, setValidIdRecipientSearch] = useState("");
+  const [validIdRecipientDropdownOpen, setValidIdRecipientDropdownOpen] = useState(false);
+  const [validIdSending, setValidIdSending] = useState(false);
+  const [validIdSendError, setValidIdSendError] = useState<string | null>(null);
+  const [validIdActionBusyId, setValidIdActionBusyId] = useState<string | null>(null);
+  const [validIdActionError, setValidIdActionError] = useState<string | null>(null);
+  const [validIdExternalName, setValidIdExternalName] = useState("");
+  const [validIdSentLink, setValidIdSentLink] = useState<{ link: string; recipientName: string } | null>(null);
+  const [validIdSentLinkCopied, setValidIdSentLinkCopied] = useState(false);
+  const filteredValidIdRecipients = useMemo(
+    () => employees.filter((e) => e.status === "active" && e.name.toLowerCase().includes(validIdRecipientSearch.toLowerCase())),
+    [employees, validIdRecipientSearch]
+  );
+
+  const handleSendValidId = async () => {
+    if (!validIdRecipientId || !uid) return;
+    setValidIdSending(true);
+    setValidIdSendError(null);
+    try {
+      const recipient = employees.find((e) => e.id === validIdRecipientId);
+      if (!recipient) throw new Error("Select a recipient first.");
+
+      const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["valid_id_form"]);
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Valid ID request on file. Send another one anyway?`)) {
+        return;
+      }
+
+      const doc = await createSignableDocument({
+        documentType: "valid_id_form",
+        formData: { employeeId: recipient.id, employeeName: recipient.name } as unknown as Record<string, any>,
+        recipientId: validIdRecipientId,
+        recipientSlot: "employee",
+        pdfUrl: "",
+      });
+
+      const myProfileId = await getMyProfileId(uid);
+      if (!myProfileId) throw new Error("Could not resolve your profile.");
+      const thread = await getOrCreateDmThread(myProfileId, validIdRecipientId);
+      const fillLink = `${getAppUrl()}/fill-valid-id/${doc.id}`;
+      await sendMessage({
+        dmThreadId: thread.id,
+        senderId: myProfileId,
+        senderName: displayName || "HR",
+        body: `📋 Please submit your Valid ID (passport or license): ${fillLink}`,
+      });
+
+      void logActivity({ action: "valid_id_sent", targetType: "employee", targetId: recipient.id, targetLabel: recipient.name });
+
+      setValidIdRecipientId("");
+      setValidIdRecipientSearch("");
+      await loadSentValidIdForms();
+    } catch (err) {
+      setValidIdSendError(err instanceof Error ? err.message : "Failed to send request.");
+    } finally {
+      setValidIdSending(false);
+    }
+  };
+
+  const handleGenerateExternalValidId = async () => {
+    setValidIdSending(true);
+    setValidIdSendError(null);
+    try {
+      const name = validIdExternalName.trim() || "External Recipient";
+      const doc = await createSignableDocument({
+        documentType: "valid_id_form",
+        formData: { employeeId: "", employeeName: name } as unknown as Record<string, any>,
+        recipientName: name,
+        recipientSlot: "employee",
+        pdfUrl: "",
+      });
+
+      void logActivity({ action: "valid_id_sent", targetType: "employee", targetLabel: name, details: { external: true } });
+
+      setValidIdSentLink({ link: `${getAppUrl()}/fill-valid-id-external/${doc.id}`, recipientName: name });
+      setValidIdExternalName("");
+      await loadSentValidIdForms();
+    } catch (err) {
+      setValidIdSendError(err instanceof Error ? err.message : "Failed to generate link.");
+    } finally {
+      setValidIdSending(false);
+    }
+  };
+
+  const handleCopyValidIdSentLink = async () => {
+    if (!validIdSentLink) return;
+    try {
+      await navigator.clipboard.writeText(validIdSentLink.link);
+      setValidIdSentLinkCopied(true);
+      setTimeout(() => setValidIdSentLinkCopied(false), 1500);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  const handleCopyValidIdLink = async (doc: SignableDocument) => {
+    try {
+      const path = doc.recipientId ? "fill-valid-id" : "fill-valid-id-external";
+      await navigator.clipboard.writeText(`${getAppUrl()}/${path}/${doc.id}`);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+    }
+  };
+
+  const handleDownloadValidIdPdf = async (doc: SignableDocument) => {
+    if (!doc.pdfUrl) return;
+    const name = (doc.formData as Partial<ValidIdFormData>).employeeName || doc.recipientName || "valid-id";
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Valid ID - ${name}.pdf`);
+  };
+
+  /** Re-renders this document's PDF from its already-stored data/signatures — see regenerateSignableDocumentPdf.ts's header comment (built for the date-rollback fmtDate fix, which only affects documents generated after the fix). */
+  const handleRegenerateValidIdPdf = async (doc: SignableDocument) => {
+    const name = (doc.formData as Partial<ValidIdFormData>).employeeName || doc.recipientName || "valid-id";
+    setValidIdActionBusyId(doc.id);
+    setValidIdActionError(null);
+    try {
+      const logo = await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png"));
+      await regenerateSimpleSignableDocumentPdf(doc, logo, buildValidIdFormBodyMarkup, validIdFormStyles, uploadValidIdForm, name);
+      await loadSentValidIdForms();
+    } catch (err) {
+      setValidIdActionError(err instanceof Error ? err.message : "Failed to regenerate PDF.");
+    } finally {
+      setValidIdActionBusyId(null);
+    }
+  };
+
+  const handleDeleteValidId = async (doc: SignableDocument) => {
+    if (!window.confirm("Permanently delete this Valid ID request?")) return;
+    setValidIdActionBusyId(doc.id);
+    setValidIdActionError(null);
+    try {
+      await deleteSignableDocument(doc.id);
+      await loadSentValidIdForms();
+    } catch (err) {
+      setValidIdActionError(err instanceof Error ? err.message : "Failed to delete.");
+    } finally {
+      setValidIdActionBusyId(null);
+    }
+  };
+
   // ── Non-Disclosure Agreement (General tab) — same shape as Employee
   // Confidentiality above: single recipient, the recipient fills in
   // everything themselves (name, nationality, address, branch) on
@@ -7067,6 +7740,27 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     if (!doc.pdfUrl) return;
     const name = (doc.formData as { employeeName?: string }).employeeName || doc.recipientName || "nda-form";
     await downloadSignableDocumentPdf(doc.pdfUrl, `Non-Disclosure Agreement - ${name}.pdf`);
+  };
+
+  /** Re-renders this document's PDF from its already-stored data/signatures — same idea as regenerateSignableDocumentPdf.ts's helpers, just inlined since NDA is multi-page (buildNdaFormPages/captureHtmlPagesToPdfBlob) rather than the single-page shape those helpers assume. */
+  const handleRegenerateNdaPdf = async (doc: SignableDocument) => {
+    const name = (doc.formData as { employeeName?: string }).employeeName || doc.recipientName || "nda-form";
+    setNdaActionBusyId(doc.id);
+    setNdaActionError(null);
+    try {
+      const logo = ndaLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      if (!ndaLogoDataUrl) setNdaLogoDataUrl(logo);
+      const resolved = await resolveSignaturesForCapture(doc.signatures, "__regenerate__", "");
+      const pages = buildNdaFormPages(doc.formData as NdaFormData, logo, resolved.employee);
+      const pdfBlob = await captureHtmlPagesToPdfBlob(pages, ndaFormStyles);
+      const pdfUrl = await uploadNdaForm(doc.companyId, name, pdfBlob);
+      await updateSignableDocumentPdfUrl(doc.id, pdfUrl);
+      await loadSentNdaForms();
+    } catch (err) {
+      setNdaActionError(err instanceof Error ? err.message : "Failed to regenerate PDF.");
+    } finally {
+      setNdaActionBusyId(null);
+    }
   };
 
   const handleDeleteNda = async (doc: SignableDocument) => {
@@ -9306,11 +10000,6 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     otherPhoneNumber: "",
     startDate: "",
     birthDate: "",
-    ssn: "",
-    ssnCardUrls: [],
-    driversLicenseNumber: "",
-    driversLicenseState: "",
-    driversLicenseUrls: [],
     email: "",
     maritalStatus: "",
     spouseName: "",
@@ -9442,6 +10131,23 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     await downloadSignableDocumentPdf(doc.pdfUrl, `Employee Data - ${name}.pdf`);
   };
 
+  /** Re-renders this document's PDF from its already-stored data/signatures — see regenerateSignableDocumentPdf.ts's header comment (built for the date-rollback fmtDate fix, which only affects documents generated after the fix). */
+  const handleRegenerateContractorDataPdf = async (doc: SignableDocument) => {
+    const name = (doc.formData as Partial<ContractorDataFormData>).employeeName || doc.recipientName || "employee-data";
+    setContractorDataActionBusyId(doc.id);
+    setContractorDataActionError(null);
+    try {
+      const logo = contractorDataLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      if (!contractorDataLogoDataUrl) setContractorDataLogoDataUrl(logo);
+      await regenerateSimpleSignableDocumentPdf(doc, logo, buildContractorDataBodyMarkup, contractorDataStyles, uploadContractorDataForm, name);
+      await loadSentContractorDataForms();
+    } catch (err) {
+      setContractorDataActionError(err instanceof Error ? err.message : "Failed to regenerate PDF.");
+    } finally {
+      setContractorDataActionBusyId(null);
+    }
+  };
+
   const handleDeleteContractorData = async (doc: SignableDocument) => {
     if (!window.confirm("Permanently delete this Employee Data request?")) return;
     setContractorDataActionBusyId(doc.id);
@@ -9514,11 +10220,6 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     otherPhoneNumber: "",
     startDate: "",
     birthDate: "",
-    ssn: "",
-    ssnCardUrls: [],
-    driversLicenseNumber: "",
-    driversLicenseState: "",
-    driversLicenseUrls: [],
     email: "",
     maritalStatus: "",
     spouseName: "",
@@ -9648,6 +10349,23 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<ContractorDataUsFormData>).employeeName || doc.recipientName || "contractor-data-us";
     await downloadSignableDocumentPdf(doc.pdfUrl, `Contractor Data (US) - ${name}.pdf`);
+  };
+
+  /** Re-renders this document's PDF from its already-stored data/signatures — see regenerateSignableDocumentPdf.ts's header comment (built for the date-rollback fmtDate fix, which only affects documents generated after the fix). */
+  const handleRegenerateContractorDataUsPdf = async (doc: SignableDocument) => {
+    const name = (doc.formData as Partial<ContractorDataUsFormData>).employeeName || doc.recipientName || "contractor-data-us";
+    setContractorDataUsActionBusyId(doc.id);
+    setContractorDataUsActionError(null);
+    try {
+      const logo = contractorDataUsLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      if (!contractorDataUsLogoDataUrl) setContractorDataUsLogoDataUrl(logo);
+      await regenerateSimpleSignableDocumentPdf(doc, logo, buildContractorDataUsBodyMarkup, contractorDataUsStyles, uploadContractorDataForm, name);
+      await loadSentContractorDataUsForms();
+    } catch (err) {
+      setContractorDataUsActionError(err instanceof Error ? err.message : "Failed to regenerate PDF.");
+    } finally {
+      setContractorDataUsActionBusyId(null);
+    }
   };
 
   const handleDeleteContractorDataUs = async (doc: SignableDocument) => {
@@ -9832,6 +10550,23 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<VehicleUseAgreementFormData>).employeeName || doc.recipientName || "vehicle-use-agreement";
     await downloadSignableDocumentPdf(doc.pdfUrl, `Vehicle Use Agreement - ${name}.pdf`);
+  };
+
+  /** Re-renders this document's PDF from its already-stored data/signatures — see regenerateSignableDocumentPdf.ts's header comment (built for the date-rollback fmtDate fix, which only affects documents generated after the fix). */
+  const handleRegenerateVehicleUseAgreementPdf = async (doc: SignableDocument) => {
+    const name = (doc.formData as Partial<VehicleUseAgreementFormData>).employeeName || doc.recipientName || "vehicle-use-agreement";
+    setVehicleUseAgreementActionBusyId(doc.id);
+    setVehicleUseAgreementActionError(null);
+    try {
+      const logo = vehicleUseAgreementLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      if (!vehicleUseAgreementLogoDataUrl) setVehicleUseAgreementLogoDataUrl(logo);
+      await regenerateSimpleSignableDocumentPdf(doc, logo, buildVehicleUseAgreementBodyMarkup, vehicleUseAgreementStyles, uploadVehicleUseAgreementForm, name);
+      await loadSentVehicleUseAgreementForms();
+    } catch (err) {
+      setVehicleUseAgreementActionError(err instanceof Error ? err.message : "Failed to regenerate PDF.");
+    } finally {
+      setVehicleUseAgreementActionBusyId(null);
+    }
   };
 
   const handleDeleteVehicleUseAgreement = async (doc: SignableDocument) => {
@@ -10029,6 +10764,23 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<DirectDepositFormData>).employeeName || doc.recipientName || "direct-deposit";
     await downloadSignableDocumentPdf(doc.pdfUrl, `Direct Deposit Authorization - ${name}.pdf`);
+  };
+
+  /** Re-renders this document's PDF from its already-stored data/signatures — see regenerateSignableDocumentPdf.ts's header comment (built for the date-rollback fmtDate fix, which only affects documents generated after the fix). */
+  const handleRegenerateDirectDepositPdf = async (doc: SignableDocument) => {
+    const name = (doc.formData as Partial<DirectDepositFormData>).employeeName || doc.recipientName || "direct-deposit";
+    setDirectDepositActionBusyId(doc.id);
+    setDirectDepositActionError(null);
+    try {
+      const logo = directDepositLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
+      if (!directDepositLogoDataUrl) setDirectDepositLogoDataUrl(logo);
+      await regenerateSimpleSignableDocumentPdf(doc, logo, buildDirectDepositBodyMarkup, directDepositStyles, uploadDirectDepositForm, name);
+      await loadSentDirectDepositForms();
+    } catch (err) {
+      setDirectDepositActionError(err instanceof Error ? err.message : "Failed to regenerate PDF.");
+    } finally {
+      setDirectDepositActionBusyId(null);
+    }
   };
 
   const handleDeleteDirectDeposit = async (doc: SignableDocument) => {
@@ -12915,7 +13667,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       // The candidate row is saved at this point — close the form and
       // refresh the list regardless of what happens next, so a CV upload
       // failure doesn't strand the UI on a stale, still-open form.
-      setNewCandidate({ name: "", phone: "", email: "", position: "", branch: "", department: "", branchManagerId: "", assignedInterviewerId: "", source: "", sourceOther: "" });
+      setNewCandidate({ name: "", phone: "", email: "", position: "", branch: "", department: "", branchManagerId: "", assignedInterviewerId: "", jobPostingId: "", source: "", sourceOther: "" });
       setCvFile(null);
       setShowAddCandidate(false);
       await loadCandidates();
@@ -13851,12 +14603,14 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     if (activeTab !== "newOnboardingDocuments" || newOnboardingEmployees.length === 0) return;
     let cancelled = false;
     const employeeIds = newOnboardingEmployees.map((e) => e.id);
-    const mappedTypes = Array.from(new Set(Object.values(ONBOARDING_COLUMN_TO_DOCUMENT_TYPE)));
+    const mappedTypes = Array.from(new Set(Object.values(ONBOARDING_COLUMN_TO_DOCUMENT_TYPE).flat()));
     const labelsByType = new Map<SignableDocumentType, string[]>();
-    for (const [label, type] of Object.entries(ONBOARDING_COLUMN_TO_DOCUMENT_TYPE)) {
-      const arr = labelsByType.get(type) ?? [];
-      arr.push(label);
-      labelsByType.set(type, arr);
+    for (const [label, typeOrTypes] of Object.entries(ONBOARDING_COLUMN_TO_DOCUMENT_TYPE)) {
+      for (const type of Array.isArray(typeOrTypes) ? typeOrTypes : [typeOrTypes]) {
+        const arr = labelsByType.get(type) ?? [];
+        arr.push(label);
+        labelsByType.set(type, arr);
+      }
     }
     Promise.all([
       getOnboardingDocumentCategoriesByProfileIds(employeeIds),
@@ -13964,12 +14718,14 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     if (activeTab !== "onboarding" || onboardingEmployees.length === 0) return;
     let cancelled = false;
     const employeeIds = onboardingEmployees.map((e) => e.id);
-    const mappedTypes = Array.from(new Set(Object.values(ONBOARDING_COLUMN_TO_DOCUMENT_TYPE)));
+    const mappedTypes = Array.from(new Set(Object.values(ONBOARDING_COLUMN_TO_DOCUMENT_TYPE).flat()));
     const labelsByType = new Map<SignableDocumentType, string[]>();
-    for (const [label, type] of Object.entries(ONBOARDING_COLUMN_TO_DOCUMENT_TYPE)) {
-      const arr = labelsByType.get(type) ?? [];
-      arr.push(label);
-      labelsByType.set(type, arr);
+    for (const [label, typeOrTypes] of Object.entries(ONBOARDING_COLUMN_TO_DOCUMENT_TYPE)) {
+      for (const type of Array.isArray(typeOrTypes) ? typeOrTypes : [typeOrTypes]) {
+        const arr = labelsByType.get(type) ?? [];
+        arr.push(label);
+        labelsByType.set(type, arr);
+      }
     }
     Promise.all([
       getOnboardingDocumentCategoriesByProfileIds(employeeIds),
@@ -14464,7 +15220,12 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [employees, leadersDeptByName]);
 
-  const masterListFiltered = useMemo(() => {
+  // Dept-tab + search only — the shared base every per-column funnel filter's
+  // own option list is built from (each one excludes just ITS OWN filter, so
+  // opening e.g. Department still lists every department present among rows
+  // that already pass every OTHER active filter — same Excel-autofilter UX
+  // as TicketList.tsx's buildOptionsExcluding).
+  const masterListDeptSearchFiltered = useMemo(() => {
     let result = employees;
     if (masterListDept === MASTER_LIST_TRAINEE_TAB) {
       result = result.filter((e) => e.employmentType === "trainee");
@@ -14480,9 +15241,101 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
         (ROLE_LABELS[normalizeRole(e.position)] ?? e.position ?? "").toLowerCase().includes(q),
       );
     }
-    return [...result].sort((a, b) => positionRank(b) - positionRank(a) || a.name.localeCompare(b.name));
+    return result;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [employees, masterListDept, masterListSearch, leadersDeptByName, leadersTierByName]);
+
+  // Master List's per-column funnel filters (Status/Start Date/Name/Phone/
+  // Address/Department/Position/Hours of Work/Total Work Hours/Meal Time/
+  // Sick Leave/Vacation Leave/Tier Level/Employment Status/Warnings) — same
+  // TicketColumnFilter component and pattern TicketList.tsx already
+  // established for its own column filters.
+  const MASTER_LIST_COLUMN_FILTER_KEYS = [
+    "status", "startDate", "name", "phone", "address", "department", "position",
+    "hoursOfWork", "totalWorkHours", "mealTime", "sickLeave", "vacationLeave",
+    "tierLevel", "employmentStatus", "warnings",
+  ] as const;
+  type MasterListColumnFilterKey = (typeof MASTER_LIST_COLUMN_FILTER_KEYS)[number];
+
+  // Reads each filterable column's DISPLAYED value off an Employee row —
+  // Sick/Vacation Leave and Warnings come from the same derived maps
+  // (remainingSickByProfile/remainingPtoByProfile/approvedWarningCountByProfile)
+  // the table rows themselves already read, so the filter never disagrees
+  // with what's actually shown.
+  const masterListColumnValueGetters: Record<MasterListColumnFilterKey, (e: Employee) => string> = {
+    status: (e) => (e.status ? e.status.charAt(0).toUpperCase() + e.status.slice(1) : ""),
+    startDate: (e) => e.startDate || "",
+    name: (e) => e.name || "",
+    phone: (e) => e.phone || "",
+    address: (e) => e.address || "",
+    department: (e) => resolveMasterListDepartment(e) || "",
+    position: (e) => resolveMasterListPosition(e) || "",
+    hoursOfWork: (e) => (e.requiredCheckIn && e.requiredCheckOut ? `${e.requiredCheckIn.slice(0, 5)}–${e.requiredCheckOut.slice(0, 5)} ${e.scheduleTimezone}` : ""),
+    totalWorkHours: (e) => (e.workingHours != null ? String(e.workingHours) : ""),
+    mealTime: (e) => (e.mealMinutes != null ? String(e.mealMinutes) : ""),
+    sickLeave: (e) => {
+      const s = remainingSickByProfile.get(e.id);
+      return s ? `${s.remaining}/${s.allowance}` : "";
+    },
+    vacationLeave: (e) => {
+      const p = remainingPtoByProfile.get(e.id);
+      return p ? `${p.remaining}/${p.allowance}` : "";
+    },
+    tierLevel: (e) => e.tierLevel || "",
+    employmentStatus: (e) => (e.employmentType === "trainee" ? "Trainee" : "Regular"),
+    warnings: (e) => String(approvedWarningCountByProfile.get(e.id) ?? 0),
+  };
+
+  const [masterListColFilters, setMasterListColFilters] = useState<Record<MasterListColumnFilterKey, Set<string>>>(() => {
+    const init = {} as Record<MasterListColumnFilterKey, Set<string>>;
+    for (const k of MASTER_LIST_COLUMN_FILTER_KEYS) init[k] = new Set<string>();
+    return init;
+  });
+  const updateMasterListColFilter = (key: MasterListColumnFilterKey, next: Set<string>) => {
+    setMasterListColFilters((prev) => ({ ...prev, [key]: next }));
+  };
+
+  const masterListFiltered = useMemo(() => {
+    const result = masterListDeptSearchFiltered.filter((e) =>
+      MASTER_LIST_COLUMN_FILTER_KEYS.every((key) => {
+        const sel = masterListColFilters[key];
+        if (!sel || sel.size === 0) return true;
+        return sel.has(masterListColumnValueGetters[key](e));
+      }),
+    );
+    return [...result].sort((a, b) => positionRank(b) - positionRank(a) || a.name.localeCompare(b.name));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [masterListDeptSearchFiltered, masterListColFilters]);
+
+  const buildMasterListOptionsExcluding = (excludeKey: MasterListColumnFilterKey): string[] => {
+    const values = new Set<string>();
+    for (const e of masterListDeptSearchFiltered) {
+      const matchesOtherCols = MASTER_LIST_COLUMN_FILTER_KEYS.every((key) => {
+        if (key === excludeKey) return true;
+        const sel = masterListColFilters[key];
+        if (!sel || sel.size === 0) return true;
+        return sel.has(masterListColumnValueGetters[key](e));
+      });
+      if (matchesOtherCols) values.add(masterListColumnValueGetters[excludeKey](e));
+    }
+    return Array.from(values);
+  };
+
+  const masterListColumnOptions = useMemo(() => {
+    const out = {} as Record<MasterListColumnFilterKey, string[]>;
+    for (const key of MASTER_LIST_COLUMN_FILTER_KEYS) out[key] = buildMasterListOptionsExcluding(key);
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [masterListDeptSearchFiltered, masterListColFilters]);
+
+  const renderMasterListColFilter = (key: MasterListColumnFilterKey, label: string) => (
+    <TicketColumnFilter
+      options={masterListColumnOptions[key] || []}
+      selected={masterListColFilters[key] || new Set()}
+      onChange={(next) => updateMasterListColFilter(key, next)}
+      label={`Filter by ${label}`}
+    />
+  );
 
   // ── Leaders — a hand-maintained, drag-to-reorder roster (migration 0153),
   // NOT derived from profiles.role — several of these titles ("Assistant
@@ -14793,6 +15646,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     { key: "vehicleAgreement", label: "Company Vehicle Use Agreement", count: 0, icon: FileCheck },
     { key: "damage", label: "Damage Agreement", count: sentDamageAwaitingEmployerCount, icon: FileCheck },
     { key: "directDeposit", label: "Direct Deposit Authorization", count: 0, icon: FileCheck },
+    { key: "driversLicense", label: "Driver's License", count: 0, icon: FileCheck },
     { key: "employeeConfidentiality", label: "Employee Confidentiality Agreement", count: 0, icon: FileCheck },
     { key: "contractorData", label: "Employee Data", count: 0, icon: FileCheck },
     { key: "flashTechnicianTravel", label: "Flash Technician Travel & Out-of-State Policy", count: sentFlashTechnicianTravelAwaitingEmployerCount, icon: FileCheck },
@@ -14801,6 +15655,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     { key: "mileageFuel", label: "Mileage & Fuel Policy", count: sentMileageFuelAwaitingEmployerCount, icon: FileCheck },
     { key: "partsResponsibility", label: "Parts Responsibility and Technician Floor Protection Acknowledgment Form", count: sentPartsResponsibilityAwaitingManagerCount, icon: FileCheck },
     { key: "ptoAck", label: "PTO & Sick Leave Policy", count: 0, icon: FileCheck },
+    { key: "ssnCard", label: "SSN Card", count: 0, icon: FileCheck },
     { key: "substanceScreening", label: "Substance Screening & Conduct Agreement", count: 0, icon: FileCheck },
   ] as const;
 
@@ -14842,6 +15697,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     { key: "masterPhContractorAgreement", label: "Master PH Contractor Agreement", count: sentMasterPhContractorAgreementAwaitingEmployerCount, icon: FileCheck },
     { key: "newW8ben", label: "Form W-8BEN", count: 0, icon: Landmark },
     { key: "newDirectDeposit", label: "Direct Deposit Authorization", count: 0, icon: FileCheck },
+    { key: "validId", label: "Valid ID", count: 0, icon: FileCheck },
   ] as const;
 
   // "New Automation Forms"'s management-tier column — Branch Manager/Senior
@@ -14949,6 +15805,14 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
           { key: "employeeRequestManager", label: "Employee Request Manager", count: requestManagerPendingCount, icon: ClipboardList },
           { key: "hiring", label: "Hiring", count: visibleCandidates.length, icon: Users },
           { key: "warnings", label: "Warnings & Mistakes", count: isHrOrAdmin ? pendingNotes.length : 0, icon: AlertTriangle },
+        ] as const,
+        columns: undefined,
+      },
+      {
+        group: "Recruitment Site",
+        icon: Briefcase,
+        tabs: [
+          { key: "recruitmentSite", label: "Recruitment Site", count: jobPostings.length, icon: Briefcase },
         ] as const,
         columns: undefined,
       },
@@ -15575,6 +16439,15 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
               </select>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+              <select value={newCandidate.jobPostingId} onChange={(e) => setNewCandidate({ ...newCandidate, jobPostingId: e.target.value })} className="glass-input text-sm py-1.5 px-3 rounded-md" title="Link this candidate to a Recruitment Site job posting (optional)">
+                <option value="">Select Job Posting (optional)</option>
+                <optgroup label="Zip Recruiter">
+                  {jobPostings.filter((p) => p.platform === "zip_recruiter").map((p) => <option key={p.id} value={p.id}>{p.jobTitle} — Zip Recruiter</option>)}
+                </optgroup>
+                <optgroup label="Indeed">
+                  {jobPostings.filter((p) => p.platform === "indeed").map((p) => <option key={p.id} value={p.id}>{p.jobTitle} — Indeed</option>)}
+                </optgroup>
+              </select>
               <select value={newCandidate.source} onChange={(e) => setNewCandidate({ ...newCandidate, source: e.target.value })} className="glass-input text-sm py-1.5 px-3 rounded-md">
                 <option value="">Where was this applicant found?</option>
                 {CANDIDATE_SOURCE_OPTIONS.map((s) => <option key={s} value={s}>{s === "Other" ? "Other, please specify" : s}</option>)}
@@ -16398,6 +17271,289 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       </div>
       )}
 
+      {/* ── Recruitment Site: manually-kept mirror of real ZipRecruiter/Indeed job postings ── */}
+      {activeTab === "recruitmentSite" && (
+      <div className="panel p-0 overflow-hidden mb-4">
+        <div className="px-4 py-4 border-b border-white/10 flex flex-wrap justify-between items-center gap-3">
+          <div>
+            <h2 className="font-semibold text-sm">Recruitment Site</h2>
+            <p className="text-[10px] text-muted-foreground mt-0.5">Mirrors what's live on your real ZipRecruiter/Indeed job postings, plus a Branch tab for tracking internal open-for-posting needs — type it in here so HR doesn't have to jump between sites.</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="flex rounded-md overflow-hidden border border-white/15 text-xs">
+              <button type="button" onClick={() => setRecruitmentPlatform("zip_recruiter")} className={`px-3 py-1.5 ${recruitmentPlatform === "zip_recruiter" ? "bg-blue-600 text-white" : "bg-transparent text-muted-foreground hover:text-foreground"}`}>Zip Recruiter</button>
+              <button type="button" onClick={() => setRecruitmentPlatform("indeed")} className={`px-3 py-1.5 border-l border-white/15 ${recruitmentPlatform === "indeed" ? "bg-blue-600 text-white" : "bg-transparent text-muted-foreground hover:text-foreground"}`}>Indeed</button>
+              <button type="button" onClick={() => setRecruitmentPlatform("branch")} className={`px-3 py-1.5 border-l border-white/15 ${recruitmentPlatform === "branch" ? "bg-blue-600 text-white" : "bg-transparent text-muted-foreground hover:text-foreground"}`} title="Track a branch that's open for posting, not tied to an external site">Branch</button>
+            </div>
+            {recruitmentPlatform !== "branch" && (
+              <button onClick={() => void handleAddJobPosting()} className="btn text-sm px-3 py-1.5 flex items-center gap-2">
+                <Plus className="h-4 w-4" /> Add Job Posting
+              </button>
+            )}
+          </div>
+        </div>
+        {recruitmentPlatform === "branch" ? (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-white/10 bg-white/5">
+                <th className="px-3 py-2 text-left text-xs text-muted-foreground uppercase">Branch</th>
+                <th className="px-3 py-2 text-left text-xs text-muted-foreground uppercase">Posting Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {branchStatusLoading ? (
+                <tr><td colSpan={2} className="px-4 py-8 text-center text-muted-foreground text-sm">Loading…</td></tr>
+              ) : (
+                branchOptions.map((branch) => {
+                  const isOpen = branchPostingStatus.get(branch) ?? true;
+                  return (
+                    <tr key={branch} className="border-b border-white/5 hover:bg-white/5">
+                      <td className="px-3 py-2 font-medium">{branch}</td>
+                      <td className="px-3 py-2">
+                        <button
+                          type="button"
+                          onClick={() => void handleToggleBranchOpen(branch, isOpen)}
+                          className={`text-xs font-semibold px-2.5 py-1 rounded-full border transition ${
+                            isOpen
+                              ? "bg-green-500/20 text-green-300 border-green-500/40 hover:bg-green-500/30"
+                              : "bg-red-500/20 text-red-300 border-red-500/40 hover:bg-red-500/30"
+                          }`}
+                          title="Click to toggle"
+                        >
+                          {isOpen ? "Open for Posting" : "Closed"}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+        ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-white/10 bg-white/5">
+                <th className="px-3 py-2 text-left text-xs text-muted-foreground uppercase" />
+                <th className="px-3 py-2 text-left text-xs text-muted-foreground uppercase">Job Title</th>
+                <th className="px-3 py-2 text-left text-xs text-muted-foreground uppercase">Candidates</th>
+                <th className="px-3 py-2 text-left text-xs text-muted-foreground uppercase">Sponsored Job Plan</th>
+                <th className="px-3 py-2 text-left text-xs text-muted-foreground uppercase">Date Posted</th>
+                <th className="px-3 py-2 text-left text-xs text-muted-foreground uppercase">Assignee</th>
+                <th className="px-3 py-2 text-left text-xs text-muted-foreground uppercase">Job Status</th>
+                <th className="px-3 py-2 text-left text-xs text-muted-foreground uppercase" />
+              </tr>
+            </thead>
+            <tbody>
+              {jobPostingsLoading ? (
+                <tr><td colSpan={8} className="px-4 py-8 text-center text-muted-foreground text-sm">Loading…</td></tr>
+              ) : jobPostings.filter((p) => p.platform === recruitmentPlatform).length === 0 ? (
+                <tr><td colSpan={8} className="px-4 py-8 text-center text-muted-foreground text-sm">No {JOB_POSTING_PLATFORM_LABEL[recruitmentPlatform]} job postings yet.</td></tr>
+              ) : (
+                jobPostings.filter((p) => p.platform === recruitmentPlatform).map((posting) => {
+                  const assignee = hrPersonnelOptions.find((m) => m.id === posting.assigneeId) || employees.find((e) => e.id === posting.assigneeId);
+                  return (
+                    <tr key={posting.id} className="border-b border-white/5 hover:bg-white/5 align-top">
+                      <td className="px-3 py-2">
+                        <button type="button" onClick={() => void handleUpdateJobPostingField(posting.id, { starred: !posting.starred })} title={posting.starred ? "Unstar" : "Star"}>
+                          <Star className={`h-4 w-4 ${posting.starred ? "fill-yellow-400 text-yellow-400" : "text-muted-foreground"}`} />
+                        </button>
+                      </td>
+                      <td className="px-3 py-2 min-w-[180px]">
+                        <input
+                          type="text"
+                          defaultValue={posting.jobTitle}
+                          onBlur={(e) => { if (e.target.value !== posting.jobTitle) void handleUpdateJobPostingField(posting.id, { jobTitle: e.target.value }); }}
+                          className="glass-input text-sm py-1 px-2 rounded-md w-full font-medium mb-1"
+                        />
+                        <select
+                          value={posting.location}
+                          onChange={(e) => void handleUpdateJobPostingField(posting.id, { location: e.target.value })}
+                          className="glass-input text-xs py-1 px-2 rounded-md w-full text-muted-foreground"
+                        >
+                          <option value="">Select Location</option>
+                          {posting.location && !branchOptions.includes(posting.location) && (
+                            <option value={posting.location}>{posting.location}</option>
+                          )}
+                          {branchOptions.map((b) => (
+                            <option key={b} value={b}>{b} — {(branchPostingStatus.get(b) ?? true) ? "Open" : "Closed"}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="px-3 py-2 min-w-[100px]">
+                        {(() => {
+                          // Real counts, not typed in — every candidate
+                          // linked to this posting via Add Candidate's own
+                          // "Job Posting" dropdown (migration 0296). "New" =
+                          // added within the last 3 days (by createdAt), not
+                          // a status — a candidate can be "New" regardless
+                          // of what's happened to them since. Each count is
+                          // clickable — opens the real candidate list for
+                          // that bucket, not just the number.
+                          const linked = candidates.filter((c) => c.jobPostingId === posting.id);
+                          const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
+                          const allCount = linked.length;
+                          const newCount = linked.filter((c) => new Date(c.createdAt).getTime() >= threeDaysAgo).length;
+                          const cvCount = linked.filter((c) => c.cvPath).length;
+                          const stat = (bucket: "all" | "new" | "cvs", Icon: typeof Users, count: number, label: string, color: string, title: string) => (
+                            <button
+                              type="button"
+                              onClick={() => setPostingCandidatesModal({ posting, bucket })}
+                              className="flex items-center gap-1.5 hover:underline underline-offset-2"
+                              title={title}
+                            >
+                              <Icon className={`h-3.5 w-3.5 shrink-0 ${color}`} />
+                              <span className="text-xs font-semibold">{count}</span>
+                              <span className={`text-[10px] ${color}`}>{label}</span>
+                            </button>
+                          );
+                          return (
+                            <div className="flex flex-col gap-1">
+                              {stat("all", Users, allCount, "All", "text-muted-foreground", `${allCount} candidate${allCount === 1 ? "" : "s"} linked to this posting — click to view`)}
+                              {stat("new", UserPlus, newCount, "New", "text-blue-300", `${newCount} added in the last 3 days — click to view`)}
+                              {stat("cvs", Paperclip, cvCount, "CVs", "text-emerald-300", `${cvCount} with a CV on file — click to view`)}
+                            </div>
+                          );
+                        })()}
+                      </td>
+                      <td className="px-3 py-2 min-w-[150px]">
+                        <input
+                          type="text"
+                          defaultValue={posting.sponsoredPlan}
+                          placeholder="Standard"
+                          onBlur={(e) => { if (e.target.value !== posting.sponsoredPlan) void handleUpdateJobPostingField(posting.id, { sponsoredPlan: e.target.value }); }}
+                          className="glass-input text-xs py-1 px-2 rounded-md w-full mb-1"
+                        />
+                        <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                          $
+                          <input
+                            type="number"
+                            min={0}
+                            step={0.01}
+                            defaultValue={posting.costDaily ?? ""}
+                            placeholder="0.00"
+                            onBlur={(e) => { const v = e.target.value === "" ? null : Number(e.target.value); if (v !== posting.costDaily) void handleUpdateJobPostingField(posting.id, { costDaily: v }); }}
+                            className="glass-input text-[10px] py-0.5 px-1 rounded-md w-14"
+                            title="Daily cost"
+                          />
+                          /day · $
+                          <input
+                            type="number"
+                            min={0}
+                            step={0.01}
+                            defaultValue={posting.costTotal ?? ""}
+                            placeholder="0.00"
+                            onBlur={(e) => { const v = e.target.value === "" ? null : Number(e.target.value); if (v !== posting.costTotal) void handleUpdateJobPostingField(posting.id, { costTotal: v }); }}
+                            className="glass-input text-[10px] py-0.5 px-1 rounded-md w-14"
+                            title="Total cost"
+                          />
+                          total
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 min-w-[130px]">
+                        <input
+                          type="date"
+                          defaultValue={posting.datePosted || ""}
+                          onBlur={(e) => { if (e.target.value !== posting.datePosted) void handleUpdateJobPostingField(posting.id, { datePosted: e.target.value }); }}
+                          className="glass-input text-xs py-1 px-2 rounded-md"
+                        />
+                      </td>
+                      <td className="px-3 py-2 min-w-[150px]">
+                        <div className="flex items-center gap-2">
+                          {assignee && (
+                            <div className="h-6 w-6 rounded-full bg-blue-500/20 text-blue-300 flex items-center justify-center text-[10px] font-semibold shrink-0" title={assignee.name}>
+                              {assignee.name.charAt(0).toUpperCase()}
+                            </div>
+                          )}
+                          <select
+                            value={posting.assigneeId ?? ""}
+                            onChange={(e) => void handleUpdateJobPostingField(posting.id, { assigneeId: e.target.value || null })}
+                            className="glass-input text-xs py-1 px-1.5 rounded-md flex-1 min-w-0"
+                          >
+                            <option value="">Unassigned</option>
+                            {hrPersonnelOptions.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                          </select>
+                        </div>
+                      </td>
+                      <td className="px-3 py-2">
+                        <select
+                          value={posting.status}
+                          onChange={(e) => void handleUpdateJobPostingField(posting.id, { status: e.target.value as HrJobPostingStatus })}
+                          className={`text-xs font-semibold px-2 py-1 rounded border-0 ${JOB_POSTING_STATUS_COLOR[posting.status]}`}
+                        >
+                          {(["open", "paused", "closed"] as const).map((s) => (
+                            <option key={s} value={s}>{JOB_POSTING_STATUS_LABEL[s]}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="px-3 py-2">
+                        <button type="button" onClick={() => void handleDeleteJobPosting(posting.id)} className="text-red-400 hover:text-red-300 p-1" title="Remove this job posting">
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+        )}
+      </div>
+      )}
+
+      {/* ── Recruitment Site: All/New/CVs candidate list popup ── */}
+      {postingCandidatesModal && (() => {
+        const { posting, bucket } = postingCandidatesModal;
+        const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
+        const linked = candidates.filter((c) => c.jobPostingId === posting.id);
+        const rows =
+          bucket === "all" ? linked :
+          bucket === "new" ? linked.filter((c) => new Date(c.createdAt).getTime() >= threeDaysAgo) :
+          linked.filter((c) => c.cvPath);
+        const bucketLabel = bucket === "all" ? "All Candidates" : bucket === "new" ? "New (last 3 days)" : "With a CV";
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setPostingCandidatesModal(null)}>
+            <div className="w-full max-w-lg max-h-[80vh] overflow-y-auto rounded-xl border border-white/10 bg-slate-900 p-5" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-start justify-between gap-3 mb-1">
+                <div>
+                  <h3 className="text-sm font-semibold">{posting.jobTitle || "Job Posting"}</h3>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">{bucketLabel} — {rows.length}</p>
+                </div>
+                <button className="rounded-md border border-white/15 bg-slate-800/70 p-1.5 text-slate-300 hover:bg-slate-700" onClick={() => setPostingCandidatesModal(null)}>
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="mt-3 divide-y divide-white/5 rounded-lg border border-white/10">
+                {rows.length === 0 ? (
+                  <p className="px-3 py-6 text-center text-xs text-muted-foreground">No candidates in this group yet.</p>
+                ) : (
+                  rows.map((c) => (
+                    <div key={c.id} className="flex items-center justify-between gap-3 px-3 py-2">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium truncate">{c.name}</p>
+                        <p className="text-[10px] text-muted-foreground">{CANDIDATE_STATUS_LABEL[c.status]} · added {new Date(c.createdAt).toLocaleDateString()}</p>
+                      </div>
+                      {c.cvPath && (
+                        <button
+                          type="button"
+                          onClick={() => void handleViewCv(c.cvPath!)}
+                          className="shrink-0 inline-flex items-center gap-1 text-[10px] px-2 py-1 rounded-md border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20"
+                        >
+                          <Paperclip className="h-3 w-3" /> View CV
+                        </button>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ── Warnings & Mistakes tab: Pending Reviews, Approved log, department trend ── */}
       {activeTab === "warnings" && (
       <>
@@ -16740,22 +17896,22 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
             <thead>
               <tr className="border-b border-white/10 bg-white/5">
                 {showBranchColumn && <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase">Branch</th>}
-                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase">Status</th>
-                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase" title="Editable — writes the employee's hire date">Start Date</th>
-                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase">Name</th>
-                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase" title="Editable — writes profiles.phone_number">Phone</th>
-                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase">Address</th>
-                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase">Department</th>
-                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase">Position</th>
-                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase" title="Editable — writes profiles.required_check_in / required_check_out, the Required Schedule shown on the employee's own My Profile page">Hours of Work</th>
-                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase" title="Editable — writes profiles.working_hours, a plain total distinct from the Required Schedule range">Total Work Hours</th>
-                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase" title="Editable — writes profiles.meal_minutes, the other half of My Profile's Working Hours & Meal Time field">Meal Time</th>
-                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase" title="Sick Leave is its own allowance, separate from vacation — flat 5 days/year, available from day 1">Sick Leave</th>
-                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase" title="Remaining / Allowance">Vacation Leave</th>
-                {showTierColumn && <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase" title="Editable — writes profiles.tier_level, same field Staff List's own Tier Level tab uses">Tier Level</th>}
-                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase">Employment Status</th>
+                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase">Status{renderMasterListColFilter("status", "Status")}</th>
+                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase" title="Editable — writes the employee's hire date">Start Date{renderMasterListColFilter("startDate", "Start Date")}</th>
+                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase">Name{renderMasterListColFilter("name", "Name")}</th>
+                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase" title="Editable — writes profiles.phone_number">Phone{renderMasterListColFilter("phone", "Phone")}</th>
+                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase">Address{renderMasterListColFilter("address", "Address")}</th>
+                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase">Department{renderMasterListColFilter("department", "Department")}</th>
+                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase">Position{renderMasterListColFilter("position", "Position")}</th>
+                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase" title="Editable — writes profiles.required_check_in / required_check_out, the Required Schedule shown on the employee's own My Profile page">Hours of Work{renderMasterListColFilter("hoursOfWork", "Hours of Work")}</th>
+                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase" title="Editable — writes profiles.working_hours, a plain total distinct from the Required Schedule range">Total Work Hours{renderMasterListColFilter("totalWorkHours", "Total Work Hours")}</th>
+                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase" title="Editable — writes profiles.meal_minutes, the other half of My Profile's Working Hours & Meal Time field">Meal Time{renderMasterListColFilter("mealTime", "Meal Time")}</th>
+                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase" title="Sick Leave is its own allowance, separate from vacation — flat 5 days/year, available from day 1">Sick Leave{renderMasterListColFilter("sickLeave", "Sick Leave")}</th>
+                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase" title="Remaining / Allowance">Vacation Leave{renderMasterListColFilter("vacationLeave", "Vacation Leave")}</th>
+                {showTierColumn && <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase" title="Editable — writes profiles.tier_level, same field Staff List's own Tier Level tab uses">Tier Level{renderMasterListColFilter("tierLevel", "Tier Level")}</th>}
+                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase">Employment Status{renderMasterListColFilter("employmentStatus", "Employment Status")}</th>
                 {showAccessColumn && <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase" title="Lets a trainee use their real role's full access while still showing as Trainee above">Access</th>}
-                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase">Warnings</th>
+                <th className="px-2 py-1.5 text-left text-[10px] text-muted-foreground uppercase">Warnings{renderMasterListColFilter("warnings", "Warnings")}</th>
               </tr>
             </thead>
             <tbody>
@@ -22469,6 +23625,408 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       </>
       )}
 
+      {activeTab === "ssnCard" && (
+      <>
+      <div className="panel p-0 overflow-visible mt-4 relative z-20">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Send SSN Card Request</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Pick a teammate — they'll get a link to enter their SSN and upload a photo of their card. It comes back to you here automatically once submitted.</p>
+        </div>
+        <div className="p-4 flex flex-col gap-3 max-w-sm">
+          <div className="flex flex-col gap-1.5 pb-3 border-b border-white/10">
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">External Link (no login needed)</label>
+            {ssnCardSentLink ? (
+              <div className="flex flex-col gap-2">
+                <div className="rounded-md border border-green-500/30 bg-green-500/10 px-3 py-2.5">
+                  <p className="text-xs font-semibold text-green-300">Link generated for {ssnCardSentLink.recipientName}</p>
+                </div>
+                <div className="flex gap-2">
+                  <input type="text" readOnly value={ssnCardSentLink.link} onFocus={(e) => e.target.select()} className="glass-input text-xs py-1.5 px-3 rounded-md flex-1" />
+                  <button onClick={handleCopySsnCardSentLink} className="btn text-xs px-3 py-1.5 shrink-0">{ssnCardSentLinkCopied ? "Copied!" : "Copy"}</button>
+                </div>
+                <button onClick={() => setSsnCardSentLink(null)} className="btn text-xs px-3 py-1.5 w-fit">Done</button>
+              </div>
+            ) : (
+              <>
+                <div className="flex gap-2">
+                  <input type="text" value={ssnCardExternalName} onChange={(e) => setSsnCardExternalName(e.target.value)} placeholder="Type their name (optional)…" className="glass-input text-sm py-1.5 px-3 rounded-md flex-1" />
+                  <button onClick={handleGenerateExternalSsnCard} disabled={ssnCardSending} className="btn text-sm px-3 py-1.5 disabled:opacity-50 shrink-0">
+                    {ssnCardSending ? "Generating…" : "Generate Link"}
+                  </button>
+                </div>
+                <p className="text-[10px] text-muted-foreground">No AHS account needed — they can open the link and fill it in without logging in.</p>
+              </>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-1 relative">
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recipient (AHS teammate)</label>
+            <input
+              type="text"
+              value={ssnCardRecipientSearch}
+              onChange={(e) => { setSsnCardRecipientSearch(e.target.value); setSsnCardRecipientId(""); setSsnCardRecipientDropdownOpen(true); }}
+              onFocus={() => setSsnCardRecipientDropdownOpen(true)}
+              onBlur={() => setTimeout(() => setSsnCardRecipientDropdownOpen(false), 150)}
+              placeholder="Search a teammate…"
+              className="glass-input text-sm py-1.5 px-3 rounded-md"
+            />
+            {ssnCardRecipientDropdownOpen && (
+              <div className="absolute z-50 top-full mt-1 w-full max-h-96 overflow-y-auto rounded-md border border-white/15 bg-slate-900 shadow-2xl">
+                {filteredSsnCardRecipients.length === 0 ? (
+                  <p className="px-3 py-2 text-xs text-muted-foreground">No matching teammates.</p>
+                ) : (
+                  filteredSsnCardRecipients.map((e) => (
+                    <button
+                      key={e.id}
+                      type="button"
+                      onMouseDown={(ev) => ev.preventDefault()}
+                      onClick={() => { setSsnCardRecipientId(e.id); setSsnCardRecipientSearch(`${e.name} — ${ROLE_LABELS[normalizeRole(e.position)] ?? e.position}`); setSsnCardRecipientDropdownOpen(false); }}
+                      className={`w-full text-left px-3 py-2 text-sm hover:bg-white/10 ${ssnCardRecipientId === e.id ? "bg-blue-500/20 text-blue-300" : ""}`}
+                    >
+                      {e.name} <span className="text-muted-foreground text-xs">— {ROLE_LABELS[normalizeRole(e.position)] ?? e.position}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+
+          {ssnCardSendError && <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{ssnCardSendError}</p>}
+          <button onClick={handleSendSsnCard} disabled={!ssnCardRecipientId || ssnCardSending} className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50 w-fit">
+            {ssnCardSending ? "Sending…" : "Send Request"}
+          </button>
+        </div>
+      </div>
+
+      <div className="panel p-0 overflow-hidden mt-4">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Sent SSN Card Forms</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Track completion status.</p>
+        </div>
+        {ssnCardActionError && <p className="mx-4 mt-3 text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{ssnCardActionError}</p>}
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-white/10 bg-white/5">
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Employee</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Sent By</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Status</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Sent</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sentSsnCardForms.length === 0 ? (
+                <tr><td colSpan={5} className="px-4 py-8 text-center text-muted-foreground text-sm">No requests sent yet.</td></tr>
+              ) : (
+                sentSsnCardForms.map((doc) => {
+                  const data = doc.formData as Partial<SsnCardFormData>;
+                  const busy = ssnCardActionBusyId === doc.id;
+                  return (
+                    <tr key={doc.id} className="border-b border-white/5 hover:bg-white/5">
+                      <td className="px-4 py-3 font-medium">{data.employeeName || doc.recipientName || "—"}</td>
+                      <td className="px-4 py-3 text-muted-foreground">{doc.createdByName ?? "—"}</td>
+                      <td className="px-4 py-3">
+                        <span className={`px-2 py-1 rounded text-xs font-semibold ${doc.status === "signed" ? "bg-green-500/20 text-green-300" : doc.status === "cancelled" ? "bg-slate-500/20 text-slate-400" : "bg-yellow-500/20 text-yellow-300"}`}>
+                          {doc.status === "signed" ? "Submitted" : doc.status === "cancelled" ? "Cancelled" : "Awaiting Completion"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{new Date(doc.createdAt).toLocaleDateString()}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {doc.status === "pending_signature" && (
+                            <button type="button" onClick={() => handleCopySsnCardLink(doc)} className="btn text-[10px] px-2 py-1">Copy Link</button>
+                          )}
+                          {doc.pdfUrl && (
+                            <button type="button" onClick={() => handleDownloadSsnCardPdf(doc)} className="text-blue-300 hover:text-blue-200 underline text-xs">Download PDF</button>
+                          )}
+                          {doc.pdfUrl && (
+                            <button type="button" disabled={busy} onClick={() => void handleRegenerateSsnCardPdf(doc)} title="Re-render this PDF from its saved data — fixes a date that was rendered a day early before the timezone bug fix" className="text-amber-300 hover:text-amber-200 underline text-xs disabled:opacity-40">{busy ? "Regenerating…" : "Regenerate PDF"}</button>
+                          )}
+                          <button type="button" disabled={busy} onClick={() => handleDeleteSsnCard(doc)} title="Permanently delete this request" className="text-muted-foreground hover:text-red-300 disabled:opacity-50">
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      </>
+      )}
+
+      {activeTab === "driversLicense" && (
+      <>
+      <div className="panel p-0 overflow-visible mt-4 relative z-20">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Send Driver's License Request</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Pick a teammate — they'll get a link to enter their license number/state and upload a photo. It comes back to you here automatically once submitted.</p>
+        </div>
+        <div className="p-4 flex flex-col gap-3 max-w-sm">
+          <div className="flex flex-col gap-1.5 pb-3 border-b border-white/10">
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">External Link (no login needed)</label>
+            {driversLicenseSentLink ? (
+              <div className="flex flex-col gap-2">
+                <div className="rounded-md border border-green-500/30 bg-green-500/10 px-3 py-2.5">
+                  <p className="text-xs font-semibold text-green-300">Link generated for {driversLicenseSentLink.recipientName}</p>
+                </div>
+                <div className="flex gap-2">
+                  <input type="text" readOnly value={driversLicenseSentLink.link} onFocus={(e) => e.target.select()} className="glass-input text-xs py-1.5 px-3 rounded-md flex-1" />
+                  <button onClick={handleCopyDriversLicenseSentLink} className="btn text-xs px-3 py-1.5 shrink-0">{driversLicenseSentLinkCopied ? "Copied!" : "Copy"}</button>
+                </div>
+                <button onClick={() => setDriversLicenseSentLink(null)} className="btn text-xs px-3 py-1.5 w-fit">Done</button>
+              </div>
+            ) : (
+              <>
+                <div className="flex gap-2">
+                  <input type="text" value={driversLicenseExternalName} onChange={(e) => setDriversLicenseExternalName(e.target.value)} placeholder="Type their name (optional)…" className="glass-input text-sm py-1.5 px-3 rounded-md flex-1" />
+                  <button onClick={handleGenerateExternalDriversLicense} disabled={driversLicenseSending} className="btn text-sm px-3 py-1.5 disabled:opacity-50 shrink-0">
+                    {driversLicenseSending ? "Generating…" : "Generate Link"}
+                  </button>
+                </div>
+                <p className="text-[10px] text-muted-foreground">No AHS account needed — they can open the link and fill it in without logging in.</p>
+              </>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-1 relative">
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recipient (AHS teammate)</label>
+            <input
+              type="text"
+              value={driversLicenseRecipientSearch}
+              onChange={(e) => { setDriversLicenseRecipientSearch(e.target.value); setDriversLicenseRecipientId(""); setDriversLicenseRecipientDropdownOpen(true); }}
+              onFocus={() => setDriversLicenseRecipientDropdownOpen(true)}
+              onBlur={() => setTimeout(() => setDriversLicenseRecipientDropdownOpen(false), 150)}
+              placeholder="Search a teammate…"
+              className="glass-input text-sm py-1.5 px-3 rounded-md"
+            />
+            {driversLicenseRecipientDropdownOpen && (
+              <div className="absolute z-50 top-full mt-1 w-full max-h-96 overflow-y-auto rounded-md border border-white/15 bg-slate-900 shadow-2xl">
+                {filteredDriversLicenseRecipients.length === 0 ? (
+                  <p className="px-3 py-2 text-xs text-muted-foreground">No matching teammates.</p>
+                ) : (
+                  filteredDriversLicenseRecipients.map((e) => (
+                    <button
+                      key={e.id}
+                      type="button"
+                      onMouseDown={(ev) => ev.preventDefault()}
+                      onClick={() => { setDriversLicenseRecipientId(e.id); setDriversLicenseRecipientSearch(`${e.name} — ${ROLE_LABELS[normalizeRole(e.position)] ?? e.position}`); setDriversLicenseRecipientDropdownOpen(false); }}
+                      className={`w-full text-left px-3 py-2 text-sm hover:bg-white/10 ${driversLicenseRecipientId === e.id ? "bg-blue-500/20 text-blue-300" : ""}`}
+                    >
+                      {e.name} <span className="text-muted-foreground text-xs">— {ROLE_LABELS[normalizeRole(e.position)] ?? e.position}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+
+          {driversLicenseSendError && <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{driversLicenseSendError}</p>}
+          <button onClick={handleSendDriversLicense} disabled={!driversLicenseRecipientId || driversLicenseSending} className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50 w-fit">
+            {driversLicenseSending ? "Sending…" : "Send Request"}
+          </button>
+        </div>
+      </div>
+
+      <div className="panel p-0 overflow-hidden mt-4">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Sent Driver's License Forms</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Track completion status.</p>
+        </div>
+        {driversLicenseActionError && <p className="mx-4 mt-3 text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{driversLicenseActionError}</p>}
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-white/10 bg-white/5">
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Employee</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Sent By</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Status</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Sent</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sentDriversLicenseForms.length === 0 ? (
+                <tr><td colSpan={5} className="px-4 py-8 text-center text-muted-foreground text-sm">No requests sent yet.</td></tr>
+              ) : (
+                sentDriversLicenseForms.map((doc) => {
+                  const data = doc.formData as Partial<DriversLicenseFormData>;
+                  const busy = driversLicenseActionBusyId === doc.id;
+                  return (
+                    <tr key={doc.id} className="border-b border-white/5 hover:bg-white/5">
+                      <td className="px-4 py-3 font-medium">{data.employeeName || doc.recipientName || "—"}</td>
+                      <td className="px-4 py-3 text-muted-foreground">{doc.createdByName ?? "—"}</td>
+                      <td className="px-4 py-3">
+                        <span className={`px-2 py-1 rounded text-xs font-semibold ${doc.status === "signed" ? "bg-green-500/20 text-green-300" : doc.status === "cancelled" ? "bg-slate-500/20 text-slate-400" : "bg-yellow-500/20 text-yellow-300"}`}>
+                          {doc.status === "signed" ? "Submitted" : doc.status === "cancelled" ? "Cancelled" : "Awaiting Completion"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{new Date(doc.createdAt).toLocaleDateString()}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {doc.status === "pending_signature" && (
+                            <button type="button" onClick={() => handleCopyDriversLicenseLink(doc)} className="btn text-[10px] px-2 py-1">Copy Link</button>
+                          )}
+                          {doc.pdfUrl && (
+                            <button type="button" onClick={() => handleDownloadDriversLicensePdf(doc)} className="text-blue-300 hover:text-blue-200 underline text-xs">Download PDF</button>
+                          )}
+                          {doc.pdfUrl && (
+                            <button type="button" disabled={busy} onClick={() => void handleRegenerateDriversLicensePdf(doc)} title="Re-render this PDF from its saved data — fixes a date that was rendered a day early before the timezone bug fix" className="text-amber-300 hover:text-amber-200 underline text-xs disabled:opacity-40">{busy ? "Regenerating…" : "Regenerate PDF"}</button>
+                          )}
+                          <button type="button" disabled={busy} onClick={() => handleDeleteDriversLicense(doc)} title="Permanently delete this request" className="text-muted-foreground hover:text-red-300 disabled:opacity-50">
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      </>
+      )}
+
+      {activeTab === "validId" && (
+      <>
+      <div className="panel p-0 overflow-visible mt-4 relative z-20">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Send Valid ID Request</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Pick a PH teammate — they'll get a link to submit a passport, license, or other government ID. It comes back to you here automatically once submitted.</p>
+        </div>
+        <div className="p-4 flex flex-col gap-3 max-w-sm">
+          <div className="flex flex-col gap-1.5 pb-3 border-b border-white/10">
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">External Link (no login needed)</label>
+            {validIdSentLink ? (
+              <div className="flex flex-col gap-2">
+                <div className="rounded-md border border-green-500/30 bg-green-500/10 px-3 py-2.5">
+                  <p className="text-xs font-semibold text-green-300">Link generated for {validIdSentLink.recipientName}</p>
+                </div>
+                <div className="flex gap-2">
+                  <input type="text" readOnly value={validIdSentLink.link} onFocus={(e) => e.target.select()} className="glass-input text-xs py-1.5 px-3 rounded-md flex-1" />
+                  <button onClick={handleCopyValidIdSentLink} className="btn text-xs px-3 py-1.5 shrink-0">{validIdSentLinkCopied ? "Copied!" : "Copy"}</button>
+                </div>
+                <button onClick={() => setValidIdSentLink(null)} className="btn text-xs px-3 py-1.5 w-fit">Done</button>
+              </div>
+            ) : (
+              <>
+                <div className="flex gap-2">
+                  <input type="text" value={validIdExternalName} onChange={(e) => setValidIdExternalName(e.target.value)} placeholder="Type their name (optional)…" className="glass-input text-sm py-1.5 px-3 rounded-md flex-1" />
+                  <button onClick={handleGenerateExternalValidId} disabled={validIdSending} className="btn text-sm px-3 py-1.5 disabled:opacity-50 shrink-0">
+                    {validIdSending ? "Generating…" : "Generate Link"}
+                  </button>
+                </div>
+                <p className="text-[10px] text-muted-foreground">No AHS account needed — they can open the link and fill it in without logging in.</p>
+              </>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-1 relative">
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recipient (AHS teammate)</label>
+            <input
+              type="text"
+              value={validIdRecipientSearch}
+              onChange={(e) => { setValidIdRecipientSearch(e.target.value); setValidIdRecipientId(""); setValidIdRecipientDropdownOpen(true); }}
+              onFocus={() => setValidIdRecipientDropdownOpen(true)}
+              onBlur={() => setTimeout(() => setValidIdRecipientDropdownOpen(false), 150)}
+              placeholder="Search a teammate…"
+              className="glass-input text-sm py-1.5 px-3 rounded-md"
+            />
+            {validIdRecipientDropdownOpen && (
+              <div className="absolute z-50 top-full mt-1 w-full max-h-96 overflow-y-auto rounded-md border border-white/15 bg-slate-900 shadow-2xl">
+                {filteredValidIdRecipients.length === 0 ? (
+                  <p className="px-3 py-2 text-xs text-muted-foreground">No matching teammates.</p>
+                ) : (
+                  filteredValidIdRecipients.map((e) => (
+                    <button
+                      key={e.id}
+                      type="button"
+                      onMouseDown={(ev) => ev.preventDefault()}
+                      onClick={() => { setValidIdRecipientId(e.id); setValidIdRecipientSearch(`${e.name} — ${ROLE_LABELS[normalizeRole(e.position)] ?? e.position}`); setValidIdRecipientDropdownOpen(false); }}
+                      className={`w-full text-left px-3 py-2 text-sm hover:bg-white/10 ${validIdRecipientId === e.id ? "bg-blue-500/20 text-blue-300" : ""}`}
+                    >
+                      {e.name} <span className="text-muted-foreground text-xs">— {ROLE_LABELS[normalizeRole(e.position)] ?? e.position}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+
+          {validIdSendError && <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{validIdSendError}</p>}
+          <button onClick={handleSendValidId} disabled={!validIdRecipientId || validIdSending} className="btn text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50 w-fit">
+            {validIdSending ? "Sending…" : "Send Request"}
+          </button>
+        </div>
+      </div>
+
+      <div className="panel p-0 overflow-hidden mt-4">
+        <div className="px-4 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-sm">Sent Valid ID Forms</h2>
+          <p className="text-[10px] text-muted-foreground mt-0.5">Track completion status.</p>
+        </div>
+        {validIdActionError && <p className="mx-4 mt-3 text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{validIdActionError}</p>}
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-white/10 bg-white/5">
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Employee</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Sent By</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Status</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Sent</th>
+                <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sentValidIdForms.length === 0 ? (
+                <tr><td colSpan={5} className="px-4 py-8 text-center text-muted-foreground text-sm">No requests sent yet.</td></tr>
+              ) : (
+                sentValidIdForms.map((doc) => {
+                  const data = doc.formData as Partial<ValidIdFormData>;
+                  const busy = validIdActionBusyId === doc.id;
+                  return (
+                    <tr key={doc.id} className="border-b border-white/5 hover:bg-white/5">
+                      <td className="px-4 py-3 font-medium">{data.employeeName || doc.recipientName || "—"}</td>
+                      <td className="px-4 py-3 text-muted-foreground">{doc.createdByName ?? "—"}</td>
+                      <td className="px-4 py-3">
+                        <span className={`px-2 py-1 rounded text-xs font-semibold ${doc.status === "signed" ? "bg-green-500/20 text-green-300" : doc.status === "cancelled" ? "bg-slate-500/20 text-slate-400" : "bg-yellow-500/20 text-yellow-300"}`}>
+                          {doc.status === "signed" ? "Submitted" : doc.status === "cancelled" ? "Cancelled" : "Awaiting Completion"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{new Date(doc.createdAt).toLocaleDateString()}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {doc.status === "pending_signature" && (
+                            <button type="button" onClick={() => handleCopyValidIdLink(doc)} className="btn text-[10px] px-2 py-1">Copy Link</button>
+                          )}
+                          {doc.pdfUrl && (
+                            <button type="button" onClick={() => handleDownloadValidIdPdf(doc)} className="text-blue-300 hover:text-blue-200 underline text-xs">Download PDF</button>
+                          )}
+                          {doc.pdfUrl && (
+                            <button type="button" disabled={busy} onClick={() => void handleRegenerateValidIdPdf(doc)} title="Re-render this PDF from its saved data — fixes a date that was rendered a day early before the timezone bug fix" className="text-amber-300 hover:text-amber-200 underline text-xs disabled:opacity-40">{busy ? "Regenerating…" : "Regenerate PDF"}</button>
+                          )}
+                          <button type="button" disabled={busy} onClick={() => handleDeleteValidId(doc)} title="Permanently delete this request" className="text-muted-foreground hover:text-red-300 disabled:opacity-50">
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      </>
+      )}
+
       {activeTab === "ndaForm" && (
       <>
       <div className="panel p-0 overflow-visible mt-4 relative z-20">
@@ -22649,6 +24207,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                           {doc.pdfUrl && (
                             <button type="button" onClick={() => handleDownloadNdaPdf(doc)} className="text-blue-300 hover:text-blue-200 underline text-xs">
                               Download PDF
+                            </button>
+                          )}
+                          {doc.pdfUrl && (
+                            <button type="button" disabled={busy} onClick={() => void handleRegenerateNdaPdf(doc)} title="Re-render this PDF from its saved data — fixes a date that was rendered a day early before the timezone bug fix" className="text-amber-300 hover:text-amber-200 underline text-xs disabled:opacity-40">
+                              {busy ? "Regenerating…" : "Regenerate PDF"}
                             </button>
                           )}
                           <button
@@ -24025,6 +25588,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                               Download PDF
                             </button>
                           )}
+                          {doc.pdfUrl && (
+                            <button type="button" disabled={busy} onClick={() => void handleRegenerateMasterW2AgreementPdf(doc)} title="Re-render this PDF from its saved data — fixes a date that was rendered a day early before the timezone bug fix" className="text-amber-300 hover:text-amber-200 underline text-xs disabled:opacity-40">
+                              {busy ? "Regenerating…" : "Regenerate PDF"}
+                            </button>
+                          )}
                           {doc.status === "confirmed" && (
                             <button type="button" onClick={() => handleReopenMasterW2AgreementEmployer(doc)} className="btn text-[10px] px-2 py-1" title="Redo the employer signature — keeps the employee's original signature">
                               Re-sign
@@ -24337,6 +25905,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                               Download PDF
                             </button>
                           )}
+                          {doc.pdfUrl && (
+                            <button type="button" disabled={busy} onClick={() => void handleRegenerateMasterW2OfficeAgreementPdf(doc)} title="Re-render this PDF from its saved data — fixes a date that was rendered a day early before the timezone bug fix" className="text-amber-300 hover:text-amber-200 underline text-xs disabled:opacity-40">
+                              {busy ? "Regenerating…" : "Regenerate PDF"}
+                            </button>
+                          )}
                           {doc.status === "confirmed" && (
                             <button type="button" onClick={() => handleReopenMasterW2OfficeAgreementEmployer(doc)} className="btn text-[10px] px-2 py-1" title="Redo the employer signature — keeps the employee's original signature">
                               Re-sign
@@ -24623,6 +26196,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                           {doc.pdfUrl && (
                             <button type="button" onClick={() => handleDownloadMasterW2ExecutiveAgreementPdf(doc)} className="text-blue-300 hover:text-blue-200 underline text-xs">
                               Download PDF
+                            </button>
+                          )}
+                          {doc.pdfUrl && (
+                            <button type="button" disabled={busy} onClick={() => void handleRegenerateMasterW2ExecutiveAgreementPdf(doc)} title="Re-render this PDF from its saved data — fixes a date that was rendered a day early before the timezone bug fix" className="text-amber-300 hover:text-amber-200 underline text-xs disabled:opacity-40">
+                              {busy ? "Regenerating…" : "Regenerate PDF"}
                             </button>
                           )}
                           {doc.status === "confirmed" && (
@@ -24939,8 +26517,18 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                             </>
                           )}
                           {doc.pdfUrl && (
+                            <button type="button" onClick={() => setMasterPhContractorAgreementDocPreview(doc)} className="text-blue-300 hover:text-blue-200 underline text-xs">
+                              View PDF
+                            </button>
+                          )}
+                          {doc.pdfUrl && (
                             <button type="button" onClick={() => handleDownloadMasterPhContractorAgreementPdf(doc)} className="text-blue-300 hover:text-blue-200 underline text-xs">
                               Download PDF
+                            </button>
+                          )}
+                          {doc.pdfUrl && (
+                            <button type="button" disabled={busy} onClick={() => void handleRegenerateMasterPhContractorAgreementPdf(doc)} title="Re-render this PDF from its saved data — fixes a date that was rendered a day early before the timezone bug fix" className="text-amber-300 hover:text-amber-200 underline text-xs disabled:opacity-40">
+                              {busy ? "Regenerating…" : "Regenerate PDF"}
                             </button>
                           )}
                           {doc.status === "confirmed" && (
@@ -26254,6 +27842,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                               Download PDF
                             </button>
                           )}
+                          {doc.pdfUrl && (
+                            <button type="button" disabled={busy} onClick={() => void handleRegenerateContractorDataPdf(doc)} title="Re-render this PDF from its saved data — fixes a date that was rendered a day early before the timezone bug fix" className="text-amber-300 hover:text-amber-200 underline text-xs disabled:opacity-40">
+                              {busy ? "Regenerating…" : "Regenerate PDF"}
+                            </button>
+                          )}
                           <button
                             type="button"
                             disabled={busy}
@@ -26456,6 +28049,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                           {doc.pdfUrl && (
                             <button type="button" onClick={() => handleDownloadContractorDataUsPdf(doc)} className="text-blue-300 hover:text-blue-200 underline text-xs">
                               Download PDF
+                            </button>
+                          )}
+                          {doc.pdfUrl && (
+                            <button type="button" disabled={busy} onClick={() => void handleRegenerateContractorDataUsPdf(doc)} title="Re-render this PDF from its saved data — fixes a date that was rendered a day early before the timezone bug fix" className="text-amber-300 hover:text-amber-200 underline text-xs disabled:opacity-40">
+                              {busy ? "Regenerating…" : "Regenerate PDF"}
                             </button>
                           )}
                           <button
@@ -26662,6 +28260,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                               Download PDF
                             </button>
                           )}
+                          {doc.pdfUrl && (
+                            <button type="button" disabled={busy} onClick={() => void handleRegenerateVehicleUseAgreementPdf(doc)} title="Re-render this PDF from its saved data — fixes a date that was rendered a day early before the timezone bug fix" className="text-amber-300 hover:text-amber-200 underline text-xs disabled:opacity-40">
+                              {busy ? "Regenerating…" : "Regenerate PDF"}
+                            </button>
+                          )}
                           <button
                             type="button"
                             disabled={busy}
@@ -26864,6 +28467,11 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                           {doc.pdfUrl && (
                             <button type="button" onClick={() => handleDownloadDirectDepositPdf(doc)} className="text-blue-300 hover:text-blue-200 underline text-xs">
                               Download PDF
+                            </button>
+                          )}
+                          {doc.pdfUrl && (
+                            <button type="button" disabled={busy} onClick={() => void handleRegenerateDirectDepositPdf(doc)} title="Re-render this PDF from its saved data — fixes a date that was rendered a day early before the timezone bug fix" className="text-amber-300 hover:text-amber-200 underline text-xs disabled:opacity-40">
+                              {busy ? "Regenerating…" : "Regenerate PDF"}
                             </button>
                           )}
                           <button
@@ -28644,6 +30252,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                   <option value="senior_manager">Senior Manager</option>
                   <option value="hr_staff">HR/Management</option>
                   <option value="executive">CEO</option>
+                  <option value="employee">Employee</option>
                 </select>
                 {actionPlanActionError && (
                   <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2 mb-3">{actionPlanActionError}</p>
@@ -28807,6 +30416,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                     <option value="senior_manager">Senior Manager</option>
                     <option value="hr_staff">HR/Management</option>
                     <option value="executive">CEO</option>
+                    <option value="employee">Employee</option>
                   </select>
                   {actionPlanRecipientSlot === "manager" && (
                     <p className="text-[10px] text-muted-foreground mt-1">The Manager slot is the one who fills in the actual coaching/monitoring/consequences plan — send this one first.</p>

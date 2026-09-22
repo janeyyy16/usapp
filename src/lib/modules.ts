@@ -248,24 +248,6 @@ const dashboardMod: ModuleDef = {
       seed: () => ({}),
     },
     {
-      slug: "parts-dashboard",
-      title: "Parts Dashboard",
-      description: "Parts operations overview — part status funnel, aging, warranty, truck stock, and Parts staff.",
-      custom: "parts-dashboard",
-      fields: [],
-      count: 0,
-      seed: () => ({}),
-    },
-    {
-      slug: "parts-order-dashboard",
-      title: "Parts Order Dashboard",
-      description: "Parts Order overview — distributor spend, daily PO balances, warranty/vendor breakdown, part lines, and Parts Order staff.",
-      custom: "parts-order-dashboard" as any,
-      fields: [],
-      count: 0,
-      seed: () => ({}),
-    },
-    {
       slug: "claims-dashboard",
       title: "Claims Dashboard",
       description: "Claims pipeline overview — brand/status breakdown, pre-authorization aging, and Claims staff.",
@@ -324,6 +306,14 @@ const csrMod: ModuleDef = {
       custom: "csr-team-daily-report" as any,
       fields: [],
       count: 0,
+      seed: () => ({}),
+    },
+    {
+      slug: "self-service",
+      title: "CSR Self Service",
+      description: "Tally your own GH/Schedule/Attempt/Update for the day.",
+      custom: "csr-self-service-tally" as any,
+      fields: [],
       seed: () => ({}),
     },
     {
@@ -436,6 +426,20 @@ const hrMod: ModuleDef = {
       count: 0,
       seed: () => ({}),
     },
+    // Given its own prominent slot right after the HR landing tile — not
+    // buried among the rest of the HR submodule tiles — since it's the
+    // live source of truth for whether every technician/office/PH/
+    // management-tier hire has actually completed their paperwork, not
+    // just one more tracking tool among several.
+    {
+      slug: "technician-form-checklist",
+      title: "Staff Form Checklist",
+      description: "Live signed/pending status of every Technician/New Technician/Office Staff/PH Staff/Management-tier form, per person.",
+      custom: "technician-form-checklist" as any,
+      fields: [],
+      count: 0,
+      seed: () => ({}),
+    },
     {
       slug: "hr-paperworks",
       title: "HR Paperworks",
@@ -464,15 +468,6 @@ const hrMod: ModuleDef = {
       title: "Flash Tech",
       description: "Technician travel trips — schedule (Calendar) or fill in hotel/rental/receipt tracking detail (Tracker).",
       custom: "flash-tech" as any,
-      fields: [],
-      count: 0,
-      seed: () => ({}),
-    },
-    {
-      slug: "technician-form-checklist",
-      title: "Staff Form Checklist",
-      description: "Live signed/pending status of every Technician/New Technician/Office Staff/PH Staff/Management-tier form, per person.",
-      custom: "technician-form-checklist" as any,
       fields: [],
       count: 0,
       seed: () => ({}),
@@ -749,6 +744,30 @@ const partsMod: ModuleDef = {
       fields: [],
       seed: () => ({}),
       custom: "part-daily-report-ebay",
+    },
+    {
+      slug: "part-daily-report",
+      title: "Part Daily Report",
+      description: "Parts staff performance — collections, RA, receives per branch.",
+      custom: "report-parts-daily" as any,
+      fields: [],
+      seed: () => ({}),
+    },
+    {
+      slug: "parts-dashboard",
+      title: "Parts Dashboard",
+      description: "Parts operations overview — part status funnel, aging, warranty, truck stock, and Parts staff.",
+      custom: "parts-dashboard",
+      fields: [],
+      seed: () => ({}),
+    },
+    {
+      slug: "parts-order-dashboard",
+      title: "Parts Order Dashboard",
+      description: "Parts Order overview — distributor spend, daily PO balances, warranty/vendor breakdown, part lines, and Parts Order staff.",
+      custom: "parts-order-dashboard" as any,
+      fields: [],
+      seed: () => ({}),
     },
   ],
 };
@@ -1077,6 +1096,14 @@ const claimsMod: ModuleDef = {
   tagline: "Claims pipeline and approvals",
   accent: "#f59e0b",
   submodules: [
+    {
+      slug: "claims-daily-report",
+      title: "Claims Daily Report",
+      description: "Daily brand claim counts, staff roster, and Pre-Authorization/Back Orders/Data-Closed tracking.",
+      custom: "claims-daily-report" as any,
+      fields: [],
+      seed: () => ({}),
+    },
     {
       slug: "need-claim-list",
       title: "Need Claim List",
@@ -1546,6 +1573,15 @@ const reportMod: ModuleDef = {
       title: "Branch Daily Report",
       description: "Branch notes, urgency, pending tickets & tech counts, by Senior Branch Manager.",
       custom: "report-branch-daily" as any,
+      fields: [],
+      count: 0,
+      seed: () => ({}),
+    },
+    {
+      slug: "report-technician-performance",
+      title: "Technician Performance Report",
+      description: "Completed tickets, redo rate, tickets/hour, and miles/ticket per technician, with automated alerts.",
+      custom: "report-technician-performance" as any,
       fields: [],
       count: 0,
       seed: () => ({}),

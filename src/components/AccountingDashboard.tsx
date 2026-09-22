@@ -101,7 +101,7 @@ import { listTicketPhotos, hasTicketPhotos, type TicketPhoto } from "@/lib/fireb
 import { captureHtmlToPdfBlob, captureHtmlPagesToPdfBlob, blobToBase64 } from "@/lib/pdfCapture";
 import { renderPayslipBodyHtml, renderTechActivitySummaryPageHtml, PAYSLIP_STYLES, formatClockTime, offDaysInRange, ptoDaysInRange, type PayslipDailyRow, type EmployeePayslipData } from "@/lib/payslipTemplate";
 import { ActivityLogPanel } from "@/components/ActivityLogPanel";
-import { logModuleActivity, getModuleActivityLog, moduleActivityActionLabel, type ModuleActivityLogEntry } from "@/lib/supabase/moduleActivityLog";
+import { logModuleActivity, getModuleActivityLog, getModuleActivityLogByAction, moduleActivityActionLabel, type ModuleActivityLogEntry } from "@/lib/supabase/moduleActivityLog";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 // PH employees are paid in PHP; this converts their PHP-denominated rate into
@@ -282,8 +282,8 @@ export interface EmployeePayrollRow {
   /**
    * Tech Payroll only — confirmed late ticket completions (see
    * late_ticket_completions) not yet paid out, priced at today's rate.
-   * Already folded into ticketsCompleted/grossPay below (so MCA/Completed
-   * Tickets flat-rate treat them like any other completed ticket this
+   * Already folded into ticketsCompleted/grossPay below (so Completed
+   * Tickets flat-rate treats them like any other completed ticket this
    * period) — kept here separately, one entry per ticket (never grouped by
    * repair type), purely so TechActivityReportModal.tsx/
    * buildTechActivityBreakdown can render them as their own "ticket # —
@@ -360,7 +360,7 @@ export interface EmployeePayrollRow {
   techTraineeMatch: number;
   /**
    * This period's includable incentive/bonus pay (piece-rate, carryover,
-   * LDT/Training, Two Tech, MCA, Completed Tickets, commission-style custom
+   * Training, Two Tech, Completed Tickets, commission-style custom
    * lines) — the same figure folded into techWeightedRegularRate and the
    * guarantee check above. Exposed so TechActivityReportModal.tsx can
    * recompute the guarantee against its own live, per-day state-matched
@@ -676,46 +676,6 @@ function computeDutyHours(emp: SupabaseEmployee | undefined, periodStart: string
   return computeScheduledDutyHours(emp.requiredCheckIn || "", emp.requiredCheckOut || "", emp.workingHours, emp.mealMinutes, emp.offDays, periodStart, periodEnd);
 }
 
-// Attendance rows with a clock-in but no clock-out — payroll can't trust
-// what an unfinished shift's hours were, so generation/regeneration must be
-// blocked entirely rather than silently computing 0 hours for that day
-// (which is what computeHoursMap above does, by skipping the row). Returns
-// one "Employee Name (YYYY-MM-DD)" string per offending row, for the error
-// message shown to Finance.
-function findMissingTimeouts(entries: TimecardEntry[], employees: SupabaseEmployee[]): string[] {
-  const nameById = new Map(employees.map((e) => [e.id, e.full_name]));
-  return entries
-    .filter((tc) => tc.check_in && !tc.check_out)
-    .map((tc) => {
-      const key = tc.profile_id || tc.employee_id;
-      const name = (key && nameById.get(key)) || "Unknown employee";
-      return `${name} (${tc.work_date})`;
-    })
-    .sort();
-}
-
-// Still-pending Time Correction requests (any stage — manager/HR/accounting
-// — not yet fully resolved) whose work_date falls inside the payroll
-// period being generated. A pending correction means the timecard's real
-// hours for that day are still in dispute, so payroll can't trust what's
-// currently on the clock — same "block entirely" reasoning as
-// findMissingTimeouts, just for a different way a day's hours can be
-// unreliable. Only checks employees actually included in this generate
-// action (nationIncludedIds), same scoping the missing-clock-out check uses.
-function findPendingCorrectionsInRange(
-  corrections: TimecardCorrectionRow[],
-  employees: SupabaseEmployee[],
-  nationIncludedIds: Set<string>,
-  periodStart: string,
-  periodEnd: string,
-): string[] {
-  const nameById = new Map(employees.map((e) => [e.id, e.full_name]));
-  return corrections
-    .filter((c) => c.status === "pending" && nationIncludedIds.has(c.profileId) && c.workDate >= periodStart && c.workDate <= periodEnd)
-    .map((c) => `${nameById.get(c.profileId) || "Unknown employee"} (${c.workDate})`)
-    .sort();
-}
-
 // One nation's sheet for the "Payroll by Nation & Department" export —
 // employees grouped by department (same department/role split as the
 // Payroll tab's employee table — see getRoleDepartmentBreakdown), each
@@ -830,6 +790,45 @@ function toUSD(li: PayrollLineItem): number {
 function rateLabel(row: EmployeePayrollRow): string {
   if (row.compensationType === "fixed" && row.annualSalary) return `Fixed $${row.annualSalary.toLocaleString()}/yr`;
   return `$${row.hourlyRateUSD.toFixed(2)}`;
+}
+
+// One reviewed/not-reviewed sub-list inside the post-Generate summary modal
+// (sendAllPrompt) — reused for both Technician and Office containers, each
+// shown twice (reviewed + not reviewed), so this stays a single definition
+// instead of four near-identical blocks of markup.
+function ReviewGroupList({ label, rows, reviewed }: { label: string; rows: EmployeePayrollRow[]; reviewed: boolean }) {
+  if (rows.length === 0) return null;
+  return (
+    <div>
+      <div
+        className={`px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wide sticky top-0 ${
+          reviewed ? "bg-emerald-500/10 text-emerald-300" : "bg-red-500/10 text-red-300"
+        }`}
+      >
+        {reviewed ? "✓" : "✗"} {label} — {reviewed ? "will be sent" : "won't be sent"} ({rows.length})
+      </div>
+      <table className="w-full text-xs">
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.employee.id} className="border-t border-white/5 first:border-t-0">
+              <td className={`px-2.5 py-1.5 ${reviewed ? "text-slate-300" : "text-slate-400"}`}>{row.employee.full_name}</td>
+              <td className={`px-2.5 py-1.5 text-right font-mono ${reviewed ? "text-green-300" : "text-slate-500"}`}>{fmt(row.grossPayUSD)}</td>
+            </tr>
+          ))}
+        </tbody>
+        {reviewed && (
+          <tfoot>
+            <tr className="border-t border-white/10 bg-white/5">
+              <td className="px-2.5 py-1.5 font-semibold text-slate-200">Subtotal</td>
+              <td className="px-2.5 py-1.5 text-right font-mono font-bold text-emerald-300">
+                {fmt(rows.reduce((s, r) => s + r.grossPayUSD, 0))}
+              </td>
+            </tr>
+          </tfoot>
+        )}
+      </table>
+    </div>
+  );
 }
 
 // Keeps one row per unique email (case-insensitive) out of raw `profiles`
@@ -1232,6 +1231,13 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   const [wizardStep, setWizardStep] = useState<"detail" | "activity">("detail");
   const [reviewMarks, setReviewMarks] = useState<Map<string, PayrollReviewMark>>(new Map());
   const [reviewBusy, setReviewBusy] = useState(false);
+  // Per-employee "has a payslip actually gone out for THIS period" — reviewed
+  // and sent are genuinely different states (e.g. reviewed today, sent
+  // yesterday for a re-generated period, or reviewed but nobody's hit Send
+  // yet), sourced from the same payslip_sent module_activity_log entries
+  // handleSendPayslip/handleSendAllPayslips already write, keyed by profile
+  // id -> the most recent send's timestamp for the currently selected period.
+  const [sentMarks, setSentMarks] = useState<Map<string, string>>(new Map());
   /** Per-technician "State" pay-mode overrides for the picked period — see payroll_hourly_ot_overrides (migration 0289) and the payrollRows flatMap below, which substitutes this in place of the flat company-rate techHourlyPay when present. */
   const [hourlyOtOverrides, setHourlyOtOverrides] = useState<Map<string, HourlyOtOverride>>(new Map());
   const [nextBusy, setNextBusy] = useState(false);
@@ -1244,6 +1250,17 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   const [connectingGmailRegion, setConnectingGmailRegion] = useState<GmailRegion | null>(null);
   const [disconnectingGmailRegion, setDisconnectingGmailRegion] = useState<GmailRegion | null>(null);
   const [sendingPayslipId, setSendingPayslipId] = useState<string | null>(null);
+  // Styled in-app replacement for a native confirm()/error banner — shown
+  // every time Generate Payroll finishes (see generatePayroll), split first
+  // by Technician vs Office staff (paid completely differently — piece-rate
+  // vs hourly/salary — so Finance reviews them as separate groups), then
+  // within each by reviewed vs. not-yet-reviewed. Send still acts on the
+  // combined reviewed set across both groups in one action.
+  const [sendAllPrompt, setSendAllPrompt] = useState<{
+    nationLabel: string;
+    technician: { reviewed: EmployeePayrollRow[]; notReviewed: EmployeePayrollRow[] };
+    office: { reviewed: EmployeePayrollRow[]; notReviewed: EmployeePayrollRow[] };
+  } | null>(null);
   // The Payroll table's currency toggle already reads as "which region" —
   // reuse it directly rather than a second, easy-to-desync piece of state.
   const activeGmailRegion: GmailRegion = effectiveCurrency === "USD" ? "US" : "PH";
@@ -1955,6 +1972,33 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   }, [genStart, genEnd]);
   useEffect(() => { void loadReviewMarks(); }, [loadReviewMarks]);
 
+  // Per-employee "sent" marks for the picked period — same targetLabel
+  // "(periodStart – periodEnd)" suffix handleSendPayslip/handleSendAllPayslips
+  // already stamp on every payslip_sent entry, matched against the current
+  // genStart/genEnd here the same way the period itself is already embedded
+  // in that label (no separate period column on this log to filter on).
+  const loadSentMarks = useCallback(async () => {
+    if (!genStart || !genEnd || genStart > genEnd) {
+      setSentMarks(new Map());
+      return;
+    }
+    try {
+      const entries = await getModuleActivityLogByAction("accounting", "payslip_sent");
+      const periodSuffix = `(${genStart} – ${genEnd})`;
+      const marks = new Map<string, string>();
+      for (const entry of entries) {
+        if (!entry.targetId || !entry.targetLabel?.includes(periodSuffix)) continue;
+        // Entries are already newest-first (getModuleActivityLogByAction
+        // orders by created_at desc) — first hit per profile is the latest.
+        if (!marks.has(entry.targetId)) marks.set(entry.targetId, entry.createdAt);
+      }
+      setSentMarks(marks);
+    } catch (err) {
+      console.error("Failed to load payslip-sent marks:", err);
+    }
+  }, [genStart, genEnd]);
+  useEffect(() => { void loadSentMarks(); }, [loadSentMarks]);
+
   // Per-technician "State" pay-mode overrides for the picked period (see
   // payroll_hourly_ot_overrides, migration 0289) — same period-scoped
   // load-on-change pattern as loadReviewMarks above.
@@ -2271,8 +2315,8 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
 
   // Confirmed late ticket completions (see carryoverRepairCounts' own
   // comment) — priced at today's rate and folded into ticketsCompleted/
-  // grossPay exactly like any other completed ticket this period (so MCA and
-  // the flat Completed Tickets rate see them too), but kept in their own map
+  // grossPay exactly like any other completed ticket this period (so the
+  // flat Completed Tickets rate sees them too), but kept in their own map
   // (not merged into techGrossByProfile.categoryCounts) so techRow below can
   // still show them as distinctly-labeled, per-ticket "(carried over)" lines.
   const techCarryoverByProfile = new Map<string, { count: number; grossPay: number; tickets: TechCarryoverTicket[] }>();
@@ -2385,10 +2429,12 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
     const tech = includeTech ? techGrossByProfile.get(emp.id) : undefined;
     const carryover = includeTech ? techCarryoverByProfile.get(emp.id) : undefined;
     const manual = includeTech ? techManualByProfile.get(emp.id) : undefined;
-    // "Two Tech" (auto-counted from visits.second_technician) and MCA Bonus
-    // (flat bonus for meeting a minimum completed-ticket threshold) are both
-    // rate-table-driven and deterministic, same as LDT/Mileage/Training, so
-    // they fold into Total Net the same way. Custom program lines and OW
+    // "Two Tech" (auto-counted from visits.second_technician) is
+    // rate-table-driven and deterministic, same as Mileage/Training, so
+    // it folds into Total Net the same way. MCA Bonus and LDT no longer
+    // have any editable UI anywhere in the app (their rows were removed
+    // from the Tech Activity Report) and are deliberately excluded from
+    // every pay total in this function. Custom program lines and OW
     // Incentive are ad-hoc/manual-per-open — those live on the Tech Activity
     // Report modal only and are NOT included here (see TechActivityReportModal.tsx).
     const techBranch = emp.assigned_branch || "";
@@ -2400,19 +2446,23 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
     // showing for every field, not just the one just edited.
     const effectiveMileage = manual ? manual.mileage : includeTech ? techAutoMileageByProfile.get(emp.id) ?? 0 : 0;
     const effectiveMileagePay = manual ? manual.mileagePay : effectiveMileage * techRateFor("Mileage", techBranch);
-    const manualTotal = (manual?.ldtPay ?? 0) + effectiveMileagePay + (manual?.trainingPay ?? 0);
+    // LDT no longer has any editable UI anywhere in the app (its row was
+    // removed from the Tech Activity Report) — manual.ldtPay is dead going
+    // forward, deliberately left out of every pay total below so it can't
+    // silently keep paying out a stale historical value forever with no
+    // way for Finance to see or correct it.
+    const manualTotal = effectiveMileagePay + (manual?.trainingPay ?? 0);
     const twoTechCountForEmp = twoTechOverrideByProfile.get(emp.id) ?? techSecondCounts.get(emp.full_name.trim().toLowerCase()) ?? 0;
     const twoTechPay = includeTech ? twoTechCountForEmp * techRateFor("Two Tech", techBranch) : 0;
-    // Confirmed late completions count toward MCA/Completed Tickets exactly
+    // Confirmed late completions count toward Completed Tickets exactly
     // like any other completed ticket this period — they ARE completed
     // tickets, just paid a period late; only their repair-type $ amount
     // (carryover.grossPay, folded into techGrossPay below) and their own
     // labeled line items stay visibly separate from this period's own work.
+    // (MCA Bonus no longer has any editable UI anywhere in the app — its
+    // row was removed from the Tech Activity Report — so it's deliberately
+    // left out of every pay total below, same reasoning as manual.ldtPay above.)
     const ticketsCompletedForEmp = (tech?.ticketsCompleted ?? 0) + (carryover?.count ?? 0);
-    const mcaThreshold = includeTech ? techRateFor("MCA Threshold", techBranch) : 0;
-    const mcaBonus = includeTech && mcaThreshold > 0 && ticketsCompletedForEmp >= mcaThreshold
-      ? techRateFor("MCA Bonus", techBranch)
-      : 0;
     // Flat per-ticket rate paid on every completed (redo-excluded) ticket,
     // on top of that ticket's own repair-type rate already in tech.grossPay.
     const completedTicketsPay = includeTech ? ticketsCompletedForEmp * techRateFor("Completed Tickets", techBranch) : 0;
@@ -2433,8 +2483,8 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
     //
     // The overtime premium can't just be hourlyRate×1.5 once a tech earns
     // piece-rate/incentive pay in the same period — FLSA requires that pay
-    // (repair-type pay, carryover, LDT/Training, Two Tech, MCA, Completed
-    // Tickets, and any commission-style custom line) to be folded into the
+    // (repair-type pay, carryover, Training, Two Tech, Completed Tickets,
+    // and any commission-style custom line) to be folded into the
     // "regular rate" the OT premium is computed from, same as a
     // non-discretionary bonus. Mileage reimbursement (effectiveMileagePay,
     // inside manualTotal) and any custom line labeled as a reimbursement/
@@ -2445,9 +2495,10 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
     // Total Payment. Straight time is paid for ALL hours (regular + OT) at
     // the base rate, then OT hours additionally earn the extra 0.5× on the
     // weighted rate — the standard FLSA weighted-average method, not an
-    // alternative to it.
+    // alternative to it. (LDT and MCA are deliberately excluded — see the
+    // comments by manualTotal/ticketsCompletedForEmp above.)
     const techIncludablePay = includeTech && isTechRole(emp)
-      ? (tech?.grossPay ?? 0) + (carryover?.grossPay ?? 0) + (manual?.ldtPay ?? 0) + (manual?.trainingPay ?? 0) + twoTechPay + mcaBonus + completedTicketsPay + customIncludablePay
+      ? (tech?.grossPay ?? 0) + (carryover?.grossPay ?? 0) + (manual?.trainingPay ?? 0) + twoTechPay + completedTicketsPay + customIncludablePay
       : 0;
     // Blended per-day, not one flat rate for the whole period — a technician
     // whose hourly rate changed mid-period (salary_entries effective mid-way
@@ -2551,7 +2602,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
     // Training, a custom line, or an approved Payroll Dispute; the old
     // `tech ? ... : 0` gate silently dropped all of that to $0 for them.
     const techGrossPay = includeTech
-      ? (tech?.grossPay ?? 0) + (carryover?.grossPay ?? 0) + manualTotal + twoTechPay + mcaBonus + completedTicketsPay + customPay + techHourlyPay + techGuaranteedSalaryMatch + techHolidayPremium + techTraineeMatch
+      ? (tech?.grossPay ?? 0) + (carryover?.grossPay ?? 0) + manualTotal + twoTechPay + completedTicketsPay + customPay + techHourlyPay + techGuaranteedSalaryMatch + techHolidayPremium + techTraineeMatch
       : 0;
 
     const techRow: EmployeePayrollRow | null =
@@ -2818,39 +2869,10 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
     }
     setGenerating(true);
     try {
-      // Scoped to whichever nation tab is selected — the other nation's
-      // employees (and excluded employees' own missing clock-outs) never
-      // factor into this generate action at all. Technicians (Tech Payroll)
-      // are also excluded from this specific check — they're paid per
-      // completed repair ticket, not by clocked hours, so a missing
-      // clock-out on their timecard has no effect on their pay and
-      // shouldn't block generating payroll for anyone.
-      const nationIncludedIds = new Set(
-        nationIncludedPayrollRows.filter((r) => !isTechRole(r.employee)).map((r) => r.employee.id)
-      );
-      const nationTimecardEntries = timecardEntries.filter((tc) => nationIncludedIds.has(tc.profile_id || tc.employee_id || ""));
-      const missingTimeouts = findMissingTimeouts(nationTimecardEntries, employees);
-      if (missingTimeouts.length > 0) {
-        const preview = missingTimeouts.slice(0, 5).join(", ");
-        const more = missingTimeouts.length > 5 ? `, and ${missingTimeouts.length - 5} more` : "";
-        setError(`Cannot generate payroll for ${genStart} – ${genEnd}: ${missingTimeouts.length} attendance record(s) are missing a clock-out — ${preview}${more}. Fix these timecards, then try again.`);
-        setGenerating(false);
-        return;
-      }
-
-      // A pending Time Correction on a day inside this period means that
-      // day's real hours are still in dispute — resolve it (Manage
-      // Requests, or HR/Finance's own review) before trusting the clock
-      // data enough to pay against it.
-      const pendingCorrections = findPendingCorrectionsInRange(timecardCorrections, employees, nationIncludedIds, genStart, genEnd);
-      if (pendingCorrections.length > 0) {
-        const preview = pendingCorrections.slice(0, 5).join(", ");
-        const more = pendingCorrections.length > 5 ? `, and ${pendingCorrections.length - 5} more` : "";
-        setError(`Cannot generate payroll for ${genStart} – ${genEnd}: ${pendingCorrections.length} time correction request(s) are still pending — ${preview}${more}. Resolve these first, then try again.`);
-        setGenerating(false);
-        return;
-      }
-
+      // Timecard completeness (missing clock-outs, pending time corrections)
+      // is no longer a pre-generate gate here — per-employee review (the
+      // "Mark Reviewed"/Done wizard, payroll_review_marks) is the real check
+      // now, surfaced after generating below, not before it.
       const existingRun = payrollRuns.find((r) => r.period_start === genStart && r.period_end === genEnd);
       // Whether THIS nation already has line items in that run — distinct
       // from existingRun itself, since a run can already exist for the
@@ -2952,23 +2974,36 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
         details: { employees: payrollRows.length, totalUSD: Math.round(totalPayrollUSD * 100) / 100 },
       });
 
-      // Notify every employee who actually got paid something in this run —
-      // skip $0 rows (e.g. no rate set yet) since there's nothing to tell them.
-      await Promise.all(
-        nationIncludedPayrollRows
-          .filter((r) => r.grossPayUSD > 0)
-          .map((r) =>
-            createNotification({
-              recipientId: r.employee.id,
-              senderId: myProfileId,
-              senderName: "Payroll",
-              body: nationHasExistingLineItems ? "🔄 Payslip Updated — View Payslip" : "💰 Payslip is Ready — View Payslip",
-              linkTo: "/m/dashboard/employee-self-service?tab=payroll",
-            }).catch((err) => console.error("Failed to notify", r.employee.id, err))
-          )
-      );
+      // Generating no longer notifies or exposes anything to the employee —
+      // the self-service "My Payroll" tab only shows a payslip once Finance
+      // has actually clicked Send for that employee (gated on the same
+      // payslip_sent log entry sentMarks reads, see getMyPayslips). The
+      // "Payslip is Ready"/"Payslip Updated" notification moved to
+      // handleSendPayslip/handleSendAllPayslips below, right where sending
+      // actually happens now.
 
       await fetchData();
+
+      // Review-completeness summary — non-blocking (payroll already
+      // generated above regardless) and never the page-level error state,
+      // which would take over the whole screen for what's just a heads-up.
+      // Always shown, split first by Technician vs Office (different pay
+      // models, reviewed via different wizards), then by reviewed status
+      // within each — Finance decides whether to send the reviewed group
+      // now or cancel and go review the rest first.
+      const techRows = nationIncludedPayrollRows.filter((r) => isTechRole(r.employee));
+      const officeRows = nationIncludedPayrollRows.filter((r) => !isTechRole(r.employee));
+      setSendAllPrompt({
+        nationLabel,
+        technician: {
+          reviewed: techRows.filter((r) => reviewMarks.has(r.employee.id)),
+          notReviewed: techRows.filter((r) => !reviewMarks.has(r.employee.id)),
+        },
+        office: {
+          reviewed: officeRows.filter((r) => reviewMarks.has(r.employee.id)),
+          notReviewed: officeRows.filter((r) => !reviewMarks.has(r.employee.id)),
+        },
+      });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to generate payroll");
     } finally {
@@ -3218,9 +3253,16 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
     return blobToBase64(pdfBlob);
   };
 
+  // Purely an optional convenience — emails a copy of the payslip PDF to
+  // this one employee. Fully independent of the Reviewed/Sent workflow
+  // below: it doesn't touch payroll_review_marks, doesn't write the
+  // payslip_sent log, and doesn't affect what the employee sees in their
+  // Self Service portal (that's handleSendAllPayslips' job, triggered from
+  // the post-generate confirm container instead). Works off live attendance
+  // data, so it doesn't require Generate Payroll to have run first.
   const handleSendPayslip = async (row: EmployeePayrollRow) => {
     if (!genStart || !genEnd) return;
-    if (!confirm(`Send a test payslip email to ${row.employee.full_name} for ${genStart} to ${genEnd}?`)) return;
+    if (!confirm(`Email ${row.employee.full_name}'s payslip for ${genStart} to ${genEnd}?`)) return;
     setSendingPayslipId(row.employee.id);
     try {
       const pdfBase64 = await buildPayslipPdfBase64(row);
@@ -3234,7 +3276,33 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
         grossPay: row.grossPayUSD,
         pdfBase64,
       });
-      alert(`Payslip sent to ${sentTo}.`);
+      alert(`Payslip emailed to ${sentTo}.`);
+    } catch (err) {
+      alert(`Failed to send payslip: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setSendingPayslipId(null);
+    }
+  };
+
+  // The real "release to the employee" action — offered automatically once
+  // Generate/Regenerate Payroll finds every included employee already
+  // reviewed (see generatePayroll's post-generate confirm container), or
+  // reachable from there any time after. Deliberately no email here (see
+  // handleSendPayslip above for that, kept fully separate and optional) —
+  // this only stamps the payslip_sent log entry getMyPayslips gates on, so
+  // it shows up in the employee's own Self Service > My Payroll tab, plus a
+  // notification pointing them there. Requires a real payroll_line_items row
+  // per employee (i.e. Generate Payroll already ran for this exact period),
+  // since that's the row the portal actually reads.
+  const handleSendAllPayslips = async (rows: EmployeePayrollRow[]) => {
+    if (!genStart || !genEnd) return;
+    const existingRun = payrollRuns.find((r) => r.period_start === genStart && r.period_end === genEnd);
+    const targets = rows.filter(
+      (r) => r.grossPayUSD > 0 && existingRun && payrollLineItems.some((li) => li.payroll_run_id === existingRun.id && li.profile_id === r.employee.id)
+    );
+    let sent = 0;
+    for (const row of targets) {
+      setSendingPayslipId(row.employee.id);
       void logModuleActivity({
         module: "accounting",
         actorName: displayName || email || "Admin",
@@ -3243,11 +3311,23 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
         targetId: row.employee.id,
         targetLabel: `${row.employee.full_name} (${genStart} – ${genEnd})`,
       });
-    } catch (err) {
-      alert(`Failed to send payslip: ${err instanceof Error ? err.message : "Unknown error"}`);
-    } finally {
+      void createNotification({
+        recipientId: row.employee.id,
+        senderId: myProfileId,
+        senderName: "Payroll",
+        body: "💰 Payslip is Ready — View Payslip",
+        linkTo: "/m/dashboard/employee-self-service?tab=payroll",
+      }).catch((err) => console.error("Failed to notify", row.employee.id, err));
+      sent++;
+      // Optimistic — logModuleActivity above is fire-and-forget, so a
+      // re-fetch right now could easily race the insert and still show
+      // "not sent". This row's own send is what just succeeded, so we
+      // already know the real outcome without needing to ask again.
+      setSentMarks((prev) => new Map(prev).set(row.employee.id, new Date().toISOString()));
       setSendingPayslipId(null);
     }
+    const skipped = rows.length - targets.length;
+    alert(`Sent ${sent} payslip${sent === 1 ? "" : "s"} to Self Service.${skipped > 0 ? ` ${skipped} skipped — not generated for this period yet.` : ""}`);
   };
 
   // ── Expand payroll run line items ────────────────────────────────────────────
@@ -3856,12 +3936,6 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   }
 
   if (error) {
-    // generatePayroll's pending-corrections and missing-clock-out gates both
-    // reuse this same error state/banner rather than dedicated ones —
-    // detect which one here so Finance gets a direct way to go fix it
-    // instead of just a dead end.
-    const isPendingCorrectionsError = error.includes("time correction request(s) are still pending");
-    const isMissingClockOutError = error.includes("attendance record(s) are missing a clock-out");
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="bg-red-900/30 border border-red-500/40 rounded-lg p-6 max-w-md text-center">
@@ -3875,28 +3949,6 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
             >
               Retry
             </button>
-            {isPendingCorrectionsError && (
-              <Link
-                to="/m/$module/$submodule"
-                params={{ module: "dashboard", submodule: "attendance-monitoring" }}
-                search={{ tab: "corrections" }}
-                target="_blank"
-                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded text-sm font-semibold transition"
-              >
-                Go to Time Corrections
-              </Link>
-            )}
-            {isMissingClockOutError && (
-              <Link
-                to="/m/$module/$submodule"
-                params={{ module: "dashboard", submodule: "attendance-monitoring" }}
-                search={{ tab: "daily-attendance" }}
-                target="_blank"
-                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded text-sm font-semibold transition"
-              >
-                Go to Daily Attendance
-              </Link>
-            )}
           </div>
         </div>
       </div>
@@ -4128,28 +4180,10 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                   className="bg-slate-800/50 border border-white/10 rounded-lg px-2 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-none"
                 />
               </div>
-              <button
-                type="button"
-                onClick={generatePayroll}
-                disabled={generating || mileagePeriodPhotoCheckLoading || nationIncludedPayrollRows.length === 0 || !genStart || !genEnd || genStart > genEnd}
-                title={
-                  mileagePeriodPhotoCheckLoading
-                    ? "Re-checking photo status for tickets in this period before generating…"
-                    : matchesExistingRun
-                      ? "A payroll run already exists for these dates — this will recompute and replace it"
-                      : undefined
-                }
-                className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded font-semibold transition flex items-center gap-2"
-              >
-                {generating || mileagePeriodPhotoCheckLoading ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : matchesExistingRun ? (
-                  <RefreshCw className="h-4 w-4" />
-                ) : (
-                  <DollarSign className="h-4 w-4" />
-                )}
-                {generating ? "Generating…" : mileagePeriodPhotoCheckLoading ? "Checking photos…" : matchesExistingRun ? "Regenerate Payroll" : "Generate Payroll"}
-              </button>
+              {/* Generate Payroll itself lives inline with the employee table
+                  now (next to Search) — see the "Employee table" section
+                  below — so it's always right next to whichever nation's
+                  rows it's about to act on. */}
               <button
                 type="button"
                 onClick={() => setShowAuditLog(!showAuditLog)}
@@ -4310,15 +4344,47 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                 </span>
                 <span className="text-xs text-slate-400">{visibleRows.length} employees</span>
               </div>
-              <div className="px-4 py-3 border-b border-white/10">
-                <label className="block text-[10px] text-slate-400 uppercase mb-1">Search</label>
-                <input
-                  type="text"
-                  value={employeeSearch}
-                  onChange={(e) => setEmployeeSearch(e.target.value)}
-                  placeholder="Search employee..."
-                  className="w-full max-w-sm bg-slate-800/50 border border-white/10 rounded-lg p-2 text-white text-sm focus:border-blue-500 focus:outline-none"
-                />
+              <div className="px-4 py-3 border-b border-white/10 flex items-end justify-between gap-3 flex-wrap">
+                <div>
+                  <label className="block text-[10px] text-slate-400 uppercase mb-1">Search</label>
+                  <input
+                    type="text"
+                    value={employeeSearch}
+                    onChange={(e) => setEmployeeSearch(e.target.value)}
+                    placeholder="Search employee..."
+                    className="w-full max-w-sm bg-slate-800/50 border border-white/10 rounded-lg p-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={generatePayroll}
+                  disabled={
+                    generating ||
+                    nationIncludedPayrollRows.length === 0 ||
+                    !genStart ||
+                    !genEnd ||
+                    genStart > genEnd
+                  }
+                  title={
+                    matchesExistingRun
+                      ? "A payroll run already exists for these dates — this will recompute and replace it"
+                      : undefined
+                  }
+                  className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded font-semibold transition flex items-center gap-2 shrink-0"
+                >
+                  {generating ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : matchesExistingRun ? (
+                    <RefreshCw className="h-4 w-4" />
+                  ) : (
+                    <DollarSign className="h-4 w-4" />
+                  )}
+                  {generating
+                    ? "Generating…"
+                    : matchesExistingRun
+                      ? `Regenerate ${effectiveCurrency === "USD" ? "Office" : "PH"} Payroll`
+                      : `Generate ${effectiveCurrency === "USD" ? "Office" : "PH"} Payroll`}
+                </button>
               </div>
                 <table className="w-full text-sm min-w-[700px]">
                   <thead>
@@ -4445,25 +4511,44 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                                 {row.employee.isTrainee && (
                                   <span className="ml-1.5 shrink-0 rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-300">Trainee</span>
                                 )}
-                                {isTechRole(row.employee) && (() => {
+                                {(() => {
                                   const mark = reviewMarks.get(row.employee.id);
+                                  const sentAt = sentMarks.get(row.employee.id);
                                   return mark ? (
-                                    <span className="mt-0.5 flex items-center gap-1 text-[10px] text-green-400" title={`Reviewed by ${mark.reviewedByName || "—"} on ${new Date(mark.reviewedAt).toLocaleString()}`}>
-                                      ✓ Reviewed {new Date(mark.reviewedAt).toLocaleDateString()}
-                                      <button
-                                        type="button"
-                                        onClick={async () => {
-                                          try { await clearPayrollReviewMark(row.employee.id, genStart, genEnd); await loadReviewMarks(); }
-                                          catch (err) { setError(err instanceof Error ? err.message : "Failed to clear the review mark."); }
-                                        }}
-                                        title="Clear reviewed mark"
-                                        className="text-slate-500 hover:text-red-300 leading-none"
-                                      >
-                                        ×
-                                      </button>
-                                    </span>
+                                    <div className="mt-0.5 text-[10px] leading-tight" title={`Reviewed by ${mark.reviewedByName || "—"} on ${new Date(mark.reviewedAt).toLocaleString()}`}>
+                                      <span className="flex items-center gap-1 text-green-400">
+                                        ✓ Reviewed {new Date(mark.reviewedAt).toLocaleDateString()}
+                                        <button
+                                          type="button"
+                                          onClick={async () => {
+                                            try { await clearPayrollReviewMark(row.employee.id, genStart, genEnd); await loadReviewMarks(); }
+                                            catch (err) { setError(err instanceof Error ? err.message : "Failed to clear the review mark."); }
+                                          }}
+                                          title="Clear reviewed mark"
+                                          className="text-slate-500 hover:text-red-300 leading-none"
+                                        >
+                                          ×
+                                        </button>
+                                      </span>
+                                      <div className="text-slate-500">Period: {genStart} to {genEnd}</div>
+                                      <div className="text-slate-500">By: {mark.reviewedByName || "—"}</div>
+                                      {sentAt ? (
+                                        <div className="text-blue-400" title={`Payslip sent ${new Date(sentAt).toLocaleString()}`}>
+                                          ✓ Sent {new Date(sentAt).toLocaleDateString()}
+                                        </div>
+                                      ) : (
+                                        <div className="text-amber-400">Reviewed, not sent yet</div>
+                                      )}
+                                    </div>
                                   ) : (
-                                    <span className="mt-0.5 block text-[10px] text-slate-500">Not reviewed</span>
+                                    <div className="mt-0.5 text-[10px] leading-tight">
+                                      <span className="block text-slate-500">Not reviewed</span>
+                                      {sentAt && (
+                                        <span className="block text-blue-400" title={`Payslip sent ${new Date(sentAt).toLocaleString()}`}>
+                                          ✓ Sent {new Date(sentAt).toLocaleDateString()}
+                                        </span>
+                                      )}
+                                    </div>
                                   );
                                 })()}
                               </td>
@@ -4508,7 +4593,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                                   type="button"
                                   onClick={() => handleSendPayslip(row)}
                                   disabled={sendingPayslipId === row.employee.id || !gmailStatus?.connected}
-                                  title={gmailStatus?.connected ? "Send a test payslip email to this employee" : "Connect Gmail above first"}
+                                  title={gmailStatus?.connected ? "Optional — email a copy of this payslip to the employee" : "Connect Gmail above first"}
                                   className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-white rounded text-xs font-medium transition"
                                 >
                                   <Send className="h-3 w-3" />
@@ -5843,6 +5928,42 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                 }
               : undefined
           }
+          onDone={
+            !isTechRole(detailEmployee)
+              ? async () => {
+                  // Same guard generatePayroll() already has — without it, a
+                  // momentarily-inverted date range (Start picked after End,
+                  // possible via manual typing even though the pickers try to
+                  // constrain it) silently saves the mark under a period no
+                  // valid selection can ever match again, making it look like
+                  // it "disappeared" on the next reload.
+                  if (!genStart || !genEnd || genStart > genEnd) {
+                    alert("Pick a valid Start/End period (Start on or before End) before marking this reviewed.");
+                    return;
+                  }
+                  setReviewBusy(true);
+                  try {
+                    await markPayrollReviewed(detailEmployee.id, genStart, genEnd, myProfileId, displayName || email || null);
+                    await loadReviewMarks();
+                    setDetailEmployee(null);
+                    setWizardStep("detail");
+                  } catch (err) {
+                    // alert(), not setError() — this modal sits in front of
+                    // the page's own error banner (fixed inset-0 overlay), so
+                    // a setError() here would be saved correctly in state but
+                    // rendered invisibly behind the still-open modal. alert()
+                    // is guaranteed on top regardless.
+                    alert(`Failed to save the review mark: ${err instanceof Error ? err.message : "Unknown error"}`);
+                  } finally {
+                    setReviewBusy(false);
+                  }
+                }
+              : undefined
+          }
+          doneBusy={reviewBusy}
+          reviewPeriodStart={genStart}
+          reviewPeriodEnd={genEnd}
+          onSyncReviewPeriod={(start, end) => { setGenStart(start); setGenEnd(end); }}
         />
       )}
 
@@ -5886,6 +6007,12 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
             hourlyOtModeBusy={nextBusy}
             doneBusy={reviewBusy}
             onDone={async () => {
+              // Same guard as the office path above and generatePayroll()
+              // itself — see that comment for why this matters.
+              if (!genStart || !genEnd || genStart > genEnd) {
+                alert("Pick a valid Start/End period (Start on or before End) before marking this reviewed.");
+                return;
+              }
               setReviewBusy(true);
               try {
                 await markPayrollReviewed(detailEmployee.id, genStart, genEnd, myProfileId, displayName || email || null);
@@ -5893,7 +6020,10 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                 setDetailEmployee(null);
                 setWizardStep("detail");
               } catch (err) {
-                setError(err instanceof Error ? err.message : "Failed to save the review mark.");
+                // alert(), not setError() — same reasoning as the office path
+                // above: this modal sits in front of the page's own error
+                // banner, so setError() here would be invisible behind it.
+                alert(`Failed to save the review mark: ${err instanceof Error ? err.message : "Unknown error"}`);
               } finally {
                 setReviewBusy(false);
               }
@@ -6302,6 +6432,78 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
               alt=""
               className="w-full flex-1 min-h-0 rounded-lg border border-white/10 object-contain"
             />
+          </div>
+        </div>
+      )}
+
+      {sendAllPrompt && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setSendAllPrompt(null)}
+        >
+          <div
+            className="w-full max-w-2xl rounded-xl border border-white/10 bg-slate-900 p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <h3 className="text-sm font-semibold text-white">{sendAllPrompt.nationLabel} payroll generated</h3>
+              <button
+                className="rounded-md border border-white/15 bg-slate-800/70 p-1.5 text-slate-300 hover:bg-slate-700"
+                onClick={() => setSendAllPrompt(null)}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            {(() => {
+              const allReviewed = [...sendAllPrompt.technician.reviewed, ...sendAllPrompt.office.reviewed];
+              const allNotReviewed = [...sendAllPrompt.technician.notReviewed, ...sendAllPrompt.office.notReviewed];
+              return (
+                <>
+                  <p className="mb-3 text-sm text-slate-300">
+                    {allNotReviewed.length === 0
+                      ? `All ${allReviewed.length} employee${allReviewed.length === 1 ? "" : "s"} reviewed. Release payslips to their Self Service portal now?`
+                      : `${allReviewed.length} reviewed, ${allNotReviewed.length} not yet. Release the reviewed group to their Self Service portal now, or cancel and review the rest first?`}
+                  </p>
+                  <div className="mb-5 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {(sendAllPrompt.technician.reviewed.length > 0 || sendAllPrompt.technician.notReviewed.length > 0) && (
+                      <div className="max-h-96 overflow-y-auto rounded-lg border border-white/10 divide-y divide-white/10">
+                        <div className="px-2.5 py-1 bg-slate-800 text-[10px] font-bold uppercase tracking-wide text-slate-400 sticky top-0">Technician</div>
+                        <ReviewGroupList label="Reviewed" rows={sendAllPrompt.technician.reviewed} reviewed />
+                        <ReviewGroupList label="Not reviewed" rows={sendAllPrompt.technician.notReviewed} reviewed={false} />
+                      </div>
+                    )}
+                    {(sendAllPrompt.office.reviewed.length > 0 || sendAllPrompt.office.notReviewed.length > 0) && (
+                      <div className="max-h-96 overflow-y-auto rounded-lg border border-white/10 divide-y divide-white/10">
+                        <div className="px-2.5 py-1 bg-slate-800 text-[10px] font-bold uppercase tracking-wide text-slate-400 sticky top-0">Office Staff</div>
+                        <ReviewGroupList label="Reviewed" rows={sendAllPrompt.office.reviewed} reviewed />
+                        <ReviewGroupList label="Not reviewed" rows={sendAllPrompt.office.notReviewed} reviewed={false} />
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSendAllPrompt(null)}
+                      className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-sm font-semibold transition"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      disabled={allReviewed.length === 0}
+                      onClick={() => {
+                        setSendAllPrompt(null);
+                        void handleSendAllPayslips(allReviewed);
+                      }}
+                      className="px-4 py-2 rounded-lg bg-green-600 hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold transition flex items-center gap-2"
+                    >
+                      <Send className="h-4 w-4" />
+                      Send to Self Service {allNotReviewed.length > 0 ? "(Reviewed)" : ""}
+                    </button>
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>
       )}

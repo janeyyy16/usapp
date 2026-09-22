@@ -4125,6 +4125,7 @@ function ChatView({ firebaseUid, authorName }: { firebaseUid: string; authorName
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const [roleFilter, setRoleFilter] = useState<string>("");
   const [searchName, setSearchName] = useState("");
   // Last message + unread count per teammate, keyed by their profile id -
@@ -4309,6 +4310,7 @@ function ChatView({ firebaseUid, authorName }: { firebaseUid: string; authorName
         body,
       });
       setDraft("");
+      if (composerRef.current) composerRef.current.style.height = "auto";
     } catch (e) {
       console.error("chat: send failed", e);
       alert(`Failed to send: ${e instanceof Error ? e.message : "Unknown error"}`);
@@ -4433,10 +4435,17 @@ function ChatView({ firebaseUid, authorName }: { firebaseUid: string; authorName
 
         {/* ── Composer ── */}
         <div className="mtech-chat-composer">
-          <input
+          <textarea
+            ref={composerRef}
             className="mtech-chat-composer-input"
+            rows={1}
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              const el = e.target;
+              el.style.height = "auto";
+              el.style.height = `${el.scrollHeight}px`;
+            }}
             placeholder="Message…"
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
@@ -6587,10 +6596,8 @@ function TechPayrollBreakdownPanel({
       {line("Sealed System", `$${entry.techCategoryPay.sealedSystem.toFixed(2)}`)}
       {line("Sealed System (R600)", `$${entry.techCategoryPay.sealedSystemR600.toFixed(2)}`)}
       {line("Two Tech", `${entry.twoTechCount} · $${entry.twoTechPay.toFixed(2)}`)}
-      {line("LDT", `${entry.ldtCount} · $${entry.ldtPay.toFixed(2)}`)}
       {line("Mileage", `${entry.mileage} mi · $${entry.mileagePay.toFixed(2)}`)}
       {line("Training Paid", `$${entry.trainingPay.toFixed(2)}`)}
-      {entry.mcaBonus > 0 && line("MCA Bonus", `$${entry.mcaBonus.toFixed(2)}`)}
       {entry.completedTicketsPay > 0 && line("Completed Tickets Rate", `$${entry.completedTicketsPay.toFixed(2)}`)}
       <div className="mtech-payroll-breakdown-row mtech-payroll-breakdown-total">
         <span className="mtech-payroll-breakdown-label">Net Pay</span>

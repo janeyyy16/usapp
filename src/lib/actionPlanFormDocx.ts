@@ -21,6 +21,16 @@ const CELL_MARGINS = { top: 60, bottom: 60, left: 0, right: 120 };
 
 const fmtDate = (iso: string) => {
   if (!iso) return "";
+  // A date-only string ("2026-09-17") parses as UTC midnight; formatting
+  // it back out in the browser's local timezone (anything behind UTC,
+  // i.e. all of the US) rolls it back a day — "9/17" printing as "9/16".
+  // Parsing the y/m/d parts directly into a local Date avoids that. A
+  // full timestamp has no such ambiguity and is left to the normal parse.
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (dateOnly) {
+    const [, y, m, d] = dateOnly;
+    return new Date(Number(y), Number(m) - 1, Number(d)).toLocaleDateString();
+  }
   const d = new Date(iso);
   return isNaN(d.getTime()) ? iso : d.toLocaleDateString();
 };
@@ -90,7 +100,7 @@ export async function buildActionPlanFormDocxBlob(
   const ribbonBytes = ribbonDataUrl ? await dataUrlToBytes(ribbonDataUrl) : null;
   const footerBytes = footerDataUrl ? await dataUrlToBytes(footerDataUrl) : null;
   const sigBytes: Partial<Record<keyof ActionPlanFormSignatures, Uint8Array>> = {};
-  for (const slot of ["manager", "senior_manager", "hr_staff", "executive"] as const) {
+  for (const slot of ["manager", "senior_manager", "hr_staff", "executive", "employee"] as const) {
     const entry = signatures[slot];
     if (entry) sigBytes[slot] = await dataUrlToBytes(entry.url);
   }
@@ -174,6 +184,7 @@ export async function buildActionPlanFormDocxBlob(
           signatureRow("Senior Manager's Name", data.recipientSlot === "senior_manager" ? data.recipientName : "", signatures.senior_manager, sigBytes.senior_manager ?? null),
           signatureRow("HR/Management's Name", data.recipientSlot === "hr_staff" ? data.recipientName : "", signatures.hr_staff, sigBytes.hr_staff ?? null),
           signatureRow("CEO Name", data.recipientSlot === "executive" ? data.recipientName : "", signatures.executive, sigBytes.executive ?? null),
+          signatureRow("Employee Signature", data.recipientSlot === "employee" ? data.recipientName : "", signatures.employee, sigBytes.employee ?? null),
           ...(footerBytes ? [new Paragraph({ spacing: { before: 240 }, alignment: AlignmentType.CENTER, children: [new ImageRun({ type: "png", data: footerBytes, transformation: { width: 500, height: 70 } })] })] : []),
         ],
       },

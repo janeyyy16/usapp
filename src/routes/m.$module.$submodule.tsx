@@ -108,6 +108,7 @@ import { ReportOperationsDaily } from "@/components/ReportOperationsDaily";
 import { ReportAttendanceMonitoring } from "@/components/ReportAttendanceMonitoring";
 import { ReportAccounting } from "@/components/ReportAccounting";
 import { BranchDailyReportPage } from "@/components/BranchDailyReportPage";
+import { TechnicianPerformanceReport } from "@/components/TechnicianPerformanceReport";
 import { EncompassClaimAuditReport } from "@/components/EncompassClaimAuditReport";
 import { MonthlyPartReport } from "@/components/MonthlyPartReport";
 import { PayrollReport } from "@/components/PayrollReport";
@@ -126,10 +127,12 @@ import { EmployeeSelfServicePage } from "@/components/EmployeeSelfServicePage";
 import { ItTicketsPage } from "@/components/ItTicketsPage";
 import { CSRMainDashboard } from "@/components/CSRMainDashboard";
 import { CSRTeamDailyReport } from "@/components/CSRTeamDailyReport";
+import { CsrSelfServiceTally } from "@/components/CsrSelfServiceTally";
 import { CSRCallTracker } from "@/components/CSRCallTracker";
 import { CSRStatusSummary } from "@/components/CSRStatusSummary";
 import { ExpenseTrackingPage } from "@/components/ExpenseTrackingPage";
 import { ClaimsDashboard } from "@/components/ClaimsDashboard";
+import { ClaimsDailyReport } from "@/components/ClaimsDailyReport";
 import { OperationsDashboard } from "@/components/OperationsDashboard";
 import { ReceivingStatusPage } from "@/components/ReceivingStatusPage";
 import { TicketOperationReport } from "@/components/TicketOperationReport";
@@ -646,6 +649,8 @@ function SubModule() {
         ? <TriagePerformanceReport mod={mod} sub={sub} />
         : (sub as any).custom === "report-hr-daily"
         ? <ReportHR mod={mod} sub={sub} />
+        : (sub as any).custom === "claims-daily-report"
+        ? <ClaimsDailyReport mod={mod} sub={sub} />
         : (sub as any).custom === "report-claims-daily"
         ? <ReportClaimsDaily mod={mod} sub={sub} />
         : (sub as any).custom === "report-triage-daily"
@@ -660,6 +665,8 @@ function SubModule() {
         ? <ReportAccounting mod={mod} sub={sub} />
         : (sub as any).custom === "report-branch-daily"
         ? <BranchDailyReportPage mod={mod} sub={sub} />
+        : (sub as any).custom === "report-technician-performance"
+        ? <TechnicianPerformanceReport mod={mod} sub={sub} />
         : (sub as any).custom === "encompass-claim-audit-report"
         ? <EncompassClaimAuditReport mod={mod} sub={sub} />
         : (sub as any).custom === "monthly-part-report"
@@ -696,6 +703,8 @@ function SubModule() {
         ? <CSRMainDashboard mod={mod} sub={sub} />
         : (sub as any).custom === "csr-team-daily-report"
         ? <CSRTeamDailyReport mod={mod} sub={sub} />
+        : (sub as any).custom === "csr-self-service-tally"
+        ? <CsrSelfServiceTally mod={mod} sub={sub} />
         : (sub as any).custom === "csr-daily-report"
         ? <ReportCSRDaily mod={mod} sub={sub} />
         : (sub as any).custom === "call-tracker"

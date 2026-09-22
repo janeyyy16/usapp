@@ -29,19 +29,22 @@ export const DEFAULT_REPAIR_TYPE = "Default Amount";
 
 /**
  * The single "is this ticket done, for pay purposes" gate used everywhere in
- * this file — a ticket's own current status has actually reached CL-Claimed
- * or CL-Completed. Ready to Complete (RTC) no longer counts on its own: the
- * technician's part being done isn't enough for pay until the status is
- * actually claimed or completed. Not a timestamp check: a ticket at one of
- * these statuses counts as done whether or not the technician managed to
- * stamp an on-site check-in. A technician who did the work but the status
- * never got updated has to file a Ticket Time Dispute with photos instead of
- * this silently falling back to raw timestamps, which is exactly the
- * ambiguity a status-based ticket of record avoids.
+ * this file — a ticket's own current status has actually reached CL-Claimed,
+ * CL-Completed, or CL-Data-Closed, the same "completed" bucket
+ * ticketData.ts's statusGroupOf() already uses for Ticket List's own
+ * Completed/Claimed/Data Closed status filter. Ready to Complete (RTC) no
+ * longer counts on its own: the technician's part being done isn't enough
+ * for pay until the status is actually claimed, completed, or data-closed.
+ * Not a timestamp check: a ticket at one of these statuses counts as done
+ * whether or not the technician managed to stamp an on-site check-in. A
+ * technician who did the work but the status never got updated has to file
+ * a Ticket Time Dispute with photos instead of this silently falling back
+ * to raw timestamps, which is exactly the ambiguity a status-based ticket
+ * of record avoids.
  */
 function isCompletedStatus(status: string): boolean {
   const v = String(status || "").trim().toLowerCase();
-  return v === "cl-claimed" || v === "cl-completed";
+  return v === "cl-claimed" || v === "cl-completed" || v.includes("data closed") || v.includes("data-closed");
 }
 
 // Shared rate-table category lists — single source of truth for
@@ -206,6 +209,8 @@ interface TechCompletedCandidate {
   redo: boolean;
   /** On hold for payroll via the Mileage tab (mileage_entries.payroll_excluded, migration 0144/0148) — manual or the automatic "no photos yet" rule. */
   onHold: boolean;
+  /** tickets.schedule_date ("YYYY-MM-DD") — the day the work actually happened, see this interface's doc comment below. */
+  scheduleDate: string;
 }
 
 /**
@@ -241,7 +246,7 @@ async function getTechCompletedCandidates(startDate: string, endDate: string): P
   for (let from = 0; ; from += PAGE_SIZE) {
     const { data: page, error } = await supabase
       .from("tickets")
-      .select("id, ticket_no, technician, location, redo, status")
+      .select("id, ticket_no, technician, location, redo, status, schedule_date")
       .gte("schedule_date", startDate)
       .lte("schedule_date", endDate)
       .not("technician", "is", null)
@@ -289,6 +294,7 @@ async function getTechCompletedCandidates(startDate: string, endDate: string): P
     location: t.location || "",
     redo: !!t.redo,
     onHold: excludedTicketIds.has(t.id),
+    scheduleDate: t.schedule_date || "",
   }));
 }
 
@@ -444,6 +450,35 @@ export async function getTechRedoTickets(startDate: string, endDate: string): Pr
 export async function getTechOnHoldTickets(startDate: string, endDate: string): Promise<Map<string, TechRedoTicket[]>> {
   const candidates = await getTechCompletedCandidates(startDate, endDate);
   return groupExcludedTickets(candidates, (c) => !c.redo && c.onHold);
+}
+
+/** One completed, pay-eligible ticket, dated — the same population
+ *  getTechCompletedRepairCounts sums into Total Completed Tickets, just
+ *  broken out per ticket instead of aggregated over the whole period, for
+ *  building a day-by-day trend line (e.g. Technician Performance
+ *  Report's branch/manager/tier comparison chart) or listing the actual
+ *  tickets behind a Total Tickets count. */
+export interface TechCompletedTicketDaily {
+  date: string;
+  technician: string;
+  location: string;
+  ticketId: string;
+  ticketNo: string;
+  repairType: string;
+}
+
+export async function getTechCompletedTicketsDaily(startDate: string, endDate: string): Promise<TechCompletedTicketDaily[]> {
+  const candidates = await getTechCompletedCandidates(startDate, endDate);
+  return candidates
+    .filter((c) => !c.redo && !c.onHold && c.scheduleDate)
+    .map((c) => ({
+      date: c.scheduleDate,
+      technician: c.technician,
+      location: c.location,
+      ticketId: c.ticketId,
+      ticketNo: c.ticketNo,
+      repairType: c.repairType,
+    }));
 }
 
 /** Shared grouping/dedup for getTechRedoTickets / getTechOnHoldTickets — one entry per (technician, ticket), keyed by lowercased technician name. */
@@ -1074,7 +1109,12 @@ export async function getTechPayrollBreakdown(
 
   const completedTicketsPay = ticketsCompleted * rateFor("Completed Tickets", assignedBranch || "");
 
-  const grossPay = categoryGross + ldtPay + mileagePay + trainingPay + twoTechPay + mcaBonus + completedTicketsPay;
+  // ldtPay/mcaBonus deliberately excluded from grossPay — neither has any
+  // editable UI anywhere in the app anymore (their rows were removed from
+  // the Tech Activity Report), see the matching AccountingDashboard.tsx
+  // comment. Still computed/returned below so an old stored value displays
+  // as $0 rather than erroring, never folded into money paid.
+  const grossPay = categoryGross + mileagePay + trainingPay + twoTechPay + completedTicketsPay;
 
   const workingDates = new Set<string>();
   for (const r of (timecardRes.data ?? []) as Array<{ work_date: string; check_in: string | null }>) {
@@ -1173,8 +1213,7 @@ export function buildTechActivityBreakdown(
     payment: row.techHourlyPay,
   });
 
-  const manualFields: Array<["ldtCount" | "mileage" | "trainingValue", string, "LDT" | "Mileage" | "Training Paid", number]> = [
-    ["ldtCount", "LDT", "LDT", row.techManual.ldtPay],
+  const manualFields: Array<["mileage" | "trainingValue", string, "Mileage" | "Training Paid", number]> = [
     ["mileage", "Mileage", "Mileage", row.techManual.mileagePay],
     ["trainingValue", "Training Paid", "Training Paid", row.techManual.trainingPay],
   ];
@@ -1211,18 +1250,6 @@ export function buildTechActivityBreakdown(
   const twoTechPayment = row.twoTechCount * twoTechRate;
   lineItems.push({ label: "Two Tech", value: String(row.twoTechCount), rate: twoTechRate, payment: twoTechPayment });
 
-  const mcaThreshold = rateFor("MCA Threshold");
-  const mcaBonusRate = rateFor("MCA Bonus");
-  const mcaMet = mcaThreshold > 0 && row.ticketsCompleted >= mcaThreshold;
-  const mcaPayment = mcaMet ? mcaBonusRate : 0;
-  lineItems.push({
-    label: "MCA (Min. Complete Achievement)",
-    value: `${mcaThreshold} req.`,
-    rate: mcaBonusRate,
-    payment: mcaPayment,
-    paymentDisplay: mcaThreshold > 0 ? (mcaMet ? undefined : "Not met") : "—",
-  });
-
   const customLinesTotal = customItems.reduce((s, i) => s + i.value * i.rate, 0);
   for (const item of customItems) {
     lineItems.push({ label: item.label || "(custom program)", value: String(item.value), rate: item.rate, payment: item.value * item.rate });
@@ -1230,8 +1257,8 @@ export function buildTechActivityBreakdown(
 
   const subtotal =
     REPAIR_TYPES.reduce((s, type) => s + (row.techCategoryCounts[type] ?? 0) * rateFor(type), 0) +
-    row.techManual.ldtPay + row.techManual.mileagePay + row.techManual.trainingPay +
-    twoTechPayment + mcaPayment + completedTicketsPayment + redoReductionPayment + customLinesTotal + carryoverTotal + row.techHourlyPay;
+    row.techManual.mileagePay + row.techManual.trainingPay +
+    twoTechPayment + completedTicketsPayment + redoReductionPayment + customLinesTotal + carryoverTotal + row.techHourlyPay;
   const owIncentivePay = (row.techManual.owIncentivePct / 100) * subtotal;
   lineItems.push({ label: "OW Incentive", value: `${row.techManual.owIncentivePct}%`, rate: null, payment: owIncentivePay, paymentDisplay: row.techManual.owIncentivePct > 0 ? undefined : "—" });
 
