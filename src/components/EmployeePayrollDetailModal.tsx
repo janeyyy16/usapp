@@ -801,7 +801,12 @@ export function EmployeePayrollDetailModal({
 
   const payViewTotals = useMemo(() => {
     if (isCurrentlyFixed && currentEntry?.annualSalary) {
-      const fixed = monthlySalary(currentEntry.annualSalary);
+      // perCutoffSalary (annual / 26), not monthlySalary (annual / 12) — this
+      // tile is scoped to the same biweekly cutoff period as everywhere else
+      // pay is shown (Current Rate tile, Tech Activity Report's Hourly Pay
+      // line). Using monthlySalary here inflated it to annual/12 (e.g. a
+      // $72,000/yr salary showed $6,000.00 instead of the correct $2,769.23).
+      const fixed = perCutoffSalary(currentEntry.annualSalary);
       return {
         calculated: { regularPay: fixed, overtimePay: 0, total: fixed },
         compliant: { regularPay: fixed, overtimePay: 0, total: fixed },
