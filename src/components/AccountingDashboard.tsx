@@ -1295,11 +1295,14 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   // auto-fill that rate). See isCarIqEligible, roleLabels.ts.
   const [carIqSearch, setCarIqSearch] = useState("");
   const [carIqSaving, setCarIqSaving] = useState<string | null>(null);
-  // Role/Branch/Car IQ column filters, each "" = "All" — separate from the
-  // free-text search box above, so a name can still be typed WHILE narrowed
-  // to one role/branch/status.
-  const [carIqRoleFilter, setCarIqRoleFilter] = useState("");
-  const [carIqBranchFilter, setCarIqBranchFilter] = useState("");
+  // Role/Branch column filters — Excel-autofilter checkbox convention
+  // (matches TicketColumnFilter/TicketList, same as this dashboard's own
+  // Mileage/Reports tabs): empty set = "Select All" (no filter), otherwise
+  // only rows whose value is in the set match. Separate from the free-text
+  // search box above, so a name can still be typed WHILE narrowed to a
+  // role/branch selection.
+  const [carIqRoleFilter, setCarIqRoleFilter] = useState<Set<string>>(new Set());
+  const [carIqBranchFilter, setCarIqBranchFilter] = useState<Set<string>>(new Set());
   const [carIqStatusFilter, setCarIqStatusFilter] = useState<"" | "has" | "no">("");
   const carIqEligibleEmployees = employees
     .filter((emp) => emp.isActive && isCarIqEligible(emp.role, emp.extraRoles))
@@ -1319,8 +1322,8 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
     ) {
       return false;
     }
-    if (carIqRoleFilter && getRoleDepartmentBreakdown(emp.role).roleLabel !== carIqRoleFilter) return false;
-    if (carIqBranchFilter && (emp.assigned_branch || "—") !== carIqBranchFilter) return false;
+    if (carIqRoleFilter.size > 0 && !carIqRoleFilter.has(getRoleDepartmentBreakdown(emp.role).roleLabel)) return false;
+    if (carIqBranchFilter.size > 0 && !carIqBranchFilter.has(emp.assigned_branch || "—")) return false;
     const hasCarIq = employeeInfoByProfileId.get(emp.id)?.hasCarIq ?? false;
     if (carIqStatusFilter === "has" && !hasCarIq) return false;
     if (carIqStatusFilter === "no" && hasCarIq) return false;
@@ -5965,46 +5968,31 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                 <thead className="sticky top-0">
                   <tr className="border-b border-white/10 bg-slate-900">
                     <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Name</th>
-                    <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Role</th>
-                    <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Branch</th>
-                    <th className="px-4 py-3 text-right text-xs text-muted-foreground uppercase">Car IQ</th>
-                  </tr>
-                  <tr className="border-b border-white/10 bg-slate-900">
-                    <th className="px-4 pb-2.5" />
-                    <th className="px-4 pb-2.5 text-left">
-                      <select
-                        value={carIqRoleFilter}
-                        onChange={(e) => setCarIqRoleFilter(e.target.value)}
-                        className="glass-input text-xs py-1 px-2 rounded-md w-full max-w-[160px]"
-                      >
-                        <option value="">All Roles</option>
-                        {carIqRoleOptions.map((r) => (
-                          <option key={r} value={r}>{r}</option>
-                        ))}
-                      </select>
+                    <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">
+                      <span className="inline-flex items-center">
+                        Role
+                        <TicketColumnFilter options={carIqRoleOptions} selected={carIqRoleFilter} onChange={setCarIqRoleFilter} label="Filter by Role" />
+                      </span>
                     </th>
-                    <th className="px-4 pb-2.5 text-left">
-                      <select
-                        value={carIqBranchFilter}
-                        onChange={(e) => setCarIqBranchFilter(e.target.value)}
-                        className="glass-input text-xs py-1 px-2 rounded-md w-full max-w-[160px]"
-                      >
-                        <option value="">All Branches</option>
-                        {carIqBranchOptions.map((b) => (
-                          <option key={b} value={b}>{b}</option>
-                        ))}
-                      </select>
+                    <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">
+                      <span className="inline-flex items-center">
+                        Branch
+                        <TicketColumnFilter options={carIqBranchOptions} selected={carIqBranchFilter} onChange={setCarIqBranchFilter} label="Filter by Branch" />
+                      </span>
                     </th>
-                    <th className="px-4 pb-2.5 text-right">
-                      <select
-                        value={carIqStatusFilter}
-                        onChange={(e) => setCarIqStatusFilter(e.target.value as "" | "has" | "no")}
-                        className="glass-input text-xs py-1 px-2 rounded-md w-full max-w-[160px] ml-auto"
-                      >
-                        <option value="">All</option>
-                        <option value="has">Has Car IQ</option>
-                        <option value="no">No Car IQ</option>
-                      </select>
+                    <th className="px-4 py-3 text-right text-xs text-muted-foreground uppercase">
+                      <div className="flex items-center justify-end gap-2">
+                        Car IQ
+                        <select
+                          value={carIqStatusFilter}
+                          onChange={(e) => setCarIqStatusFilter(e.target.value as "" | "has" | "no")}
+                          className="glass-input text-[10px] py-1 px-1.5 rounded-md normal-case font-normal"
+                        >
+                          <option value="">All</option>
+                          <option value="has">Has Car IQ</option>
+                          <option value="no">No Car IQ</option>
+                        </select>
+                      </div>
                     </th>
                   </tr>
                 </thead>
