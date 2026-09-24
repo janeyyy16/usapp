@@ -6019,7 +6019,17 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                     </tr>
                   ) : (
                     carIqFilteredEmployees.map((emp) => {
-                      const hasCarIq = employeeInfoByProfileId.get(emp.id)?.hasCarIq ?? false;
+                      // Deliberately NOT defaulted with `?? false` — an
+                      // untouched record (rawHasCarIq undefined) must look
+                      // different from one explicitly set to "No Car IQ"
+                      // (false), because they behave differently on the
+                      // Mileage rate: undefined leaves the branch rate
+                      // editable/unlocked, false locks it at $0.40. Defaulting
+                      // to false here made every never-configured technician
+                      // render identically to an explicitly-off one, so an
+                      // untouched row silently stayed unlocked while looking
+                      // exactly like a locked one.
+                      const rawHasCarIq = employeeInfoByProfileId.get(emp.id)?.hasCarIq;
                       const saving = carIqSaving === emp.id;
                       return (
                         <tr key={emp.id} className="border-b border-white/5 hover:bg-white/5">
@@ -6029,12 +6039,15 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                           <td className="px-4 py-3 text-right">
                             <div className="flex items-center justify-end gap-1.5">
                               {saving && <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400" />}
+                              {rawHasCarIq === undefined && (
+                                <span className="text-[10px] text-amber-300/80 italic mr-1">Not set</span>
+                              )}
                               <div className="inline-flex items-center rounded-full bg-slate-900 border border-white/10 p-0.5 text-[11px]">
                                 <button
                                   type="button"
                                   disabled={saving}
                                   onClick={() => void handleToggleCarIq(emp.id, false)}
-                                  className={`px-2.5 py-1 rounded-full transition disabled:opacity-50 ${!hasCarIq ? "bg-slate-700 text-white" : "text-slate-500 hover:text-slate-300"}`}
+                                  className={`px-2.5 py-1 rounded-full transition disabled:opacity-50 ${rawHasCarIq === false ? "bg-slate-700 text-white" : "text-slate-500 hover:text-slate-300"}`}
                                 >
                                   No Car IQ
                                 </button>
@@ -6042,7 +6055,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                                   type="button"
                                   disabled={saving}
                                   onClick={() => void handleToggleCarIq(emp.id, true)}
-                                  className={`px-2.5 py-1 rounded-full transition disabled:opacity-50 ${hasCarIq ? "bg-emerald-700 text-white" : "text-slate-500 hover:text-slate-300"}`}
+                                  className={`px-2.5 py-1 rounded-full transition disabled:opacity-50 ${rawHasCarIq === true ? "bg-emerald-700 text-white" : "text-slate-500 hover:text-slate-300"}`}
                                 >
                                   Has Car IQ
                                 </button>
