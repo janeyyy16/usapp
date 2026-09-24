@@ -140,11 +140,15 @@ export function ModuleNavigator() {
     <div
       // Fixed at viewport-top, just under the sticky header. Right edge
       // matches the user pill's right edge so the two visually align.
+      // zIndex 40, not 50+ — every modal overlay in this app (see
+      // EmployeePayrollDetailModal.tsx etc.) uses the shared "fixed inset-0
+      // ... z-50" pattern, so this floating pill must stay below that or it
+      // renders on top of (and stays clickable through) an open modal.
       style={{
         position: "fixed",
         top: topPx,
         right: `${rightPx}px`,
-        zIndex: 60,
+        zIndex: 40,
         pointerEvents: "auto",
       }}
       onMouseEnter={() => { cancelClose(); setExpanded(true); }}
