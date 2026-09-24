@@ -34,6 +34,7 @@ import {
   History,
   Search,
   Building2,
+  Car,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
@@ -43,11 +44,11 @@ import { STATE_MIN_WAGE_2026 } from "@/lib/stateMinWage";
 import { EmployeePayrollDetailModal } from "@/components/EmployeePayrollDetailModal";
 import { getRepairStatuses, type RepairStatus } from "@/lib/supabase/repairStatuses";
 import { TicketColumnFilter } from "@/components/TicketColumnFilter";
-import { getRoleDepartmentBreakdown, normalizeRole, ROLE_LABELS, TECHNICIAN_PAY_ROLES, isMealAlwaysPaidRole, usesFlatWeeklyOvertimeThreshold } from "@/lib/roleLabels";
+import { getRoleDepartmentBreakdown, normalizeRole, ROLE_LABELS, TECHNICIAN_PAY_ROLES, isMealAlwaysPaidRole, usesFlatWeeklyOvertimeThreshold, isCarIqEligible } from "@/lib/roleLabels";
 import { calcWorkedHours, getMyProfileSchedule, resolveScheduledNetHours, computeMealTimeCredit, computeScheduledDutyHours, getAttendanceForRange, startOfWeekSunday, splitRegularOvertimeWeekly, addDaysISO, CSR_WEEKLY_OVERTIME_THRESHOLD } from "@/lib/supabase/timecards";
 import { payGraceMinutesFor } from "@/lib/attendanceGrace";
 import { updatePayrollLineItemExtra, updatePayrollLineItemPaid } from "@/lib/supabase/payslips";
-import { getEmployeeInfoByProfileIds, getCompanyUsers, getTechnicianContactInfoByIds, type EmployeeInfo } from "@/lib/supabase/users";
+import { getEmployeeInfoByProfileIds, getCompanyUsers, getTechnicianContactInfoByIds, setEmployeeHasCarIq, type EmployeeInfo } from "@/lib/supabase/users";
 import { resolveTeamLeadOrManager } from "@/lib/notifyRouting";
 import { createNotification } from "@/lib/supabase/notifications";
 import { getCompanyPtoRequests, isPaidPtoType, type PtoRequestRow } from "@/lib/supabase/pto";
@@ -859,7 +860,7 @@ function parseGmailRegionParam(value: string | null): GmailRegion {
   return value === "PH" ? "PH" : "US";
 }
 
-type AccountingDashboardTabId = "overview" | "payroll" | "mileage" | "payrollDisputes" | "reports" | "flashTech" | "ticketAttendance" | "ticketTimeDisputes" | "branchRates";
+type AccountingDashboardTabId = "overview" | "payroll" | "mileage" | "payrollDisputes" | "reports" | "flashTech" | "ticketAttendance" | "ticketTimeDisputes" | "branchRates" | "carIq";
 // Shared by the top tab row and the floating left quick-nav so the two
 // never drift out of sync.
 const ACCOUNTING_DASHBOARD_TABS: { id: AccountingDashboardTabId; label: string; Icon: typeof History }[] = [
@@ -870,6 +871,7 @@ const ACCOUNTING_DASHBOARD_TABS: { id: AccountingDashboardTabId; label: string; 
   { id: "reports", label: "Reports", Icon: FileText },
   { id: "ticketAttendance", label: "Ticket Attendance", Icon: FileText },
   { id: "branchRates", label: "Branch Rates", Icon: Building2 },
+  { id: "carIq", label: "Car IQ", Icon: Car },
   { id: "ticketTimeDisputes", label: "Ticket Time Disputes", Icon: Clock },
   // Kept the label "Overview" (not "Report") since the Reports tab above
   // already owns that name — this one moved last because its content now
@@ -1272,6 +1274,64 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   // expanded run view — read straight from profiles.employee_info (the same
   // JSON blob the Employee Information tab edits), not duplicated anywhere.
   const [employeeInfoByProfileId, setEmployeeInfoByProfileId] = useState<Map<string, EmployeeInfo>>(new Map());
+
+  // Car IQ tab (2026-09-24) — tracks which technician-tier employees (any
+  // TECHNICIAN_PAY_ROLES tier: plain Technician through Branch
+  // Manager/Senior Branch Manager/Tech Manager/Technical Director/Assistant
+  // Technical Director, primary or secondary role) have a
+  // company-installed Car IQ vehicle tracking device, which determines
+  // their mileage reimbursement rate ($0.20/mi with, $0.40/mi without —
+  // that rate itself is still entered by hand on the Mileage row elsewhere;
+  // this tab is the reference/monitoring source of truth, not yet wired to
+  // auto-fill that rate). See isCarIqEligible, roleLabels.ts.
+  const [carIqSearch, setCarIqSearch] = useState("");
+  const [carIqSaving, setCarIqSaving] = useState<string | null>(null);
+  // Role/Branch/Car IQ column filters, each "" = "All" — separate from the
+  // free-text search box above, so a name can still be typed WHILE narrowed
+  // to one role/branch/status.
+  const [carIqRoleFilter, setCarIqRoleFilter] = useState("");
+  const [carIqBranchFilter, setCarIqBranchFilter] = useState("");
+  const [carIqStatusFilter, setCarIqStatusFilter] = useState<"" | "has" | "no">("");
+  const carIqEligibleEmployees = employees
+    .filter((emp) => emp.isActive && isCarIqEligible(emp.role, emp.extraRoles))
+    .sort((a, b) => a.full_name.localeCompare(b.full_name));
+  const carIqRoleOptions = Array.from(
+    new Set(carIqEligibleEmployees.map((emp) => getRoleDepartmentBreakdown(emp.role).roleLabel))
+  ).sort((a, b) => a.localeCompare(b));
+  const carIqBranchOptions = Array.from(
+    new Set(carIqEligibleEmployees.map((emp) => emp.assigned_branch || "—"))
+  ).sort((a, b) => a.localeCompare(b));
+  const carIqFilteredEmployees = carIqEligibleEmployees.filter((emp) => {
+    const search = carIqSearch.trim().toLowerCase();
+    if (
+      search &&
+      !emp.full_name.toLowerCase().includes(search) &&
+      !(emp.assigned_branch || "").toLowerCase().includes(search)
+    ) {
+      return false;
+    }
+    if (carIqRoleFilter && getRoleDepartmentBreakdown(emp.role).roleLabel !== carIqRoleFilter) return false;
+    if (carIqBranchFilter && (emp.assigned_branch || "—") !== carIqBranchFilter) return false;
+    const hasCarIq = employeeInfoByProfileId.get(emp.id)?.hasCarIq ?? false;
+    if (carIqStatusFilter === "has" && !hasCarIq) return false;
+    if (carIqStatusFilter === "no" && hasCarIq) return false;
+    return true;
+  });
+  async function handleToggleCarIq(profileId: string, nextValue: boolean) {
+    setCarIqSaving(profileId);
+    try {
+      await setEmployeeHasCarIq(profileId, nextValue);
+      setEmployeeInfoByProfileId((prev) => {
+        const next = new Map(prev);
+        next.set(profileId, { ...(next.get(profileId) ?? {}), hasCarIq: nextValue });
+        return next;
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save Car IQ status.");
+    } finally {
+      setCarIqSaving(null);
+    }
+  }
 
   const [deletingMileageEntryId, setDeletingMileageEntryId] = useState<string | null>(null);
   // Delete-reason modal for the Mileage tab's Trash action — a soft delete
@@ -5835,6 +5895,135 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                               : isCountyBased
                               ? <span className="text-slate-600 italic">Based on county — enter manually</span>
                               : <span className="text-slate-600 italic">No rate on file</span>}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* ── Car IQ Tab ───────────────────────────────────────────────────── */}
+        {activeTab === "carIq" && (
+          <div className="panel p-0 overflow-hidden">
+            <div className="px-4 py-4 border-b border-white/10">
+              <h2 className="font-semibold text-sm">Car IQ</h2>
+              <p className="text-[10px] text-muted-foreground mt-0.5">
+                Which technicians (any tier — Technician, Branch Manager, Senior Branch Manager, Tech Manager, Technical Director, Assistant Technical Director — primary or secondary role) have a company-installed Car IQ vehicle tracking device — drives their mileage rate ($0.20/mi with Car IQ, $0.40/mi without). Toggling here only updates this record; the Mileage rate on their Tech Activity Report is still entered by hand.
+              </p>
+            </div>
+
+            <div className="px-4 py-3 border-b border-white/10 bg-white/5 flex items-center gap-3">
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+                <input
+                  type="text"
+                  value={carIqSearch}
+                  onChange={(e) => setCarIqSearch(e.target.value)}
+                  placeholder="Name or branch…"
+                  className="glass-input text-sm py-1.5 pl-8 pr-3 rounded-md w-56"
+                />
+              </div>
+              <span className="ml-auto text-[10px] text-muted-foreground">
+                {carIqFilteredEmployees.length} of {carIqEligibleEmployees.length} eligible
+              </span>
+            </div>
+
+            {error && (
+              <p className="mx-4 mt-3 text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2">{error}</p>
+            )}
+
+            <div className="overflow-x-auto max-h-[70vh] overflow-y-auto">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0">
+                  <tr className="border-b border-white/10 bg-slate-900">
+                    <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Name</th>
+                    <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Role</th>
+                    <th className="px-4 py-3 text-left text-xs text-muted-foreground uppercase">Branch</th>
+                    <th className="px-4 py-3 text-right text-xs text-muted-foreground uppercase">Car IQ</th>
+                  </tr>
+                  <tr className="border-b border-white/10 bg-slate-900">
+                    <th className="px-4 pb-2.5" />
+                    <th className="px-4 pb-2.5 text-left">
+                      <select
+                        value={carIqRoleFilter}
+                        onChange={(e) => setCarIqRoleFilter(e.target.value)}
+                        className="glass-input text-xs py-1 px-2 rounded-md w-full max-w-[160px]"
+                      >
+                        <option value="">All Roles</option>
+                        {carIqRoleOptions.map((r) => (
+                          <option key={r} value={r}>{r}</option>
+                        ))}
+                      </select>
+                    </th>
+                    <th className="px-4 pb-2.5 text-left">
+                      <select
+                        value={carIqBranchFilter}
+                        onChange={(e) => setCarIqBranchFilter(e.target.value)}
+                        className="glass-input text-xs py-1 px-2 rounded-md w-full max-w-[160px]"
+                      >
+                        <option value="">All Branches</option>
+                        {carIqBranchOptions.map((b) => (
+                          <option key={b} value={b}>{b}</option>
+                        ))}
+                      </select>
+                    </th>
+                    <th className="px-4 pb-2.5 text-right">
+                      <select
+                        value={carIqStatusFilter}
+                        onChange={(e) => setCarIqStatusFilter(e.target.value as "" | "has" | "no")}
+                        className="glass-input text-xs py-1 px-2 rounded-md w-full max-w-[160px] ml-auto"
+                      >
+                        <option value="">All</option>
+                        <option value="has">Has Car IQ</option>
+                        <option value="no">No Car IQ</option>
+                      </select>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {carIqFilteredEmployees.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="px-4 py-8 text-center text-muted-foreground text-sm">
+                        {carIqEligibleEmployees.length === 0
+                          ? "No active technician-tier employee on file."
+                          : "No one matches the current search/filters."}
+                      </td>
+                    </tr>
+                  ) : (
+                    carIqFilteredEmployees.map((emp) => {
+                      const hasCarIq = employeeInfoByProfileId.get(emp.id)?.hasCarIq ?? false;
+                      const saving = carIqSaving === emp.id;
+                      return (
+                        <tr key={emp.id} className="border-b border-white/5 hover:bg-white/5">
+                          <td className="px-4 py-3 font-medium whitespace-nowrap">{emp.full_name}</td>
+                          <td className="px-4 py-3 text-slate-300 whitespace-nowrap">{getRoleDepartmentBreakdown(emp.role).roleLabel}</td>
+                          <td className="px-4 py-3 text-slate-300 whitespace-nowrap">{emp.assigned_branch || "—"}</td>
+                          <td className="px-4 py-3 text-right">
+                            <div className="flex items-center justify-end gap-1.5">
+                              {saving && <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400" />}
+                              <div className="inline-flex items-center rounded-full bg-slate-900 border border-white/10 p-0.5 text-[11px]">
+                                <button
+                                  type="button"
+                                  disabled={saving}
+                                  onClick={() => void handleToggleCarIq(emp.id, false)}
+                                  className={`px-2.5 py-1 rounded-full transition disabled:opacity-50 ${!hasCarIq ? "bg-slate-700 text-white" : "text-slate-500 hover:text-slate-300"}`}
+                                >
+                                  No Car IQ
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={saving}
+                                  onClick={() => void handleToggleCarIq(emp.id, true)}
+                                  className={`px-2.5 py-1 rounded-full transition disabled:opacity-50 ${hasCarIq ? "bg-emerald-700 text-white" : "text-slate-500 hover:text-slate-300"}`}
+                                >
+                                  Has Car IQ
+                                </button>
+                              </div>
+                            </div>
                           </td>
                         </tr>
                       );
