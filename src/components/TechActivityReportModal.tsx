@@ -98,7 +98,7 @@ export function TechActivityReportModal({
   onSetHourlyOtMode,
   hourlyOtModeBusy,
 }: Props) {
-  const { employee, techManual, techCategoryCounts, techCarryover, ticketsAssigned, ticketsCompleted, workingDays, twoTechCount, hoursWorked, overtimeHours, hourlyRate, techHourlyPay, techHourlyPayStraight, techHourlyPayOtPremium, techWeightedRegularRate, techGuaranteedSalaryTarget, techHolidayPremium, techIncludablePay } = row;
+  const { employee, techManual, techCategoryCounts, techCarryover, ticketsAssigned, ticketsCompleted, workingDays, twoTechCount, hoursWorked, overtimeHours, hourlyRate, techHourlyPay, techHourlyPayStraight, techHourlyPayOtPremium, techWeightedRegularRate, techGuaranteedSalaryTarget, techHolidayPremium, techIncludablePay, mileageRateOverride } = row;
   const branch = employee.assigned_branch || "";
 
   // Live Company-vs-State comparison for the Hourly Pay figure — fetched
@@ -639,6 +639,13 @@ export function TechActivityReportModal({
                     }[field];
                     const savingValue = savingManualKey === `${employee.id}:${field}`;
                     const savingRate = savingRateKey === meta.rateKey;
+                    // Car IQ tab (2026-09-24): once this technician has a
+                    // Car IQ status on file, their Mileage rate is locked to
+                    // $0.20/$0.40 (see mileageRateOverride, AccountingDashboard.tsx)
+                    // instead of the shared per-branch Branch Rates figure —
+                    // shown read-only here so it can't be typed back over.
+                    const rateLocked = field === "mileage" && mileageRateOverride != null;
+                    const displayedRate = rateLocked ? (mileageRateOverride as number) : techRateFor(meta.rateKey);
                     return (
                       <tr key={field}>
                         <td className="px-3 py-2 text-slate-300">{meta.label}</td>
@@ -657,13 +664,13 @@ export function TechActivityReportModal({
                           </div>
                         </td>
                         <td className="px-3 py-2 text-right">
-                          <div className="flex items-center justify-end gap-1.5">
+                          <div className="flex items-center justify-end gap-1.5" title={rateLocked ? "Locked by this technician's Car IQ status — change it on the Accounting Dashboard's Car IQ tab, not here." : undefined}>
                             {savingRate && <Loader2 className="h-3 w-3 animate-spin text-slate-400" />}
                             <input
-                              key={`${meta.rateKey}:${techRateFor(meta.rateKey)}`}
+                              key={`${meta.rateKey}:${displayedRate}`}
                               type="number" min={0} step={0.01}
-                              defaultValue={techRateFor(meta.rateKey)}
-                              disabled={savingRate}
+                              defaultValue={displayedRate}
+                              disabled={savingRate || rateLocked}
                               onBlur={(e) => handleRateBlur(meta.rateKey, e.target.value)}
                               className={rateCellClass}
                             />

@@ -235,6 +235,18 @@ export function isCarIqEligible(role: string | null | undefined, extraRoles?: st
   return hasAnyTechnicianPayRole(role, extraRoles);
 }
 
+/** Mileage reimbursement rate ($/mi) with a company-installed Car IQ tracking device. */
+export const CAR_IQ_MILEAGE_RATE_WITH = 0.2;
+/** Mileage reimbursement rate ($/mi) without one. */
+export const CAR_IQ_MILEAGE_RATE_WITHOUT = 0.4;
+
+/** null when no Car IQ status is on file yet (Mileage rate stays branch-driven/editable). */
+export function mileageRateForCarIq(hasCarIq: boolean | null | undefined): number | null {
+  if (hasCarIq === true) return CAR_IQ_MILEAGE_RATE_WITH;
+  if (hasCarIq === false) return CAR_IQ_MILEAGE_RATE_WITHOUT;
+  return null;
+}
+
 /** Falls back to the flat ROLE_LABELS value for both fields if the role isn't in the breakdown map above. */
 export function getRoleDepartmentBreakdown(role: string | null | undefined): { department: string; roleLabel: string } {
   const code = normalizeRole(role);

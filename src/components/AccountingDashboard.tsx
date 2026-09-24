@@ -44,7 +44,7 @@ import { STATE_MIN_WAGE_2026 } from "@/lib/stateMinWage";
 import { EmployeePayrollDetailModal } from "@/components/EmployeePayrollDetailModal";
 import { getRepairStatuses, type RepairStatus } from "@/lib/supabase/repairStatuses";
 import { TicketColumnFilter } from "@/components/TicketColumnFilter";
-import { getRoleDepartmentBreakdown, normalizeRole, ROLE_LABELS, TECHNICIAN_PAY_ROLES, isMealAlwaysPaidRole, usesFlatWeeklyOvertimeThreshold, isCarIqEligible } from "@/lib/roleLabels";
+import { getRoleDepartmentBreakdown, normalizeRole, ROLE_LABELS, TECHNICIAN_PAY_ROLES, isMealAlwaysPaidRole, usesFlatWeeklyOvertimeThreshold, isCarIqEligible, mileageRateForCarIq } from "@/lib/roleLabels";
 import { calcWorkedHours, getMyProfileSchedule, resolveScheduledNetHours, computeMealTimeCredit, computeScheduledDutyHours, getAttendanceForRange, startOfWeekSunday, splitRegularOvertimeWeekly, addDaysISO, CSR_WEEKLY_OVERTIME_THRESHOLD } from "@/lib/supabase/timecards";
 import { payGraceMinutesFor } from "@/lib/attendanceGrace";
 import { updatePayrollLineItemExtra, updatePayrollLineItemPaid } from "@/lib/supabase/payslips";
@@ -304,6 +304,15 @@ export interface EmployeePayrollRow {
    * applied into grossPay here, only on the Tech Activity Report modal.
    */
   techManual: { ldtCount: number; ldtPay: number; mileage: number; mileagePay: number; trainingValue: number; trainingPay: number; owIncentivePct: number };
+  /**
+   * Car IQ tab (2026-09-24) — when this technician has a Car IQ status set
+   * (employee_info.hasCarIq, true or false), their Mileage rate is locked
+   * to $0.20/mi (with) or $0.40/mi (without) instead of the branch's shared
+   * Branch Rates figure, and the Tech Activity Report's Mileage rate cell
+   * is disabled so it can't be typed over. null = no Car IQ status set yet
+   * — Mileage rate stays branch-driven and editable, unchanged from before.
+   */
+  mileageRateOverride: number | null;
   /**
    * Tech Payroll only — hoursWorked × hourlyRate, plus overtimeHours ×
    * hourlyRate × 1.5, using the same hourly rate Finance sets via the
@@ -2515,7 +2524,20 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
     // handleManualPayBlur, which always re-saves whatever's currently
     // showing for every field, not just the one just edited.
     const effectiveMileage = manual ? manual.mileage : includeTech ? techAutoMileageByProfile.get(emp.id) ?? 0 : 0;
-    const effectiveMileagePay = manual ? manual.mileagePay : effectiveMileage * techRateFor("Mileage", techBranch);
+    // Car IQ tab (2026-09-24): once a technician has a Car IQ status on
+    // file, their Mileage rate is locked to $0.20/$0.40 regardless of the
+    // branch's shared rate — and, unlike the plain branch-rate path below,
+    // recomputed fresh every time rather than trusting a stale saved
+    // manual.mileagePay, since the whole point of locking it is that
+    // Finance shouldn't need to re-touch this technician's mileage line
+    // just to pick up a Car IQ status set after their last edit.
+    const mileageRateOverride = mileageRateForCarIq(employeeInfoByProfileId.get(emp.id)?.hasCarIq);
+    const effectiveMileagePay =
+      mileageRateOverride != null
+        ? effectiveMileage * mileageRateOverride
+        : manual
+        ? manual.mileagePay
+        : effectiveMileage * techRateFor("Mileage", techBranch);
     // LDT no longer has any editable UI anywhere in the app (its row was
     // removed from the Tech Activity Report) — manual.ldtPay is dead going
     // forward, deliberately left out of every pay total below so it can't
@@ -2697,6 +2719,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
               trainingPay: manual?.trainingPay ?? 0,
               owIncentivePct: manual?.owIncentivePct ?? 0,
             },
+            mileageRateOverride,
             techHourlyPay,
             techHourlyPayCompanyOnly,
             techHourlyPayStraight,
@@ -2741,6 +2764,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
       workingDays,
       twoTechCount: 0,
       techManual: { ldtCount: 0, ldtPay: 0, mileage: 0, mileagePay: 0, trainingValue: 0, trainingPay: 0, owIncentivePct: 0 },
+      mileageRateOverride: null,
       techHourlyPay: 0,
       techHourlyPayCompanyOnly: 0,
       techHourlyPayStraight: 0,
