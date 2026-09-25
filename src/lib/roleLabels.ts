@@ -6,6 +6,8 @@
  * database. The Firestore console — and any UI that needs a "User Type"
  * label — uses the values from this map instead of the raw code.
  */
+import { getModuleRoleGate, MODULE_LEVEL_GATE_SLUG } from "./moduleAccess";
+
 export const ROLE_LABELS: Record<string, string> = {
   SUPERSUPERADMIN: "Super Super Admin",
   SUPERADMIN: "Super Admin",
@@ -342,8 +344,24 @@ export function isCsrRestrictedRole(role: string | null | undefined, extraRoles?
   return everyHeldRoleIn(CSR_RESTRICTED_ROLES, role, extraRoles);
 }
 
-/** Whether a CSR department role may open this module at all. Non-CSR roles always pass. */
+/**
+ * Whether this role may open the module AT ALL — the module tile/route
+ * itself, before ever getting to any individual submodule inside it.
+ * Checks the admin-configurable module-level gate first (Accessibility
+ * Management's "Whole Module" box, module_role_gate_overrides keyed under
+ * MODULE_LEVEL_GATE_SLUG — no override recorded there means open to
+ * everyone, same permissive default every other gate in this system uses),
+ * then falls back to the CSR department's own hardcoded restriction.
+ * SUPERADMIN always passes regardless of either check.
+ */
 export function isModuleAllowed(role: string | null | undefined, moduleSlug: string, extraRoles?: string[] | null): boolean {
+  if (normalizeRole(role) !== "SUPERADMIN") {
+    const moduleLevelOverride = getModuleRoleGate(moduleSlug, MODULE_LEVEL_GATE_SLUG);
+    if (moduleLevelOverride) {
+      const normalizedOverride = moduleLevelOverride.map((r) => normalizeRole(r));
+      if (!allHeldRoles(role, extraRoles).some((r) => normalizedOverride.includes(r))) return false;
+    }
+  }
   if (!isCsrRestrictedRole(role, extraRoles)) return true;
   return CSR_ALLOWED_MODULES.has(moduleSlug);
 }
@@ -636,6 +654,37 @@ const CSR_MANAGER_ROLES = new Set(["CSR_MANAGER"]);
  */
 export function isCsrManagerRole(role: string | null | undefined, extraRoles?: string[] | null): boolean {
   return anyHeldRoleIn(CSR_MANAGER_ROLES, role, extraRoles);
+}
+
+/**
+ * Of ATTENDANCE_MANAGER_TIER_ROLES, the literal "Team Leader" tier — the
+ * narrowest manager-tier roles, one rung above an individual contributor.
+ * Employee Monitoring (AbsentListPage.tsx's visibleEmployeeMonitoringProfileIds)
+ * scopes someone holding ONLY one of these to just their own direct
+ * reports; every other manager-tier role ("Branch Manager and up," per the
+ * request that added this — Senior Branch Manager chief among them) instead
+ * sees their whole downward management chain. Deliberately narrower than
+ * ATTENDANCE_MANAGER_TIER_ROLES itself, which stays untouched — Attendance
+ * Monitoring's own single-level scoping isn't part of this change.
+ */
+const EMPLOYEE_MONITORING_TEAM_LEAD_ONLY_ROLES = new Set(["CSR_TEAM_LEADER", "PARTS_TEAM_LEADER", "CLAIMS_TEAM_LEADER"]);
+const EMPLOYEE_MONITORING_SENIOR_ROLES = new Set(
+  Array.from(ATTENDANCE_MANAGER_TIER_ROLES).filter((r) => !EMPLOYEE_MONITORING_TEAM_LEAD_ONLY_ROLES.has(r))
+);
+
+/** True only if the person holds a team-lead-only role AND no broader
+ *  manager-tier one — holding even one broader role (Branch Manager, Senior
+ *  Branch Manager, CSR_MANAGER, ...) alongside it grants the broader
+ *  downward-chain scope instead, same "a wider role only ever widens
+ *  access" convention as the rest of this file. Checking "holds team-lead
+ *  AND not holds broader" (rather than everyHeldRoleIn, which would also
+ *  trip on an unrelated non-manager-tier extra role like TECHNICIAN) keeps
+ *  this scoped to just the manager-tier roles that actually matter here. */
+export function isEmployeeMonitoringTeamLeadOnlyRole(role: string | null | undefined, extraRoles?: string[] | null): boolean {
+  return (
+    anyHeldRoleIn(EMPLOYEE_MONITORING_TEAM_LEAD_ONLY_ROLES, role, extraRoles) &&
+    !anyHeldRoleIn(EMPLOYEE_MONITORING_SENIOR_ROLES, role, extraRoles)
+  );
 }
 
 /**

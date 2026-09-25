@@ -41,7 +41,7 @@ import { Switch } from "@/components/ui/switch";
 import { ManagerReviewPage, SUPPORTED_TYPES as EMPLOYER_SIGN_SUPPORTED_TYPES } from "@/components/ManagerReviewPage";
 import { getCompanyUsers, getMyProfileId, setProfileFrozen, type ProfileRow } from "@/lib/supabase/users";
 import { isEligibleForTechnicianFormChecklist, isBmAndUpRole, getRoleDepartmentBreakdown } from "@/lib/roleLabels";
-import { getSignableDocumentsByTypes, getExistingActiveDocumentTypes, createSignableDocument, updateSignableDocumentPdfUrl, confirmSignableDocument, type SignableDocument, type SignableDocumentType } from "@/lib/supabase/signableDocuments";
+import { getSignableDocumentsByTypes, getExistingActiveDocuments, createSignableDocument, updateSignableDocumentPdfUrl, confirmSignableDocument, type SignableDocument, type SignableDocumentType } from "@/lib/supabase/signableDocuments";
 import {
   SIGNABLE_DOCUMENT_REGISTRY,
   TECHNICIAN_FORM_TYPES,
@@ -265,7 +265,7 @@ function writeCachedDocs(tab: ChecklistTabKey, entries: Map<string, SignableDocu
 
 type SortMode = "missing-desc" | "missing-asc" | "name" | "branch";
 
-export function TechnicianFormChecklistPage() {
+export function TechnicianFormChecklistPage({ embedded }: { embedded?: boolean } = {}) {
   const navigate = useNavigate();
   const { uid, displayName } = useAuth();
   const [myProfileId, setMyProfileId] = useState<string | null>(null);
@@ -681,7 +681,15 @@ export function TechnicianFormChecklistPage() {
       // checklist, "Send" only ever means "this hasn't been sent yet", so a
       // hit here means the screen was wrong, not that HR actually wants a
       // second one.
-      const alreadySent = await getExistingActiveDocumentTypes(personId, [type]);
+      // Bucket-filtered the same way the "not sent" status above is (see
+      // line ~476) — an old-tab w8ben/w9/contractor_addendum document is
+      // invisible on this tab's own completeness count, so it shouldn't
+      // block a send from here either, or "not sent" and "can't send,
+      // already on file" would both be true at once for the same row.
+      const alreadySentRaw = await getExistingActiveDocuments(personId, [type]);
+      const alreadySent = alreadySentRaw.filter(
+        (d) => !SHARED_OLD_NEW_AUTOMATION_TYPES.has(d.documentType) || isNewAutomationDoc(d) === (activeConfig.formSourceBucket === "new")
+      );
       if (alreadySent.length > 0) {
         setActionError(`${personName} already has a ${SIGNABLE_DOCUMENT_REGISTRY[type]?.label ?? type} on file (most likely just sent from another session) — refreshing to show its current status.`);
         await loadDocsForActiveTab();
@@ -754,7 +762,17 @@ export function TechnicianFormChecklistPage() {
       // the live database right before creating anything, in case another
       // session already sent one or more of these since this session's
       // last load.
-      const alreadyActive = await getExistingActiveDocumentTypes(r.profileId, outstanding);
+      // Bucket-filtered the same way as handleSendForm's own check above —
+      // an old-tab w8ben/w9/contractor_addendum document shouldn't count as
+      // "already active" for a bundle sent from the new-automation bucket.
+      const alreadyActiveRaw = await getExistingActiveDocuments(r.profileId, outstanding);
+      const alreadyActive = Array.from(
+        new Set(
+          alreadyActiveRaw
+            .filter((d) => !SHARED_OLD_NEW_AUTOMATION_TYPES.has(d.documentType) || isNewAutomationDoc(d) === (activeConfig.formSourceBucket === "new"))
+            .map((d) => d.documentType)
+        )
+      );
       const toCreate = outstanding.filter((type) => !alreadyActive.includes(type));
       if (toCreate.length === 0) {
         setActionError(`${r.name} already has all of these on file (most likely just sent from another session) — refreshing to show current status.`);
@@ -938,22 +956,26 @@ export function TechnicianFormChecklistPage() {
 
   return (
     <>
-    <main className="max-w-[1000px] mx-auto px-6 py-8">
+    <main className={embedded ? "" : "max-w-[1000px] mx-auto px-6 py-8"}>
       <div className="flex items-center gap-3 mb-4">
-        <button
-          type="button"
-          onClick={() => navigate({ to: "/m/$module", params: { module: "hr" } })}
-          className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/15 bg-white/5 text-slate-300 hover:text-white"
-        >
-          <ChevronLeft className="h-4 w-4" />
-        </button>
-        <div className="flex-1">
-          <h1 className="flex items-center gap-2 text-xl font-bold text-white">
-            <ClipboardCheck className="h-5 w-5" /> Staff Form Checklist
-          </h1>
-          <p className="text-sm text-slate-400">Live signed/pending status for every tracked form, per tier — nothing here is manually checked.</p>
-        </div>
-        <span className="shrink-0 rounded-full border border-white/15 bg-white/5 px-2.5 py-1 text-xs font-semibold text-slate-300">
+        {!embedded && (
+          <button
+            type="button"
+            onClick={() => navigate({ to: "/m/$module", params: { module: "hr" } })}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/15 bg-white/5 text-slate-300 hover:text-white"
+          >
+            <ChevronLeft className="h-4 w-4" />
+          </button>
+        )}
+        {!embedded && (
+          <div className="flex-1">
+            <h1 className="flex items-center gap-2 text-xl font-bold text-white">
+              <ClipboardCheck className="h-5 w-5" /> Staff Form Checklist
+            </h1>
+            <p className="text-sm text-slate-400">Live signed/pending status for every tracked form, per tier — nothing here is manually checked.</p>
+          </div>
+        )}
+        <span className={`shrink-0 rounded-full border border-white/15 bg-white/5 px-2.5 py-1 text-xs font-semibold text-slate-300 ${embedded ? "ml-auto" : ""}`}>
           {visibleRows.length === rows.length
             ? `${rows.length} ${activeConfig.noun}`
             : `${visibleRows.length} of ${rows.length} ${activeConfig.noun}`}

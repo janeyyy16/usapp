@@ -81,21 +81,21 @@ import { canAccessUserManagement, getUserManagementRecord, canAccessAdminModule 
 import { isSubmoduleAllowed, isSubmoduleAllowedForTrainee, isSubmoduleAllowedForFrozen, isCompanySuperAdminRole, isCsrRestrictedRole } from "@/lib/roleLabels";
 import { CompanySettingsPage } from "@/components/CompanySettingsPage";
 import { getDashboardRoleGate, hasDashboardAccess } from "@/lib/dashboardAccess";
-import { getModuleRoleGate } from "@/lib/moduleAccess";
+import { useModuleRoleGate } from "@/lib/moduleAccess";
 // Roles allowed into the admin module overall, and into User Management /
 // Activity Logs specifically. Checked via hasDashboardAccess so a secondary
 // role (profiles.extra_roles) grants access too, not just the primary role —
 // e.g. a Parts Manager who's also been given Admin as a secondary role.
 // Shared with submoduleAccess.ts (used by home.tsx/ModuleNavigator.tsx to
 // decide what to even list) so both surfaces can never drift apart.
-import { ADMIN_MODULE_ROLES, USER_MANAGEMENT_ROLES, ACTIVITY_LOG_ROLES, WHEREABOUTS_ROLES } from "@/lib/submoduleAccess";
-import { getMyRoles } from "@/lib/supabase/users";
+import { ADMIN_MODULE_ROLES, USER_MANAGEMENT_DEFAULT_ROLES, ACTIVITY_LOG_DEFAULT_ROLES, WHEREABOUTS_DEFAULT_ROLES } from "@/lib/submoduleAccess";
 import { ROLE_LABELS } from "@/lib/roleLabels";
-import { useEffect, useState } from "react";
 import { ReportHRDaily } from "@/components/ReportHRDaily";
 import { HrOnboardingChecklistPage } from "@/components/HrOnboardingChecklistPage";
 import { TechnicianFormChecklistPage } from "@/components/TechnicianFormChecklistPage";
 import { HiringAnalyticsPage } from "@/components/HiringAnalyticsPage";
+import { CandidateReviewsPage } from "@/components/CandidateReviewsPage";
+import { TrainingListPage } from "@/components/TrainingListPage";
 import { AbsentListPage } from "@/components/AbsentListPage";
 import { ExpensesModulePage } from "@/components/ExpensesModulePage";
 import { StaffListPage } from "@/components/StaffListPage";
@@ -170,7 +170,7 @@ export const Route = createFileRoute("/m/$module/$submodule")({
 });
 
 function SubModule() {
-  const { ready, email, companyId, role, uid, isTrainee, isFrozen } = useAuth();
+  const { ready, email, companyId, role, extraRoles, uid, isTrainee, isFrozen } = useAuth();
   // Route.useLoaderData()'s type resolves to `undefined` for this route in
   // the current @tanstack/react-router version — a known inference gap for
   // parent routes with children, not a real runtime issue (the loader
@@ -181,9 +181,18 @@ function SubModule() {
   // Role gates that also need to honor a secondary role (profiles.
   // extra_roles) — a Parts Manager who's ALSO been given Admin as a
   // secondary role should still get into the admin module, not just users
-  // whose PRIMARY role is Admin/SuperAdmin. Only fetch extra_roles when the
-  // primary role alone doesn't already pass any of these three gates —
-  // avoids an extra query on every ungated page load.
+  // whose PRIMARY role is Admin/SuperAdmin. extraRoles comes straight from
+  // useAuth() (already loaded at login, no second fetch needed) rather
+  // than a separate getMyRoles(uid) DB call this file used to make — that
+  // second call read the REAL signed-in account's extra_roles directly
+  // from the database, which silently ignored a Super Admin's "View as"
+  // role preview: previewing as a role with no access still let them
+  // through if their REAL account happened to hold a matching secondary
+  // role (exactly what a Super Admin testing "does revoking this role's
+  // access actually work" would trip over, since their own real account
+  // commonly holds several secondary roles for its own day-to-day use).
+  // useAuth().extraRoles is already the correctly-simulated value during a
+  // preview (forced to [] — see auth.tsx's effectiveExtraRoles).
   //
   // Raw override only (no Dashboard hardcoded-default folded in) — whether
   // an admin has explicitly set this exact (module, submodule)'s allowed
@@ -195,7 +204,12 @@ function SubModule() {
   // CSR-restricted role. Without an override, the CSR restriction (and,
   // for Dashboard, its own hardcoded per-submodule default) still applies
   // exactly as before this system existed.
-  const explicitModuleOverride = getModuleRoleGate(mod.slug, sub.slug);
+  // Reactive — re-renders this page immediately when this (module,
+  // submodule)'s override changes, whether saved from this same tab or
+  // pushed live from another session via auth.tsx's realtime subscription.
+  // Someone sitting on a page an admin just revoked sees "Access
+  // restricted" right away instead of only after their next reload.
+  const explicitModuleOverride = useModuleRoleGate(mod.slug, sub.slug);
   // moduleAllowedRoles covers every module, not just Dashboard: the
   // Dashboard module additionally has a hardcoded default per submodule
   // (getDashboardRoleGate, DASHBOARD_ROLE_GATES) for when there's no
@@ -219,27 +233,6 @@ function SubModule() {
   // would make it inherit HR's "todo-list" DASHBOARD_ROLE_GATES entry too
   // (gates are keyed by submodule slug alone). See dashboardAccess.ts.
   const moduleAllowedRoles = (mod.slug === "dashboard" || mod.slug === "hr" || mod.slug === "accounting" || mod.slug === "csr" || (sub as any).custom === "receiving-status") ? getDashboardRoleGate(sub.slug) : explicitModuleOverride;
-  const roleGrantsQuick = !moduleAllowedRoles || hasDashboardAccess(moduleAllowedRoles, role, []);
-  const adminGrantsQuick = mod.slug !== "admin" || hasDashboardAccess(ADMIN_MODULE_ROLES, role, []);
-  const userMgmtGrantsQuick = sub.custom !== "user-management" || hasDashboardAccess(USER_MANAGEMENT_ROLES, role, []);
-  const activityLogGrantsQuick = (sub as any).custom !== "universal-activity-log" || hasDashboardAccess(ACTIVITY_LOG_ROLES, role, []);
-  // CSR restriction is the mirror case — restricted based on primary role
-  // alone (quick, no extraRoles) means a secondary non-CSR role could still
-  // lift it, so that also needs extraRoles resolved before deciding. An
-  // explicit override settles it immediately regardless of role, same as
-  // the bypass below.
-  const csrGrantsQuick = Boolean(explicitModuleOverride) || !isCsrRestrictedRole(role);
-  // company-settings is a RESTRICTION relative to the general admin-module
-  // gate (plain ADMIN must NOT get in, only the per-company SUPERADMIN role)
-  // so it always needs extraRoles resolved, not just when the quick check fails.
-  const needsExtraRoles = (Boolean(moduleAllowedRoles) && !roleGrantsQuick) || !adminGrantsQuick || !userMgmtGrantsQuick || !activityLogGrantsQuick || !csrGrantsQuick || sub.custom === "company-settings";
-  const [extraRoles, setExtraRoles] = useState<string[] | null>(null);
-  useEffect(() => {
-    if (!needsExtraRoles || !ready || !uid) return;
-    let cancelled = false;
-    getMyRoles(uid).then(({ extraRoles }) => { if (!cancelled) setExtraRoles(extraRoles); });
-    return () => { cancelled = true; };
-  }, [needsExtraRoles, ready, uid]);
 
   if (!ready) return null;
   if (!email) return <Navigate to="/landing" replace />;
@@ -253,25 +246,7 @@ function SubModule() {
   // restriction while it's set, not something a leftover permission grant
   // can quietly punch a hole in.
   if (!isSubmoduleAllowedForTrainee(isTrainee, mod.slug, sub.slug)) {
-    return (
-      <>
-        <AppHeader />
-        <main className="flex-1 bg-slate-950 py-6">
-          <div className="max-w-4xl mx-auto px-6">
-            <div className="rounded-xl border border-white/15 bg-white/8 p-6 text-white backdrop-blur-md">
-              <h1 className="text-2xl font-bold">Access restricted</h1>
-              <p className="mt-2 text-sm text-slate-300">
-                You're currently marked as a Trainee — only the Employee Self-Service dashboard is available until this changes.
-              </p>
-              <p className="mt-2 text-sm text-slate-400">
-                Current sign-in: {email}
-              </p>
-            </div>
-          </div>
-        </main>
-        <Footer />
-      </>
-    );
+    return <Navigate to="/home" replace />;
   }
 
   // Frozen accounts only see Messages — same absolute, override-proof
@@ -306,40 +281,12 @@ function SubModule() {
     );
   }
 
-  // Wait for the extra_roles fetch before deciding any gate that needs it
-  // (dashboard/admin/user-management/CSR restriction) when the primary role
-  // alone doesn't already settle it — avoids a flash of the denied panel for
-  // someone who only qualifies (or is only exempted from a restriction) via
-  // a secondary role.
-  if (needsExtraRoles && extraRoles === null) return null;
-
   // CSR Agents/Team Leaders get a narrow allow-list (their own Dashboard
   // tools + Tickets) — this is what actually stops someone from bypassing
   // the hidden tiles by typing the URL directly. Skipped entirely when an
   // admin has explicitly overridden this exact submodule's roles.
   if (!explicitModuleOverride && !isSubmoduleAllowed(role, mod.slug, sub.slug, extraRoles)) {
-    return (
-      <>
-        <AppHeader />
-        <main className="flex-1 bg-slate-950 py-6">
-          <div className="max-w-4xl mx-auto px-6">
-            <div className="rounded-xl border border-white/15 bg-white/8 p-6 text-white backdrop-blur-md">
-              <h1 className="text-2xl font-bold">Access restricted</h1>
-              <p className="mt-2 text-sm text-slate-300">
-                Your role doesn't have access to {sub.title}.
-              </p>
-              <p className="mt-2 text-sm text-slate-400">
-                Current sign-in: {email}
-              </p>
-              <p className="mt-1 text-sm text-slate-400">
-                Your role: {role || "No role assigned"}
-              </p>
-            </div>
-          </div>
-        </main>
-        <Footer />
-      </>
-    );
+    return <Navigate to="/home" replace />;
   }
 
   // Check admin access using Firebase role — primary role OR a secondary
@@ -358,7 +305,8 @@ function SubModule() {
   const hasItTicketsAccess = sub.custom === "it-tickets" && hasDashboardAccess(getDashboardRoleGate("it-tickets") || [], role, extraRoles);
 
   // User Management and Activity Logs both have their own, more permissive
-  // role lists below (USER_MANAGEMENT_ROLES / ACTIVITY_LOG_ROLES) — carved
+  // role lists below (explicitModuleOverride, falling back to
+  // USER_MANAGEMENT_DEFAULT_ROLES / ACTIVITY_LOG_DEFAULT_ROLES) — carved
   // out here so someone who qualifies via one of THOSE lists but isn't
   // Admin/SuperAdmin doesn't get blocked by this broader gate before ever
   // reaching their dedicated check.
@@ -378,114 +326,36 @@ function SubModule() {
     !isActivityLogSubmodule &&
     !isWhereaboutsSubmodule
   ) {
-    return (
-      <>
-        <AppHeader />
-        <main className="flex-1 bg-slate-950 py-6">
-          <div className="max-w-4xl mx-auto px-6">
-            <div className="rounded-xl border border-white/15 bg-white/8 p-6 text-white backdrop-blur-md">
-              <h1 className="text-2xl font-bold">Access restricted</h1>
-              <p className="mt-2 text-sm text-slate-300">
-                The admin module is only available to Admin and SuperAdmin users.
-              </p>
-              <p className="mt-2 text-sm text-slate-400">
-                Current sign-in: {email}
-              </p>
-              <p className="mt-1 text-sm text-slate-400">
-                Your role: {role || "No role assigned"}
-              </p>
-            </div>
-          </div>
-        </main>
-        <Footer />
-      </>
-    );
+    return <Navigate to="/home" replace />;
   }
-  
+
   // Check user management access using Firebase role — same primary-or-
-  // secondary-role logic as the admin gate above.
-  const hasUserManagementAccess = hasDashboardAccess(USER_MANAGEMENT_ROLES, role, extraRoles);
+  // secondary-role logic as the admin gate above. USER_MANAGEMENT_DEFAULT_
+  // ROLES is only the fallback when no company override exists (module
+  // "admin", submodule "user-management") — Accessibility Management can
+  // narrow or widen this like any other page's access.
+  const userManagementAllowedRoles = explicitModuleOverride ?? USER_MANAGEMENT_DEFAULT_ROLES;
+  const hasUserManagementAccess = hasDashboardAccess(userManagementAllowedRoles, role, extraRoles);
 
   if (isUserManagementSubmodule && !hasUserManagementAccess) {
-    return (
-      <>
-        <AppHeader />
-        <main className="flex-1 bg-slate-950 py-6">
-          <div className="max-w-4xl mx-auto px-6">
-            <div className="rounded-xl border border-white/15 bg-white/8 p-6 text-white backdrop-blur-md">
-              <h1 className="text-2xl font-bold">Access restricted</h1>
-              <p className="mt-2 text-sm text-slate-300">
-                User management is only available to HR, Manager, Senior Branch Manager, Admin, and SuperAdmin users.
-              </p>
-              <p className="mt-2 text-sm text-slate-400">
-                Current sign-in: {email}
-              </p>
-              <p className="mt-1 text-sm text-slate-400">
-                Your role: {role || "No role assigned"}
-              </p>
-            </div>
-          </div>
-        </main>
-        <Footer />
-      </>
-    );
+    return <Navigate to="/home" replace />;
   }
 
   // Activity Logs — same carve-out pattern as User Management above.
-  const hasActivityLogAccess = hasDashboardAccess(ACTIVITY_LOG_ROLES, role, extraRoles);
+  const activityLogAllowedRoles = explicitModuleOverride ?? ACTIVITY_LOG_DEFAULT_ROLES;
+  const hasActivityLogAccess = hasDashboardAccess(activityLogAllowedRoles, role, extraRoles);
 
   if (isActivityLogSubmodule && !hasActivityLogAccess) {
-    return (
-      <>
-        <AppHeader />
-        <main className="flex-1 bg-slate-950 py-6">
-          <div className="max-w-4xl mx-auto px-6">
-            <div className="rounded-xl border border-white/15 bg-white/8 p-6 text-white backdrop-blur-md">
-              <h1 className="text-2xl font-bold">Access restricted</h1>
-              <p className="mt-2 text-sm text-slate-300">
-                Activity Logs is only available to Senior Branch Manager, Admin, and SuperAdmin users.
-              </p>
-              <p className="mt-2 text-sm text-slate-400">
-                Current sign-in: {email}
-              </p>
-              <p className="mt-1 text-sm text-slate-400">
-                Your role: {role || "No role assigned"}
-              </p>
-            </div>
-          </div>
-        </main>
-        <Footer />
-      </>
-    );
+    return <Navigate to="/home" replace />;
   }
 
   // Technician Whereabouts — same carve-out pattern as User Management/
   // Activity Logs above.
-  const hasWhereaboutsAccess = hasDashboardAccess(WHEREABOUTS_ROLES, role, extraRoles);
+  const whereaboutsAllowedRoles = explicitModuleOverride ?? WHEREABOUTS_DEFAULT_ROLES;
+  const hasWhereaboutsAccess = hasDashboardAccess(whereaboutsAllowedRoles, role, extraRoles);
 
   if (isWhereaboutsSubmodule && !hasWhereaboutsAccess) {
-    return (
-      <>
-        <AppHeader />
-        <main className="flex-1 bg-slate-950 py-6">
-          <div className="max-w-4xl mx-auto px-6">
-            <div className="rounded-xl border border-white/15 bg-white/8 p-6 text-white backdrop-blur-md">
-              <h1 className="text-2xl font-bold">Access restricted</h1>
-              <p className="mt-2 text-sm text-slate-300">
-                Technician Whereabouts is only available to Technical Director, Admin, and SuperAdmin users.
-              </p>
-              <p className="mt-2 text-sm text-slate-400">
-                Current sign-in: {email}
-              </p>
-              <p className="mt-1 text-sm text-slate-400">
-                Your role: {role || "No role assigned"}
-              </p>
-            </div>
-          </div>
-        </main>
-        <Footer />
-      </>
-    );
+    return <Navigate to="/home" replace />;
   }
 
   // Company Settings is narrower than the general admin-module gate above —
@@ -494,28 +364,7 @@ function SubModule() {
   const hasCompanySettingsAccess = isCompanySuperAdminRole(role, extraRoles);
 
   if (sub.custom === "company-settings" && !hasCompanySettingsAccess) {
-    return (
-      <>
-        <AppHeader />
-        <main className="flex-1 bg-slate-950 py-6">
-          <div className="max-w-4xl mx-auto px-6">
-            <div className="rounded-xl border border-white/15 bg-white/8 p-6 text-white backdrop-blur-md">
-              <h1 className="text-2xl font-bold">Access restricted</h1>
-              <p className="mt-2 text-sm text-slate-300">
-                Company Settings is only available to this company's SuperAdmin.
-              </p>
-              <p className="mt-2 text-sm text-slate-400">
-                Current sign-in: {email}
-              </p>
-              <p className="mt-1 text-sm text-slate-400">
-                Your role: {role || "No role assigned"}
-              </p>
-            </div>
-          </div>
-        </main>
-        <Footer />
-      </>
-    );
+    return <Navigate to="/home" replace />;
   }
 
   const hasNestedUserRoute = sub.custom === "user-management" && location.pathname.split("/").filter(Boolean).length > 3;
@@ -524,8 +373,7 @@ function SubModule() {
     return <Outlet />;
   }
 
-  // Module/submodule role gate resolution (extra_roles fetch already
-  // awaited above, alongside the admin/user-management gates).
+  // Module/submodule role gate resolution.
   // internal-message-support stays exempt here too, not just from the
   // "admin module" gate above (ALL_ROLES_ADMIN_SUBMODULES) — otherwise a
   // company configuring ANY role-gate override for it via Accessibility
@@ -534,34 +382,11 @@ function SubModule() {
   // Team Messenger, defeating the whole point of that carve-out.
   const moduleAccessOk =
     !moduleAllowedRoles ||
-    roleGrantsQuick ||
     (mod.slug === "admin" && ALL_ROLES_ADMIN_SUBMODULES.has(sub.slug)) ||
     hasDashboardAccess(moduleAllowedRoles, role, extraRoles);
 
   if (moduleAllowedRoles && !moduleAccessOk) {
-    const allowedLabels = moduleAllowedRoles.map((r) => ROLE_LABELS[r] || r).join(", ");
-    return (
-      <>
-        <AppHeader />
-        <main className="flex-1 bg-slate-950 py-6">
-          <div className="max-w-4xl mx-auto px-6">
-            <div className="rounded-xl border border-white/15 bg-white/8 p-6 text-white backdrop-blur-md">
-              <h1 className="text-2xl font-bold">Access restricted</h1>
-              <p className="mt-2 text-sm text-slate-300">
-                {sub.title} is only available to {allowedLabels}, and SuperAdmin users.
-              </p>
-              <p className="mt-2 text-sm text-slate-400">
-                Current sign-in: {email}
-              </p>
-              <p className="mt-1 text-sm text-slate-400">
-                Your role: {role || "No role assigned"}
-              </p>
-            </div>
-          </div>
-        </main>
-        <Footer />
-      </>
-    );
+    return <Navigate to="/home" replace />;
   }
 
   return (
@@ -721,6 +546,10 @@ function SubModule() {
         ? <TechnicianFormChecklistPage />
         : (sub as any).custom === "hiring-analytics"
         ? <HiringAnalyticsPage />
+        : (sub as any).custom === "training-list"
+        ? <TrainingListPage />
+        : (sub as any).custom === "candidate-reviews"
+        ? <CandidateReviewsPage />
         : (sub as any).custom === "absent-list"
         ? <AbsentListPage mod={mod} sub={sub} />
         : (sub as any).custom === "flash-tech"

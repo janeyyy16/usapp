@@ -17,7 +17,7 @@ import { getMyProfileId } from "@/lib/supabase/users";
 import { getSignableDocument, signDocument, type SignableDocument } from "@/lib/supabase/signableDocuments";
 import { uploadSignableDocumentSignature, uploadSignableDocumentAttachment, uploadSsnCardForm, refreshStorageAuthToken } from "@/lib/firebase/storage";
 import { compressImage } from "@/lib/imageCompression";
-import { captureHtmlToPdfBlob, loadAssetDataUrl } from "@/lib/pdfCapture";
+import { captureHtmlToPdfBlob, loadAssetDataUrl, fileToDataUrl } from "@/lib/pdfCapture";
 import { buildSsnCardFormBodyMarkup, ssnCardFormStyles, type SsnCardFormData } from "@/lib/ssnCardFormTemplate";
 import { getOrCreateDmThread, sendMessage } from "@/lib/supabase/messaging";
 import { logActivity } from "@/lib/supabase/hrActivityLog";
@@ -34,6 +34,7 @@ const BLANK_FORM: SsnCardFormData = {
   employeeId: "",
   employeeName: "",
   ssn: "",
+  livedInNewYork: "",
   cardPhotoUrls: [],
   dateSigned: "",
   signatureDataUrl: "",
@@ -113,6 +114,7 @@ export function FillSsnCardPage({ docId }: Props) {
   const validate = (): string | null => {
     if (!form.employeeName.trim()) return "Enter your full name.";
     if (!form.ssn.trim()) return "Enter your Social Security Number.";
+    if (!form.livedInNewYork) return "Answer whether you've lived in New York in the past 7 years.";
     if (cardFiles.length === 0) return "Upload a photo of your Social Security Card.";
     if (!sigPad.hasContent()) return "Please add your signature.";
     return null;
@@ -150,11 +152,20 @@ export function FillSsnCardPage({ docId }: Props) {
       const signatureUrl = await withTimeout(uploadSignableDocumentSignature(companyId, doc.id, "employee", dataUrl), 30_000, "Uploading signature");
       const signedAt = new Date().toISOString();
       const finalData: SsnCardFormData = { ...form, cardPhotoUrls, dateSigned: signedAt, signatureDataUrl: dataUrl };
+      // Stored entry (signDocument, below) keeps the real Firebase Storage
+      // URL. The capture entry is separate and points at local data: URLs
+      // already in hand instead, so html2canvas never needs a cross-origin
+      // fetch for either the signature or the card photo — see
+      // fileToDataUrl's doc comment (pdfCapture.ts) for why that fetch
+      // can't be trusted to finish before the canvas snapshot.
       const entry = { name: displayName || form.employeeName || "Signed", url: signatureUrl, signedAt };
 
       setSubmitStep("Generating document…");
+      const localCardPhotoUrls = await Promise.all(compressedFiles.map(fileToDataUrl));
+      const captureData: SsnCardFormData = { ...finalData, cardPhotoUrls: localCardPhotoUrls };
+      const captureEntry = { ...entry, url: dataUrl };
       const pdfBlob = await withTimeout(
-        captureHtmlToPdfBlob(buildSsnCardFormBodyMarkup(finalData, logoDataUrl, entry), ssnCardFormStyles),
+        captureHtmlToPdfBlob(buildSsnCardFormBodyMarkup(captureData, logoDataUrl, captureEntry), ssnCardFormStyles),
         30_000,
         "Generating document"
       );
@@ -244,6 +255,14 @@ export function FillSsnCardPage({ docId }: Props) {
                 <div>
                   <label className={labelCls}>Social Security Number*</label>
                   <input className={inputCls} value={form.ssn} onChange={(e) => updateField("ssn", e.target.value)} />
+                </div>
+                <div>
+                  <label className={labelCls}>Have you lived in New York in the past 7 years?*</label>
+                  <select className={inputCls} value={form.livedInNewYork} onChange={(e) => updateField("livedInNewYork", e.target.value as SsnCardFormData["livedInNewYork"])}>
+                    <option value="">Please Select</option>
+                    <option value="Yes">Yes</option>
+                    <option value="No">No</option>
+                  </select>
                 </div>
                 <div>
                   <label className={labelCls}>SSN Card Photo*</label>

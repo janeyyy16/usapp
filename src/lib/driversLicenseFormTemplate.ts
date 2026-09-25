@@ -25,6 +25,9 @@ export interface DriversLicenseFormData {
   licensePhotoUrls: string[];
   dateSigned: string;
   signatureDataUrl: string;
+  /** Set when HR filed this directly (ReportHRDaily.tsx's "File on Behalf" action) instead of the employee filling/signing it themselves — there's no hand-drawn signature in that case, so the markup below shows who filed it instead of forging one. */
+  filedByHr?: boolean;
+  filedByHrName?: string;
 }
 
 export interface DriversLicenseSignature {
@@ -65,8 +68,8 @@ export const driversLicenseFormStyles = `
   .dlicense-row { border-bottom: 1px solid #d1d5db; padding: 5px 2px; }
   .dlicense-label { color: #374151; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.2px; display: block; }
   .dlicense-value { font-weight: 700; }
-  .dlicense-photos { display: flex; gap: 10px; margin-top: 6px; flex-wrap: wrap; }
-  .dlicense-photos img { width: 200px; height: 126px; object-fit: cover; border: 1px solid #d1d5db; border-radius: 4px; }
+  .dlicense-photos { display: flex; flex-direction: column; gap: 12px; margin-top: 6px; }
+  .dlicense-photos img { max-width: 660px; max-height: 600px; width: auto; height: auto; object-fit: contain; border: 1px solid #d1d5db; border-radius: 4px; }
   .dlicense-cert { margin-top: 20px; font-style: italic; }
   .dlicense-sig-line { border-bottom: 1px solid #9ca3af; min-height: 44px; padding: 4px 2px; display: flex; align-items: flex-end; margin-top: 16px; }
   .dlicense-sign-row { display: flex; justify-content: space-between; gap: 16px; padding: 6px 2px 0; }
@@ -93,13 +96,19 @@ export function buildDriversLicenseFormBodyMarkup(data: DriversLicenseFormData, 
         <div class="dlicense-photos">${data.licensePhotoUrls.map((u) => `<img src="${u}" alt="" />`).join("")}</div>
       </div>
 
-      <p class="dlicense-cert">By signing below, I certify that the driver's license information and photo provided above are true, accurate, and belong to me.</p>
+      ${data.filedByHr
+        ? `<p class="dlicense-cert">Filed by HR (${blank(data.filedByHrName || "")}) on behalf of ${blank(data.employeeName)} — no employee signature was collected for this submission.</p>
+      <div class="dlicense-sign-row">
+        <div>Filed by: <strong>${blank(data.filedByHrName || "")}</strong></div>
+        <div>${signature ? `Date: ${escapeHtml(fmtDate(signature.signedAt))}` : ""}</div>
+      </div>`
+        : `<p class="dlicense-cert">By signing below, I certify that the driver's license information and photo provided above are true, accurate, and belong to me.</p>
 
       <div class="dlicense-sig-line">${signature ? `<img class="dlicense-sig-img" src="${signature.url}" alt="Signature" />` : ""}</div>
       <div class="dlicense-sign-row">
         <div>${signature ? `Signature: <strong>${blank(data.employeeName)}</strong>` : "Signature:"}</div>
         <div>${signature ? `Date: ${escapeHtml(fmtDate(signature.signedAt))}` : ""}</div>
-      </div>
+      </div>`}
     </div>
   `;
 }
