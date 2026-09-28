@@ -39,7 +39,7 @@
  * number they were never calibrated against.
  *
  * GH is likewise live and read-only — a count of how many phone numbers
- * this CSR logged in GH Tracker (CsrGhTracker.tsx, migration 0307,
+ * this CSR logged in GH Tracker (CsrGhTracker.tsx, migration 0317,
  * csrGhTracker.ts's getGhCountsByProfileForRange) for the selected date
  * range, replacing the old CSR Self Service "+1" counter that used to write
  * straight into csr_daily_report_entries.gh. That column still exists but
@@ -49,7 +49,7 @@
  * typed in by hand for the selected date and saved per cell (migration 0275,
  * csrDailyReportEntries.ts) — one row per (profile, date).
  *
- * Right sidebar (migration 0276, csrExtensions.ts): an editable Extension
+ * Right sidebar (migration 0271/0276, csrExtensions.ts): an editable Extension
  * roster (code + what it means) shared by the AM/PM call-volume table and
  * the Information legend below it, plus a daily Summary panel — Total
  * CSR/Handle TK/Schedule/Attempt/Update/GH are computed by summing the
@@ -57,7 +57,7 @@
  * sync), while Inbound/Outbound/Update CSR Calls, Mistakes, HU, and MC
  * have no other source in the app and are typed in by hand.
  *
- * Mistake Log at the bottom (migration 0277, csrMistakeLog.ts): a plain,
+ * Mistake Log at the bottom (migration 0272/0277, csrMistakeLog.ts): a plain,
  * freely-editable running log — NOT tied to the date picker above, and
  * deliberately separate from employee_conduct_notes/csrAgentNotes.ts's
  * pending -> manager_approved -> approved review workflow, since this is

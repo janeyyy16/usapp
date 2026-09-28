@@ -12,7 +12,7 @@
  *     per agent, matching the reference spreadsheet layout exactly.
  *   - Everyone else (CSR_AGENT/CSR_TEAM_LEADER) sees only their own list for
  *     today — add a number (+ optional note), edit or delete it same-day.
- *     migration 0307's RLS enforces this at the row level too, not just in
+ *     migration 0317's RLS enforces this at the row level too, not just in
  *     this component, since this page is opened directly by individual
  *     agents rather than gated behind a manager-only page.
  */

@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+﻿import { Fragment, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useAuth } from "@/lib/auth";
 import { setDesktopOverride } from "@/lib/device";
@@ -79,7 +79,15 @@ import {
 import { resolveTeamLeadOrManager } from "@/lib/notifyRouting";
 import { visibleAttendanceProfileIds } from "@/lib/notifyRouting";
 import { getCsrTeamComposition, type CsrTeamComposition } from "@/lib/supabase/csrTeams";
-import { isAttendanceFullAccessRole, isAttendanceManagerTierRole, normalizeRole, ROLE_LABELS, TECHNICIAN_PAY_ROLES } from "@/lib/roleLabels";
+import { isAttendanceFullAccessRole, isAttendanceManagerTierRole, normalizeRole, ROLE_LABELS, TECHNICIAN_PAY_ROLES, getRoleDepartmentBreakdown } from "@/lib/roleLabels";
+import { buildCorrectionSubmissionPdf } from "@/lib/timecardCorrectionPdf";
+import { EXCEPTION_TYPE_LABELS, type ExceptionType } from "@/lib/exceptionVisitReportTemplate";
+import { buildTicketDisputeSubmissionPdf } from "@/lib/ticketDisputeReportPdf";
+import { TICKET_DISPUTE_EXCEPTION_TYPE_LABELS, type TicketDisputeExceptionType } from "@/lib/ticketDisputeReportTemplate";
+import { useSignaturePad } from "@/hooks/useSignaturePad";
+import { SignaturePadControls } from "@/components/SignaturePad";
+import { CorrectionManagerSignModal } from "@/components/CorrectionSignModals";
+import { PtoManagerSignModal } from "@/components/PtoSignModals";
 import { LOCATIONS, ACTIVE_LOCATIONS } from "@/lib/locations";
 import { timezoneForBranch, nowInTimezone } from "@/lib/attendanceGrace";
 import { getServerNow, zonedDateKey, zonedTimeString, zonedWallClockToUtcIso, TIME_ZONES, type ScheduleTimezone } from "@/lib/serverTime";
@@ -130,8 +138,20 @@ import {
   composeServicePerformed,
   emptyServicePerformed,
 } from "@/lib/servicePerformedNotes";
-import type { Ticket } from "@/lib/ticketData";
+import { statusGroupOf, type Ticket } from "@/lib/ticketData";
 import logo from "@/assets/Admin Hub Solutions Logo no Text.png";
+
+// Chromium's native <input type="date"/"time"> only opens the picker
+// popup when the calendar/clock ICON itself is clicked — clicking
+// anywhere else in the field just places a text cursor in that segment
+// for manual typing. showPicker() (Chrome/Edge 99+) opens it
+// programmatically, so wiring it to onClick makes the whole field open
+// the popup, not just the small icon. Optional-chained since Safari/
+// Firefox don't support it yet — falls back to the native icon-only
+// behavior there instead of throwing.
+const openNativePicker = (e: React.MouseEvent<HTMLInputElement>) => {
+  (e.currentTarget as HTMLInputElement & { showPicker?: () => void }).showPicker?.();
+};
 
 type View =
   | "roster"
@@ -236,23 +256,34 @@ function openDays(t: Ticket): number {
   return Math.max(0, Math.floor((Date.now() - d.getTime()) / 86400000));
 }
 
-// A "done"/closed ticket for the To Do vs Done split.
+// A "done"/closed ticket for the To Do vs Done split. Delegates to the
+// app's own statusGroupOf (ticketData.ts) instead of a separate ad hoc
+// substring check — the old check here was `status.includes("cl-")`,
+// which matched EVERY "CL-"-prefixed status including still-open ones
+// like "CL-Ready to Complete" (ready to be marked complete, not actually
+// complete yet), "CL-Need Cancel", and "CL-Parts Back Ordered" — silently
+// dropping those tickets off a technician's Today/To Do list entirely.
+// Confirmed bug: Percy Smith (Montgomery) couldn't find/submit a
+// "CL-Ready to Complete" ticket that was very much still his to finish.
+// Cancelled tickets count as done too — nothing left for the technician
+// to do on one either.
 function isDone(status: string): boolean {
-  const s = (status || "").toLowerCase();
-  return s.includes("complete") || s.includes("closed") || s.includes("cl-") || s.includes("claim");
+  const group = statusGroupOf(status);
+  return group === "completed" || group === "cancelled";
 }
 
 // Same "is this ticket's schedule today" match RouteMapView's ticket
 // filter uses (ISO or US-format schedule string) — pulled out so Home's
-// "Assigned Today" list uses the identical definition of "today".
-function isScheduledToday(t: Ticket): boolean {
+// "Assigned Today" list uses the identical definition of "today". Takes
+// `todayIso` explicitly (the SERVER's date, in the technician's own
+// scheduled timezone — see the `todayIso` state this file computes via
+// getServerNow()/zonedDateKey) rather than reading the device clock
+// itself: a technician whose phone's date/time is wrong, or who's near a
+// midnight rollover in a different zone than their branch, would
+// otherwise see yesterday's/tomorrow's tickets under "Today".
+function isScheduledToday(t: Ticket, todayIso: string): boolean {
   const rawDate = String(t.schedule || (t as any).schedule_date || "").trim();
   if (!rawDate) return false;
-  const today = new Date();
-  const yyyy = today.getFullYear();
-  const mm = String(today.getMonth() + 1).padStart(2, "0");
-  const dd = String(today.getDate()).padStart(2, "0");
-  const todayIso = `${yyyy}-${mm}-${dd}`;
   if (rawDate.startsWith(todayIso)) return true;
   const usMatch = rawDate.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
   if (usMatch) {
@@ -457,6 +488,30 @@ export function MobileTechApp() {
   // already use — see serverTime.ts).
   const [myAssignedBranch, setMyAssignedBranch] = useState("");
   const [myScheduleTimezone, setMyScheduleTimezone] = useState<ScheduleTimezone>("CST");
+  // "Today" per the SERVER's clock, in the technician's own scheduled
+  // timezone — NOT `new Date()` (device-local). A technician whose phone's
+  // date/time is off (or just sitting near midnight in a different zone
+  // than their branch) would otherwise see yesterday's or tomorrow's
+  // tickets under "Today" — confirmed bug (Tywon Ross, Jackson MS, saw
+  // 9/23 tickets under Today on 9/24). Same server-clock source the header
+  // clock and Time Clock punches already use (serverTime.ts). Synced once
+  // on mount and re-synced periodically so it still rolls over correctly
+  // if the app is left open across midnight.
+  const [todayIso, setTodayIso] = useState(() => zonedDateKey(new Date(), "CST"));
+  useEffect(() => {
+    let cancelled = false;
+    const sync = async () => {
+      try {
+        const serverNow = await getServerNow();
+        if (!cancelled) setTodayIso(zonedDateKey(serverNow, myScheduleTimezone));
+      } catch {
+        if (!cancelled) setTodayIso(zonedDateKey(new Date(), myScheduleTimezone));
+      }
+    };
+    void sync();
+    const tick = window.setInterval(sync, 5 * 60_000);
+    return () => { cancelled = true; window.clearInterval(tick); };
+  }, [myScheduleTimezone]);
   useEffect(() => {
     if (!uid) return;
     let cancelled = false;
@@ -644,6 +699,27 @@ export function MobileTechApp() {
     _persisted.tab ?? "today",
   );
   const [search, setSearch] = useState("");
+  // The Search tab searches every ticket in the company, not just this
+  // technician's own (myTickets is deliberately scoped to keep the initial
+  // load light — see the fetch effect above). Loaded lazily, once, the
+  // first time the tech actually opens Search, rather than on every app
+  // load, so plain technicians still get the cheap name-scoped fetch by
+  // default.
+  const [allTickets, setAllTickets] = useState<Ticket[] | null>(null);
+  const [allTicketsLoading, setAllTicketsLoading] = useState(false);
+  useEffect(() => {
+    if (tab !== "search" || allTickets !== null || allTicketsLoading) return;
+    let cancelled = false;
+    setAllTicketsLoading(true);
+    getCompanyTickets()
+      .then((rows) => { if (!cancelled) setAllTickets(rows); })
+      .catch((e) => {
+        console.error("Mobile: failed to load all-company tickets for search", e);
+        if (!cancelled) setAllTickets([]);
+      })
+      .finally(() => { if (!cancelled) setAllTicketsLoading(false); });
+    return () => { cancelled = true; };
+  }, [tab, allTickets, allTicketsLoading]);
   const [activeTicketNo, setActiveTicketNo] = useState<string | null>(
     _persisted.activeTicketNo ?? null,
   );
@@ -1152,24 +1228,28 @@ export function MobileTechApp() {
   // Home landing page's "Assigned Today" list — same tickets To Do would
   // show, further narrowed to today's schedule date.
   const todaysTickets = useMemo(
-    () => myTickets.filter((t) => !isDone(t.status) && isScheduledToday(t)),
-    [myTickets]
+    () => myTickets.filter((t) => !isDone(t.status) && isScheduledToday(t, todayIso)),
+    [myTickets, todayIso]
   );
 
   const visibleTickets = useMemo(() => {
-    let list = tab === "today" ? todaysTickets : myTickets;
+    // Search reaches every ticket in the company (once allTickets has
+    // loaded), not just this technician's own — falls back to myTickets
+    // while the company-wide fetch is still in flight so something useful
+    // shows immediately.
+    let list = tab === "search" ? (allTickets ?? myTickets) : tab === "today" ? todaysTickets : myTickets;
     if (tab === "todo") list = list.filter((t) => !isDone(t.status));
     else if (tab === "done") list = list.filter((t) => isDone(t.status));
     if (search.trim()) {
       const q = search.trim().toLowerCase();
       list = list.filter((t) =>
-        [t.ticketNo, t.customer, t.city, t.model, t.status, t.location].some((v) =>
+        [t.ticketNo, t.customer, t.city, t.model, t.status, t.location, t.technician].some((v) =>
           (v || "").toLowerCase().includes(q)
         )
       );
     }
     return list;
-  }, [myTickets, todaysTickets, tab, search]);
+  }, [myTickets, todaysTickets, allTickets, tab, search]);
 
   const activeTicket = useMemo(
     () => tickets.find((t) => t.ticketNo === activeTicketNo) || null,
@@ -1449,6 +1529,7 @@ export function MobileTechApp() {
         {effectiveView === "tickets" && (
           <TicketsView
             loading={loading}
+            searchLoading={allTicketsLoading}
             tickets={visibleTickets}
             tab={tab}
             setTab={setTab}
@@ -1559,7 +1640,7 @@ export function MobileTechApp() {
         )}
 
         {effectiveView === "teamapprovals" && (
-          <MobileTeamApprovalsView profileId={profileId} role={role} extraRoles={extraRoles} userName={headerName} />
+          <MobileTeamApprovalsView profileId={profileId} role={role} extraRoles={extraRoles} userName={headerName} companyId={companyId} />
         )}
 
         {effectiveView === "viewasteam" && (
@@ -1593,6 +1674,7 @@ export function MobileTechApp() {
             userName={headerName}
             profileId={profileId}
             companyId={companyId}
+            role={role}
             technicianName={headerName}
             scheduleTimezone={myScheduleTimezone}
             prefillTicketNo={ticketTimeDisputePrefillTicketNo}
@@ -1600,7 +1682,7 @@ export function MobileTechApp() {
         )}
 
         {effectiveView === "correction" && (
-          <MobileTimeCorrectionView userName={headerName} profileId={profileId} prefillDate={correctionPrefillDate} />
+          <MobileTimeCorrectionView userName={headerName} profileId={profileId} companyId={companyId} role={role} prefillDate={correctionPrefillDate} />
         )}
 
         {effectiveView === "notifications" && (
@@ -2093,6 +2175,7 @@ function RosterView({
 
 function TicketsView({
   loading,
+  searchLoading,
   tickets,
   tab,
   setTab,
@@ -2119,6 +2202,8 @@ function TicketsView({
   onBackToOwn,
 }: {
   loading: boolean;
+  /** True while the Search tab's company-wide ticket fetch is in flight (separate from `loading`, which only covers the initial name/branch-scoped load). */
+  searchLoading: boolean;
   tickets: Ticket[];
   tab: "today" | "todo" | "done" | "search";
   setTab: (t: "today" | "todo" | "done" | "search") => void;
@@ -2249,6 +2334,7 @@ function TicketsView({
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search ticket, customer, city..."
           />
+          {searchLoading && <div className="mtech-empty" style={{ padding: "0.5rem 0.25rem" }}>Loading all company tickets…</div>}
         </div>
       )}
 
@@ -3274,22 +3360,23 @@ function DetailsTab({
   authorName: string;
   authorRole: string;
 }) {
-  // Per-model reference links (Exploded View / Service Bulletin) — same
-  // model_resources data the desktop ticket page's Product Information
-  // section shows, just never wired up on mobile before. Shared across
-  // every ticket carrying this model number, so a tech adding one in the
-  // field also benefits everyone else on the same model.
+  // Per-model reference links (Exploded View / Service Bulletin / Tech Data
+  // Sheet) — same model_resources data the desktop ticket page's Product
+  // Information section shows, just never wired up on mobile before. Each
+  // field can hold multiple links. Shared across every ticket carrying this
+  // model number, so a tech adding one in the field also benefits everyone
+  // else on the same model.
   const [modelResources, setModelResources] = useState<ModelResources>({
-    model: "", explodedViewUrl: "", serviceBulletinUrl: "",
+    model: "", explodedViewUrls: [], serviceBulletinUrls: [], techDataSheetUrls: [],
   });
-  const [editingResource, setEditingResource] = useState<"exploded" | "bulletin" | null>(null);
+  const [editingResource, setEditingResource] = useState<"exploded" | "bulletin" | "techDataSheet" | null>(null);
   const [resourceDraft, setResourceDraft] = useState("");
   const [savingResource, setSavingResource] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     if (!ticket.model) {
-      setModelResources({ model: "", explodedViewUrl: "", serviceBulletinUrl: "" });
+      setModelResources({ model: "", explodedViewUrls: [], serviceBulletinUrls: [], techDataSheetUrls: [] });
       return;
     }
     getModelResources(ticket.model)
@@ -3298,9 +3385,9 @@ function DetailsTab({
     return () => { cancelled = true; };
   }, [ticket.model]);
 
-  const beginEditResource = (kind: "exploded" | "bulletin") => {
+  const beginAddResource = (kind: "exploded" | "bulletin" | "techDataSheet") => {
     setEditingResource(kind);
-    setResourceDraft(kind === "exploded" ? modelResources.explodedViewUrl : modelResources.serviceBulletinUrl);
+    setResourceDraft("");
   };
   const cancelEditResource = () => {
     setEditingResource(null);
@@ -3308,17 +3395,37 @@ function DetailsTab({
   };
   const saveEditResource = async () => {
     if (!editingResource || !ticket.model) return;
+    const url = resourceDraft.trim();
+    if (!url) { cancelEditResource(); return; }
     setSavingResource(true);
     try {
       const updated = await saveModelResources(ticket.model, {
-        explodedViewUrl: editingResource === "exploded" ? resourceDraft.trim() : modelResources.explodedViewUrl,
-        serviceBulletinUrl: editingResource === "bulletin" ? resourceDraft.trim() : modelResources.serviceBulletinUrl,
+        explodedViewUrls: editingResource === "exploded" ? [...modelResources.explodedViewUrls, url] : modelResources.explodedViewUrls,
+        serviceBulletinUrls: editingResource === "bulletin" ? [...modelResources.serviceBulletinUrls, url] : modelResources.serviceBulletinUrls,
+        techDataSheetUrls: editingResource === "techDataSheet" ? [...modelResources.techDataSheetUrls, url] : modelResources.techDataSheetUrls,
       });
       setModelResources(updated);
       cancelEditResource();
     } catch (err) {
       console.error("saveModelResources error:", err);
       alert(`Failed to save link: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setSavingResource(false);
+    }
+  };
+  const removeResourceUrl = async (kind: "exploded" | "bulletin" | "techDataSheet", url: string) => {
+    if (!ticket.model) return;
+    setSavingResource(true);
+    try {
+      const updated = await saveModelResources(ticket.model, {
+        explodedViewUrls: kind === "exploded" ? modelResources.explodedViewUrls.filter((u) => u !== url) : modelResources.explodedViewUrls,
+        serviceBulletinUrls: kind === "bulletin" ? modelResources.serviceBulletinUrls.filter((u) => u !== url) : modelResources.serviceBulletinUrls,
+        techDataSheetUrls: kind === "techDataSheet" ? modelResources.techDataSheetUrls.filter((u) => u !== url) : modelResources.techDataSheetUrls,
+      });
+      setModelResources(updated);
+    } catch (err) {
+      console.error("saveModelResources error:", err);
+      alert(`Failed to remove link: ${err instanceof Error ? err.message : "Unknown error"}`);
     } finally {
       setSavingResource(false);
     }
@@ -3349,29 +3456,43 @@ function DetailsTab({
       <div className="mtech-section-title">Product Information</div>
       {ticket.model && (
         <div className="mtech-visit-actions" style={{ flexWrap: "wrap" }}>
-          {(["exploded", "bulletin"] as const).map((kind) => {
-            const label = kind === "exploded" ? "Exploded View" : "Service Bulletin";
-            const url = kind === "exploded" ? modelResources.explodedViewUrl : modelResources.serviceBulletinUrl;
-            return url ? (
-              <a
-                key={kind}
-                href={url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mtech-btn mtech-btn-primary"
-                style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", textDecoration: "none" }}
-              >
-                <ExternalLink size={14} /> {label}
-              </a>
-            ) : (
-              <button
-                key={kind}
-                type="button"
-                className="mtech-btn"
-                onClick={() => beginEditResource(kind)}
-              >
-                + Add {label}
-              </button>
+          {(["exploded", "bulletin", "techDataSheet"] as const).map((kind) => {
+            const label = kind === "exploded" ? "Exploded View" : kind === "bulletin" ? "Service Bulletin" : "Tech Data Sheet";
+            const urls = kind === "exploded" ? modelResources.explodedViewUrls : kind === "bulletin" ? modelResources.serviceBulletinUrls : modelResources.techDataSheetUrls;
+            return (
+              <Fragment key={kind}>
+                {urls.map((url, i) => (
+                  <span key={`${kind}-${i}`} style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem" }}>
+                    <a
+                      href={url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mtech-btn mtech-btn-primary"
+                      style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", textDecoration: "none" }}
+                    >
+                      <ExternalLink size={14} /> {label}{urls.length > 1 ? ` ${i + 1}` : ""}
+                    </a>
+                    <button
+                      type="button"
+                      className="mtech-btn"
+                      style={{ padding: "0.25rem 0.5rem" }}
+                      disabled={savingResource}
+                      title={`Remove this ${label} link`}
+                      aria-label={`Remove this ${label} link`}
+                      onClick={() => void removeResourceUrl(kind, url)}
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                ))}
+                <button
+                  type="button"
+                  className="mtech-btn"
+                  onClick={() => beginAddResource(kind)}
+                >
+                  + Add {label}
+                </button>
+              </Fragment>
             );
           })}
         </div>
@@ -3379,7 +3500,7 @@ function DetailsTab({
       {editingResource && (
         <div className="mtech-visit-edit">
           <label className="mtech-visit-edit-label">
-            {editingResource === "exploded" ? "Exploded View" : "Service Bulletin"} link
+            {editingResource === "exploded" ? "Exploded View" : editingResource === "bulletin" ? "Service Bulletin" : "Tech Data Sheet"} link
           </label>
           <input
             className="mtech-visit-edit-input"
@@ -5001,24 +5122,19 @@ function HomeTicketStatsCard({
   );
 }
 
-// One Time In/Out/Meal In/Out card on the Home landing page. Several
-// states: a plain tappable card showing "—" (nothing punched yet), or —
-// once armed by a first tap — an inline "Yes / No" confirm in the same
-// slot to actually punch (so committing a clock event never needs a native
-// browser popup); once punched, a plain (non-tappable) card with the
-// recorded value and — while still the most-recently-made punch, see
-// canEditPunch — a small X to self-correct a stray tap, which itself arms
-// a second "Remove? Yes / No" confirm in the same slot before anything is
-// actually cleared.
+// One Time In/Out/Meal In/Out card on the Home landing page. A plain
+// tappable card showing "—" (nothing punched yet) punches immediately on
+// tap — no confirm step, so a single tap reliably saves. Once punched, a
+// plain (non-tappable) card with the recorded value and — while still the
+// most-recently-made punch, see canEditPunch — a small X to self-correct a
+// stray tap, which arms a "Remove? Yes / No" confirm in the same slot
+// before anything is actually cleared.
 function ClockCard({
   label,
   value,
   valueClass,
-  armed,
   canAct,
-  confirmLabel,
   onTap,
-  onCancel,
   removable,
   removeArmed,
   removing,
@@ -5029,11 +5145,8 @@ function ClockCard({
   label: string;
   value: string;
   valueClass: "in" | "out" | "meal";
-  armed: boolean;
   canAct: boolean;
-  confirmLabel: string;
   onTap: () => void;
-  onCancel: () => void;
   removable: boolean;
   removeArmed: boolean;
   removing: boolean;
@@ -5041,17 +5154,6 @@ function ClockCard({
   onConfirmRemove: () => void;
   onCancelRemove: () => void;
 }) {
-  if (armed) {
-    return (
-      <div className="mtech-timecard-card mtech-timecard-card-confirm">
-        <div className="mtech-timecard-card-confirm-label">{confirmLabel}</div>
-        <div className="mtech-timecard-card-confirm-actions">
-          <button type="button" className="mtech-timecard-confirm-btn mtech-timecard-confirm-yes" onClick={onTap}>Yes</button>
-          <button type="button" className="mtech-timecard-confirm-btn mtech-timecard-confirm-no" onClick={onCancel}>No</button>
-        </div>
-      </div>
-    );
-  }
   if (removeArmed) {
     return (
       <div className="mtech-timecard-card mtech-timecard-card-confirm">
@@ -6195,30 +6297,12 @@ function MobileHomeView({
   const canMealIn = !loadError && !!entry.checkIn && !entry.checkOut && !entry.mealStart && !saving;
   const canMealOut = !loadError && !!entry.mealStart && !entry.mealEnd && !saving;
 
-  // Which card is currently showing its inline "Yes / No" confirm —
-  // at most one at a time. Auto-disarms after a few seconds so an armed
-  // card doesn't sit there indefinitely if the user taps away.
-  type ArmedCard = "checkIn" | "checkOut" | "mealStart" | "mealEnd" | null;
-  const [armedCard, setArmedCard] = useState<ArmedCard>(null);
-  const armTimerRef = useRef<number | null>(null);
-
-  const arm = (card: ArmedCard) => {
-    if (armTimerRef.current) window.clearTimeout(armTimerRef.current);
-    setArmedCard(card);
-    armTimerRef.current = window.setTimeout(() => setArmedCard(null), 4000);
-  };
-  const disarm = () => {
-    if (armTimerRef.current) window.clearTimeout(armTimerRef.current);
-    setArmedCard(null);
-  };
-  useEffect(() => () => { if (armTimerRef.current) window.clearTimeout(armTimerRef.current); }, []);
-
-  // Self-correct an accidental punch, right from the Home card — separate
-  // arm/confirm state from armedCard above (that one arms a NEW punch;
-  // this one arms REMOVING an existing one), so the two prompts can never
-  // collide in the same slot. See canEditPunch's doc comment for which
-  // punch is actually removable at any moment (only the most-recently-made
-  // one in the Check In -> Meal In -> Meal Out -> Check Out chain).
+  // Self-correct an accidental punch, right from the Home card — this arms
+  // REMOVING an existing punch (separate from actually making one below,
+  // which now fires immediately on tap, no confirm step). See
+  // canEditPunch's doc comment for which punch is actually removable at any
+  // moment (only the most-recently-made one in the Check In -> Meal In ->
+  // Meal Out -> Check Out chain).
   type RemoveConfirmCard = "checkIn" | "checkOut" | "mealStart" | "mealEnd" | null;
   const [confirmRemoveCard, setConfirmRemoveCard] = useState<RemoveConfirmCard>(null);
   const [clearingField, setClearingField] = useState<PunchField | null>(null);
@@ -6245,7 +6329,6 @@ function MobileHomeView({
         await clearPunch(scheduleProfileId, todayKey, field);
       }
       setEntry((prev) => ({ ...prev, [field]: "" }));
-      disarm();
     } catch (e) {
       console.error("MobileHomeView: clear punch failed", e);
       alert(`Failed to remove: ${e instanceof Error ? e.message : "Unknown error"}`);
@@ -6256,41 +6339,30 @@ function MobileHomeView({
 
   const handleTimeIn = () => {
     if (!canTimeIn) return;
-    if (armedCard !== "checkIn") { arm("checkIn"); return; }
-    disarm();
     void persistPunch("checkIn");
   };
 
   const handleTimeOut = () => {
     if (!canTimeOut) return;
-    if (armedCard !== "checkOut") { arm("checkOut"); return; }
-    disarm();
     void persistPunch("checkOut");
   };
 
   const handleMealIn = () => {
     if (!canMealIn) return;
-    if (armedCard !== "mealStart") {
-      if ((!requiredCheckIn || !requiredCheckOut) && !workingHours) {
-        alert("No scheduled shift is set for your account. Contact your admin to set your required schedule.");
-        return;
-      }
-      const scheduledShift = resolveScheduledShiftHours(requiredCheckIn, requiredCheckOut, workingHours, mealMinutes);
-      if (scheduledShift <= 6) {
-        alert(`Meal break is only available for scheduled shifts of more than 6 hours. Your scheduled shift is ${scheduledShift.toFixed(1)} hours.`);
-        return;
-      }
-      arm("mealStart");
+    if ((!requiredCheckIn || !requiredCheckOut) && !workingHours) {
+      alert("No scheduled shift is set for your account. Contact your admin to set your required schedule.");
       return;
     }
-    disarm();
+    const scheduledShift = resolveScheduledShiftHours(requiredCheckIn, requiredCheckOut, workingHours, mealMinutes);
+    if (scheduledShift <= 6) {
+      alert(`Meal break is only available for scheduled shifts of more than 6 hours. Your scheduled shift is ${scheduledShift.toFixed(1)} hours.`);
+      return;
+    }
     void persistPunch("mealStart");
   };
 
   const handleMealOut = () => {
     if (!canMealOut) return;
-    if (armedCard !== "mealEnd") { arm("mealEnd"); return; }
-    disarm();
     void persistPunch("mealEnd");
   };
 
@@ -6325,7 +6397,7 @@ function MobileHomeView({
     },
     {
       key: "tickettimedispute", label: "Ticket Time Dispute",
-      description: "Report a failed on-site check-in for a ticket",
+      description: "Report a failed check-in, or a ticket that got rescheduled",
       onClick: onOpenTicketTimeDispute, show: true,
     },
     {
@@ -6383,32 +6455,32 @@ function MobileHomeView({
       <div className="mtech-timecard-summary mtech-home-clockrow">
         <ClockCard
           label="Time In" value={entry.checkIn ? entry.checkIn.slice(0, 5) : ""} valueClass="in"
-          armed={armedCard === "checkIn"} canAct={canTimeIn} confirmLabel="Time In now?"
-          onTap={handleTimeIn} onCancel={disarm}
+          canAct={canTimeIn}
+          onTap={handleTimeIn}
           removable={!!entry.checkIn && canEditPunch(entry, "checkIn")}
           removeArmed={confirmRemoveCard === "checkIn"} removing={clearingField === "checkIn"}
           onRequestRemove={() => armRemove("checkIn")} onConfirmRemove={() => void handleClearPunch("checkIn")} onCancelRemove={cancelRemove}
         />
         <ClockCard
           label="Meal In" value={entry.mealStart ? entry.mealStart.slice(0, 5) : ""} valueClass="meal"
-          armed={armedCard === "mealStart"} canAct={canMealIn} confirmLabel="Meal In now?"
-          onTap={handleMealIn} onCancel={disarm}
+          canAct={canMealIn}
+          onTap={handleMealIn}
           removable={!!entry.mealStart && canEditPunch(entry, "mealStart")}
           removeArmed={confirmRemoveCard === "mealStart"} removing={clearingField === "mealStart"}
           onRequestRemove={() => armRemove("mealStart")} onConfirmRemove={() => void handleClearPunch("mealStart")} onCancelRemove={cancelRemove}
         />
         <ClockCard
           label="Meal Out" value={entry.mealEnd ? entry.mealEnd.slice(0, 5) : ""} valueClass="meal"
-          armed={armedCard === "mealEnd"} canAct={canMealOut} confirmLabel="Meal Out now?"
-          onTap={handleMealOut} onCancel={disarm}
+          canAct={canMealOut}
+          onTap={handleMealOut}
           removable={!!entry.mealEnd && canEditPunch(entry, "mealEnd")}
           removeArmed={confirmRemoveCard === "mealEnd"} removing={clearingField === "mealEnd"}
           onRequestRemove={() => armRemove("mealEnd")} onConfirmRemove={() => void handleClearPunch("mealEnd")} onCancelRemove={cancelRemove}
         />
         <ClockCard
           label="Time Out" value={entry.checkOut ? entry.checkOut.slice(0, 5) : ""} valueClass="out"
-          armed={armedCard === "checkOut"} canAct={canTimeOut} confirmLabel="Time Out now?"
-          onTap={handleTimeOut} onCancel={disarm}
+          canAct={canTimeOut}
+          onTap={handleTimeOut}
           removable={!!entry.checkOut && canEditPunch(entry, "checkOut")}
           removeArmed={confirmRemoveCard === "checkOut"} removing={clearingField === "checkOut"}
           onRequestRemove={() => armRemove("checkOut")} onConfirmRemove={() => void handleClearPunch("checkOut")} onCancelRemove={cancelRemove}
@@ -7177,12 +7249,17 @@ function MobileTeamApprovalsView({
   role,
   extraRoles,
   userName,
+  companyId,
   readOnly,
 }: {
   profileId: string | null;
   role: string | null;
   extraRoles: string[] | null;
   userName: string;
+  /** Omitted from the read-only "View as Manager" preview — the manager-sign
+   *  modal this powers is never reachable there anyway (readOnly hides the
+   *  Approve button entirely), so there's nothing to thread it through for. */
+  companyId?: string | null;
   /** View as Manager preview — browsing is fine, but nothing gets approved/rejected under a false identity, per the user's explicit call. */
   readOnly?: boolean;
 }) {
@@ -7335,6 +7412,8 @@ function MobileTeamApprovalsView({
       setSubmitting(false);
     }
   };
+  const [signingCorrection, setSigningCorrection] = useState<TimecardCorrectionRow | null>(null);
+  const [signingPtoManager, setSigningPtoManager] = useState<PtoRequestRow | null>(null);
 
   const handlePtoDecision = async (r: PtoRequestRow, decision: "approved" | "rejected") => {
     if (readOnly || !profileId || submitting) return;
@@ -7483,9 +7562,15 @@ function MobileTeamApprovalsView({
                 <div className="mtech-clockin-row-status">Preview only</div>
               ) : (
                 <div className="mtech-approvals-actions">
-                  <button type="button" className="mtech-clockin-btn" disabled={submitting} onClick={() => void handleCorrectionDecision(c, "approved")}>
-                    Approve
-                  </button>
+                  {c.exceptionType !== null ? (
+                    <button type="button" className="mtech-clockin-btn" disabled={submitting} onClick={() => setSigningCorrection(c)}>
+                      Approve &amp; Sign
+                    </button>
+                  ) : (
+                    <button type="button" className="mtech-clockin-btn" disabled={submitting} onClick={() => void handleCorrectionDecision(c, "approved")}>
+                      Approve
+                    </button>
+                  )}
                   <button type="button" className="mtech-clockin-btn mtech-approvals-reject-btn" disabled={submitting} onClick={() => void handleCorrectionDecision(c, "rejected")}>
                     Reject
                   </button>
@@ -7510,9 +7595,15 @@ function MobileTeamApprovalsView({
                 <div className="mtech-clockin-row-status">Preview only</div>
               ) : (
                 <div className="mtech-approvals-actions">
-                  <button type="button" className="mtech-clockin-btn" disabled={submitting} onClick={() => void handlePtoDecision(r, "approved")}>
-                    Approve
-                  </button>
+                  {r.exceptionType !== null ? (
+                    <button type="button" className="mtech-clockin-btn" disabled={submitting} onClick={() => setSigningPtoManager(r)}>
+                      Approve &amp; Sign
+                    </button>
+                  ) : (
+                    <button type="button" className="mtech-clockin-btn" disabled={submitting} onClick={() => void handlePtoDecision(r, "approved")}>
+                      Approve
+                    </button>
+                  )}
                   <button type="button" className="mtech-clockin-btn mtech-approvals-reject-btn" disabled={submitting} onClick={() => void handlePtoDecision(r, "rejected")}>
                     Reject
                   </button>
@@ -7521,6 +7612,35 @@ function MobileTeamApprovalsView({
             </div>
           ))}
         </div>
+      )}
+
+      {signingCorrection && (
+        <CorrectionManagerSignModal
+          correction={signingCorrection}
+          companyId={companyId ?? null}
+          profiles={profiles}
+          reviewerId={profileId}
+          reviewerName={userName}
+          onClose={() => setSigningCorrection(null)}
+          onSigned={() => {
+            setCorrections((prev) => prev.filter((x) => x.id !== signingCorrection.id));
+            setSigningCorrection(null);
+          }}
+        />
+      )}
+      {signingPtoManager && (
+        <PtoManagerSignModal
+          request={signingPtoManager}
+          companyId={companyId ?? null}
+          profiles={profiles}
+          reviewerId={profileId}
+          reviewerName={userName}
+          onClose={() => setSigningPtoManager(null)}
+          onSigned={() => {
+            setPtoRequests((prev) => prev.filter((x) => x.id !== signingPtoManager.id));
+            setSigningPtoManager(null);
+          }}
+        />
       )}
     </div>
   );
@@ -8534,11 +8654,24 @@ function MobileTimeOffView({ userName, profileId }: { userName: string; profileI
 // Disputes & Inquiries tab, which still handles any already-pending legacy
 // attendance_dispute rows). Approving writes these times straight onto the
 // ticket's own onsite_arrived_at/onsite_done_at — not just a paper trail.
-function MobileTicketTimeDisputeView({ userName, profileId, companyId, technicianName, scheduleTimezone, prefillTicketNo }: { userName: string; profileId: string | null; companyId: string | null; technicianName: string; scheduleTimezone: ScheduleTimezone; prefillTicketNo?: string | null }) {
+function MobileTicketTimeDisputeView({ userName, profileId, companyId, role, technicianName, scheduleTimezone, prefillTicketNo }: { userName: string; profileId: string | null; companyId: string | null; role: string | null; technicianName: string; scheduleTimezone: ScheduleTimezone; prefillTicketNo?: string | null }) {
   const [requests, setRequests] = useState<EmployeeRequestRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [todaysStops, setTodaysStops] = useState<TechnicianRouteStop[]>([]);
   const [ticketNo, setTicketNo] = useState("");
+  const [companyProfiles, setCompanyProfiles] = useState<ProfileRow[]>([]);
+  useEffect(() => {
+    getCompanyUsers().then(setCompanyProfiles).catch((e) => console.error("ticket time dispute: load users failed", e));
+  }, []);
+  // Employee Attendance & Visit Exception Report fields, folded directly
+  // into this same submission (migration 0305) — see ticketDisputeReportPdf.ts.
+  const [exceptionType, setExceptionType] = useState<TicketDisputeExceptionType>("missed_visit");
+  const [otherDescription, setOtherDescription] = useState("");
+  const [employeeIdOverride, setEmployeeIdOverride] = useState("");
+  const [customerName, setCustomerName] = useState("");
+  const [scheduledTime, setScheduledTime] = useState("");
+  const [actionTaken, setActionTaken] = useState("");
+  const sigPad = useSignaturePad({ width: 400, height: 110, defaultName: userName || "" });
   // Arriving from the Tickets tab's "Dispute" button (a missing-timestamp
   // card) — pre-select that ticket instead of leaving the dropdown blank.
   useEffect(() => {
@@ -8548,12 +8681,21 @@ function MobileTicketTimeDisputeView({ userName, profileId, companyId, technicia
   const [endTime, setEndTime] = useState("");
   const [details, setDetails] = useState("");
   const [files, setFiles] = useState<File[]>([]);
+  // "time_dispute" (original flow — was there, app failed to log the
+  // check-in, disputes the same-day start/end time) vs "reschedule" (the
+  // ticket couldn't be done on its scheduled day at all and moved to a
+  // different day — no start/end time, just which day it actually
+  // happened). See migration 0307.
+  const [disputeMode, setDisputeMode] = useState<"time_dispute" | "reschedule">("time_dispute");
+  const [rescheduleActualDay, setRescheduleActualDay] = useState("");
+  const [rescheduleDate, setRescheduleDate] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [msg, setMsg] = useState("");
   // .mtech-save-msg is styled green by default (a "saved" confirmation) —
   // this flips it red for a validation/submit failure instead of showing
   // an error in success-green.
   const [msgIsError, setMsgIsError] = useState(false);
+  const [submitSuccess, setSubmitSuccess] = useState(false);
 
   // This technician's own existing dispute status per ticket — shown right
   // in the dropdown, with the actual claimed time, so they can see at a
@@ -8633,14 +8775,19 @@ function MobileTicketTimeDisputeView({ userName, profileId, companyId, technicia
       setMsg("Pick which ticket this is about.");
       return;
     }
-    if (!startTime || !endTime) {
+    if (disputeMode === "time_dispute" && (!startTime || !endTime)) {
       setMsgIsError(true);
       setMsg("Enter the time you actually started and finished.");
       return;
     }
+    if (disputeMode === "reschedule" && (!rescheduleActualDay || !rescheduleDate)) {
+      setMsgIsError(true);
+      setMsg("Enter the actual day and the day it was rescheduled to.");
+      return;
+    }
     if (!details.trim()) {
       setMsgIsError(true);
-      setMsg("Describe what went wrong with the check-in.");
+      setMsg(disputeMode === "reschedule" ? "Describe why it was rescheduled." : "Describe what went wrong with the check-in.");
       return;
     }
     if (files.length === 0) {
@@ -8648,13 +8795,29 @@ function MobileTicketTimeDisputeView({ userName, profileId, companyId, technicia
       setMsg("Attach proof (a photo or screenshot) before submitting.");
       return;
     }
+    if (!sigPad.hasContent()) {
+      setMsgIsError(true);
+      setMsg("Please sign to acknowledge the information above is accurate before submitting.");
+      return;
+    }
+    const signatureDataUrl = sigPad.toDataURL();
+    if (!signatureDataUrl) {
+      setMsgIsError(true);
+      setMsg("Please sign to acknowledge the information above is accurate before submitting.");
+      return;
+    }
+    if (!companyId) {
+      setMsgIsError(true);
+      setMsg("Your company couldn't be resolved yet — try again in a moment.");
+      return;
+    }
     setSubmitting(true);
     setMsgIsError(false);
     setMsg("");
     try {
       let attachments: { url: string; name: string }[] = [];
-      if (files.length > 0 && companyId) {
-        const disputeKey = crypto.randomUUID();
+      const disputeKey = crypto.randomUUID();
+      if (files.length > 0) {
         attachments = await Promise.all(
           files.map(async (f) => {
             const { url } = await uploadTicketTimeDisputeAttachment(companyId, disputeKey, f);
@@ -8670,12 +8833,46 @@ function MobileTicketTimeDisputeView({ userName, profileId, companyId, technicia
       // back as 5:00 AM, since the earlier fix used the browser's own local
       // time instead of the technician's actual scheduled zone.
       const todayKey = zonedDateKey(new Date(), scheduleTimezone);
-      const [y, mo, d] = todayKey.split("-").map(Number);
-      const [startHour, startMin] = startTime.split(":").map(Number);
-      const [endHour, endMin] = endTime.split(":").map(Number);
-      const disputedStart = zonedWallClockToUtcIso(y, mo, d, startHour, startMin, scheduleTimezone);
-      const disputedEnd = zonedWallClockToUtcIso(y, mo, d, endHour, endMin, scheduleTimezone);
+      // Reschedule mode has no start/end time to claim — disputedStart/End
+      // stay null, which is exactly what setTicketOnsiteCheckIn's null-guard
+      // at both approval call sites already relies on to skip writing onsite
+      // times for a reschedule row (see migration 0307's header comment).
+      let disputedStart: string | undefined;
+      let disputedEnd: string | undefined;
+      if (disputeMode === "time_dispute") {
+        const [y, mo, d] = todayKey.split("-").map(Number);
+        const [startHour, startMin] = startTime.split(":").map(Number);
+        const [endHour, endMin] = endTime.split(":").map(Number);
+        disputedStart = zonedWallClockToUtcIso(y, mo, d, startHour, startMin, scheduleTimezone);
+        disputedEnd = zonedWallClockToUtcIso(y, mo, d, endHour, endMin, scheduleTimezone);
+      }
+
+      const myProfile = companyProfiles.find((p) => p.id === profileId) ?? null;
+      const managerProfile = myProfile ? await resolveTeamLeadOrManager(myProfile, companyProfiles) : null;
+      const { roleLabel: jobTitle } = getRoleDepartmentBreakdown(myProfile?.role ?? role);
+      const { pdfUrl, employeeSignatureUrl } = await buildTicketDisputeSubmissionPdf({
+        requestId: disputeKey,
+        companyId,
+        employeeInfo: {
+          employeeName: userName || "",
+          technicianId: myProfile?.technician_id || employeeIdOverride,
+          jobTitle,
+          department: myProfile?.assigned_branch || "",
+          directManagerName: managerProfile?.display_name || managerProfile?.email || "",
+        },
+        dateOfIncident: disputeMode === "reschedule" ? (rescheduleActualDay || todayKey) : todayKey,
+        exceptionType,
+        otherDescription,
+        detailedReason: details.trim(),
+        ticketNo,
+        customerName,
+        scheduledTime,
+        actionTaken,
+        employeeSignatureDataUrl: signatureDataUrl,
+      });
+
       await createEmployeeRequest({
+        id: disputeKey,
         profileId,
         requestType: "ticket_time_dispute",
         details: details.trim(),
@@ -8683,7 +8880,18 @@ function MobileTicketTimeDisputeView({ userName, profileId, companyId, technicia
         ticketNo,
         disputedStartTime: disputedStart,
         disputedEndTime: disputedEnd,
+        disputeMode,
+        rescheduleActualDay: disputeMode === "reschedule" ? rescheduleActualDay : undefined,
+        rescheduleDate: disputeMode === "reschedule" ? rescheduleDate : undefined,
         attachments,
+        exceptionType,
+        otherDescription,
+        exceptionCustomerName: customerName,
+        exceptionScheduledTime: scheduledTime,
+        exceptionActionTaken: actionTaken,
+        employeeSignatureUrl,
+        employeeSignatureName: userName || "",
+        pdfUrl,
       });
       void notifyRequestReviewers({
         body: `⚠️ New Ticket Time Dispute from ${userName} (Ticket ${ticketNo}).`,
@@ -8694,10 +8902,22 @@ function MobileTicketTimeDisputeView({ userName, profileId, companyId, technicia
       setTicketNo("");
       setStartTime("");
       setEndTime("");
+      setDisputeMode("time_dispute");
+      setRescheduleActualDay("");
+      setRescheduleDate("");
       setDetails("");
       setFiles([]);
+      setExceptionType("missed_visit");
+      setOtherDescription("");
+      setEmployeeIdOverride("");
+      setCustomerName("");
+      setScheduledTime("");
+      setActionTaken("");
+      sigPad.clear();
       setMsg("Dispute submitted.");
+      setSubmitSuccess(true);
       await load();
+      setTimeout(() => setSubmitSuccess(false), 4000);
     } catch (e) {
       setMsgIsError(true);
       setMsg(e instanceof Error ? e.message : "Failed to submit dispute.");
@@ -8711,7 +8931,7 @@ function MobileTicketTimeDisputeView({ userName, profileId, companyId, technicia
     <div className="mtech-scroll">
       <div className="mtech-payroll-heading">
         <div className="mtech-payroll-name">Ticket Time Dispute</div>
-        <div className="mtech-payroll-sub">Report a failed on-site check-in for a ticket</div>
+        <div className="mtech-payroll-sub">Report a failed check-in, or a ticket that got rescheduled</div>
       </div>
 
       <div className="mtech-panel" style={{ marginTop: 0 }}>
@@ -8744,30 +8964,71 @@ function MobileTicketTimeDisputeView({ userName, profileId, companyId, technicia
           <p className="mtech-muted" style={{ padding: "0.15rem 0 0.25rem" }}>No tickets found for today yet.</p>
         )}
 
-        <div className="mtech-section-title">Start Time ({scheduleTimezone})</div>
-        <input
-          className="mtech-bill-input full"
-          type="time"
-          value={startTime}
-          onChange={(e) => setStartTime(e.target.value)}
-        />
+        <div className="mtech-section-title">Reschedule / Time Dispute</div>
+        <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", padding: "0.25rem 0", color: "#f1f5f9", fontSize: "0.85rem" }}>
+          <input type="radio" name="mobileDisputeMode" checked={disputeMode === "time_dispute"} onChange={() => setDisputeMode("time_dispute")} />
+          Time Dispute — I was there, the check-in just didn't log
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", padding: "0.25rem 0", color: "#f1f5f9", fontSize: "0.85rem" }}>
+          <input type="radio" name="mobileDisputeMode" checked={disputeMode === "reschedule"} onChange={() => setDisputeMode("reschedule")} />
+          Reschedule — this ticket moved to a different day
+        </label>
 
-        <div className="mtech-section-title">End Time ({scheduleTimezone})</div>
-        <input
-          className="mtech-bill-input full"
-          type="time"
-          value={endTime}
-          onChange={(e) => setEndTime(e.target.value)}
-        />
+        {disputeMode === "time_dispute" ? (
+          <>
+            <div className="mtech-section-title">Start Time ({scheduleTimezone})</div>
+            <input
+              className="mtech-bill-input full"
+              type="time"
+              value={startTime}
+              onChange={(e) => setStartTime(e.target.value)}
+            />
 
-        <div className="mtech-section-title">What's wrong?</div>
-        <textarea
-          className="mtech-bill-input full"
-          rows={4}
-          value={details}
-          onChange={(e) => setDetails(e.target.value)}
-          placeholder="Describe the issue — e.g. GPS wouldn't register, signal was down, etc."
-        />
+            <div className="mtech-section-title">End Time ({scheduleTimezone})</div>
+            <input
+              className="mtech-bill-input full"
+              type="time"
+              value={endTime}
+              onChange={(e) => setEndTime(e.target.value)}
+            />
+
+            <div className="mtech-section-title">Reason</div>
+            <textarea
+              className="mtech-bill-input full"
+              rows={4}
+              value={details}
+              onChange={(e) => setDetails(e.target.value)}
+              placeholder="Describe the issue — e.g. GPS wouldn't register, signal was down, etc."
+            />
+          </>
+        ) : (
+          <>
+            <div className="mtech-section-title">Actual Day</div>
+            <input
+              className="mtech-bill-input full"
+              type="date"
+              value={rescheduleActualDay}
+              onChange={(e) => setRescheduleActualDay(e.target.value)}
+            />
+
+            <div className="mtech-section-title">Reschedule Date</div>
+            <input
+              className="mtech-bill-input full"
+              type="date"
+              value={rescheduleDate}
+              onChange={(e) => setRescheduleDate(e.target.value)}
+            />
+
+            <div className="mtech-section-title">Reason</div>
+            <textarea
+              className="mtech-bill-input full"
+              rows={4}
+              value={details}
+              onChange={(e) => setDetails(e.target.value)}
+              placeholder="Why did this ticket need to be rescheduled?"
+            />
+          </>
+        )}
 
         <div className="mtech-section-title">Proof</div>
         <input
@@ -8781,10 +9042,57 @@ function MobileTicketTimeDisputeView({ userName, profileId, companyId, technicia
           <p className="mtech-muted" style={{ padding: "0.25rem 0" }}>{files.length} file{files.length === 1 ? "" : "s"} selected</p>
         )}
 
+        {!companyProfiles.find((p) => p.id === profileId)?.technician_id && (
+          <>
+            <div className="mtech-section-title">Employee ID</div>
+            <input className="mtech-bill-input full" type="text" value={employeeIdOverride} onChange={(e) => setEmployeeIdOverride(e.target.value)} placeholder="Not on file — type it in" />
+          </>
+        )}
+
+        <div className="mtech-section-title">Exception Type</div>
+        {(Object.keys(TICKET_DISPUTE_EXCEPTION_TYPE_LABELS) as TicketDisputeExceptionType[]).map((t) => (
+          <label key={t} style={{ display: "flex", alignItems: "center", gap: "0.4rem", padding: "0.25rem 0", color: "#f1f5f9", fontSize: "0.85rem" }}>
+            <input type="radio" name="mobileTicketDisputeExceptionType" checked={exceptionType === t} onChange={() => setExceptionType(t)} />
+            {TICKET_DISPUTE_EXCEPTION_TYPE_LABELS[t]}
+          </label>
+        ))}
+        {exceptionType === "other" && (
+          <input className="mtech-bill-input full" type="text" value={otherDescription} onChange={(e) => setOtherDescription(e.target.value)} placeholder="Describe the exception…" />
+        )}
+
+        <div className="mtech-section-title">Customer / Job Details (If applicable)</div>
+        <input className="mtech-bill-input full" type="text" value={customerName} onChange={(e) => setCustomerName(e.target.value)} placeholder="Customer Name" />
+        <input className="mtech-bill-input full" style={{ marginTop: "0.4rem" }} type="text" value={scheduledTime} onChange={(e) => setScheduledTime(e.target.value)} placeholder="Scheduled Time" />
+        <input className="mtech-bill-input full" style={{ marginTop: "0.4rem" }} type="text" value={actionTaken} onChange={(e) => setActionTaken(e.target.value)} placeholder="Action Taken / Rescheduled Status" />
+
+        <div className="mtech-section-title">Employee Signature — I confirm the information above is accurate and truthful.</div>
+        <canvas {...sigPad.canvasProps} className={`bg-white rounded-md block mx-auto w-full ${sigPad.canvasProps.className}`} style={{ maxWidth: "340px" }} />
+        <div style={{ marginTop: "0.5rem" }}>
+          <SignaturePadControls pad={sigPad} />
+        </div>
+
         <button type="button" className="mtech-save-btn" onClick={submit} disabled={submitting}>
           {submitting ? "Submitting…" : "Submit Dispute"}
         </button>
-        {msg && <div className="mtech-save-msg" style={msgIsError ? { color: "#f87171" } : undefined}>{msg}</div>}
+        {submitSuccess ? (
+          <div
+            style={{
+              background: "rgba(34,197,94,0.15)",
+              border: "1px solid rgba(34,197,94,0.4)",
+              borderRadius: "10px",
+              padding: "0.85rem",
+              marginTop: "0.6rem",
+              textAlign: "center",
+              color: "#4ade80",
+              fontWeight: 700,
+              fontSize: "0.95rem",
+            }}
+          >
+            ✅ Dispute Submitted
+          </div>
+        ) : (
+          msg && <div className="mtech-save-msg" style={msgIsError ? { color: "#f87171" } : undefined}>{msg}</div>
+        )}
       </div>
 
       <div style={{ fontWeight: 800, fontSize: "0.95rem", color: "#f1f5f9", margin: "0.4rem 0 0.1rem" }}>My Disputes</div>
@@ -8837,11 +9145,17 @@ function MobileTicketTimeDisputeView({ userName, profileId, companyId, technicia
 // today's entry) so the review queue can show what's being corrected FROM,
 // not just what it's being corrected TO. Same two-stage manager-then-(HR OR
 // Accounting) approval as Time Off, via timecardCorrections.ts.
-function MobileTimeCorrectionView({ userName, profileId, prefillDate }: { userName: string; profileId: string | null; prefillDate?: string | null }) {
+function MobileTimeCorrectionView({ userName, profileId, companyId, role, prefillDate }: { userName: string; profileId: string | null; companyId: string | null; role: string | null; prefillDate?: string | null }) {
   const [requests, setRequests] = useState<TimecardCorrectionRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [companyProfiles, setCompanyProfiles] = useState<ProfileRow[]>([]);
   const [correctionDate, setCorrectionDate] = useState("");
+  // Employee Attendance & Visit Exception Report fields, folded directly
+  // into this same request (migration 0304) — see timecardCorrectionPdf.ts.
+  const [exceptionType, setExceptionType] = useState<ExceptionType>("missed_workday");
+  const [otherDescription, setOtherDescription] = useState("");
+  const [employeeIdOverride, setEmployeeIdOverride] = useState("");
+  const sigPad = useSignaturePad({ width: 400, height: 110, defaultName: userName || "" });
 
   // Arriving via My Timecard's "Dispute This Time Card" button (a specific
   // day already selected there) — same idea as Payroll/Ticket Time
@@ -8857,6 +9171,12 @@ function MobileTimeCorrectionView({ userName, profileId, prefillDate }: { userNa
   const [details, setDetails] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [msg, setMsg] = useState("");
+  const [msgIsError, setMsgIsError] = useState(false);
+  // The form fields all clear the instant submission succeeds, which reads
+  // as "did anything happen?" if the only feedback is a plain line of text
+  // below a now-blank form — this banner is the actual answer, impossible
+  // to miss since it renders right where the button/eyes already are.
+  const [submitSuccess, setSubmitSuccess] = useState(false);
 
   useEffect(() => {
     getCompanyUsers().then(setCompanyProfiles).catch((e) => console.error("time correction: load users failed", e));
@@ -8894,6 +9214,19 @@ function MobileTimeCorrectionView({ userName, profileId, prefillDate }: { userNa
       setMsg("Add a reason for the correction.");
       return;
     }
+    if (!sigPad.hasContent()) {
+      setMsg("Please sign to acknowledge the information above is accurate before submitting.");
+      return;
+    }
+    const signatureDataUrl = sigPad.toDataURL();
+    if (!signatureDataUrl) {
+      setMsg("Please sign to acknowledge the information above is accurate before submitting.");
+      return;
+    }
+    if (!companyId) {
+      setMsg("Your company couldn't be resolved yet — try again in a moment.");
+      return;
+    }
     setSubmitting(true);
     setMsg("");
     try {
@@ -8918,8 +9251,27 @@ function MobileTimeCorrectionView({ userName, profileId, prefillDate }: { userNa
 
       const myProfile = companyProfiles.find((p) => p.id === profileId) ?? null;
       const managerProfile = myProfile ? await resolveTeamLeadOrManager(myProfile, companyProfiles) : null;
+      const correctionId = crypto.randomUUID();
+      const { roleLabel: jobTitle } = getRoleDepartmentBreakdown(myProfile?.role ?? role);
+      const { pdfUrl, employeeSignatureUrl } = await buildCorrectionSubmissionPdf({
+        correctionId,
+        companyId,
+        employeeInfo: {
+          employeeName: userName || "",
+          technicianId: myProfile?.technician_id || employeeIdOverride,
+          jobTitle,
+          department: myProfile?.assigned_branch || "",
+          directManagerName: managerProfile?.display_name || managerProfile?.email || "",
+        },
+        workDate: correctionDate,
+        exceptionType,
+        otherDescription,
+        reason: details.trim(),
+        employeeSignatureDataUrl: signatureDataUrl,
+      });
 
       await createTimecardCorrection({
+        id: correctionId,
         profileId,
         workDate: correctionDate,
         originalCheckIn: existing?.checkIn || "",
@@ -8933,6 +9285,11 @@ function MobileTimeCorrectionView({ userName, profileId, prefillDate }: { userNa
         reason: details.trim(),
         requestedBy: profileId,
         managerId: managerProfile?.id ?? null,
+        exceptionType,
+        otherDescription,
+        employeeSignatureUrl,
+        employeeSignatureName: userName || "",
+        pdfUrl,
       });
 
       // Manager + every HR/Finance user + the requester themselves — same
@@ -8967,9 +9324,17 @@ function MobileTimeCorrectionView({ userName, profileId, prefillDate }: { userNa
       setCorrectedMealStart("");
       setCorrectedMealEnd("");
       setDetails("");
+      setExceptionType("missed_workday");
+      setOtherDescription("");
+      setEmployeeIdOverride("");
+      sigPad.clear();
+      setMsgIsError(false);
       setMsg("Correction submitted.");
+      setSubmitSuccess(true);
       await load();
+      setTimeout(() => setSubmitSuccess(false), 4000);
     } catch (e) {
+      setMsgIsError(true);
       setMsg(e instanceof Error ? e.message : "Failed to submit correction.");
     } finally {
       setSubmitting(false);
@@ -8986,21 +9351,39 @@ function MobileTimeCorrectionView({ userName, profileId, prefillDate }: { userNa
 
       <div className="mtech-panel" style={{ marginTop: 0 }}>
         <div className="mtech-section-title" style={{ marginTop: 0 }}>Date</div>
-        <input className="mtech-bill-input full" type="date" value={correctionDate} onChange={(e) => setCorrectionDate(e.target.value)} />
+        <input className="mtech-bill-input full" type="date" value={correctionDate} onChange={(e) => setCorrectionDate(e.target.value)} onClick={openNativePicker} />
 
         <div className="mtech-section-title">Corrected Check In</div>
-        <input className="mtech-bill-input full" type="time" value={correctedCheckIn} onChange={(e) => setCorrectedCheckIn(e.target.value)} />
+        <input className="mtech-bill-input full" type="time" value={correctedCheckIn} onChange={(e) => setCorrectedCheckIn(e.target.value)} onClick={openNativePicker} />
 
         <div className="mtech-section-title">Corrected Check Out</div>
-        <input className="mtech-bill-input full" type="time" value={correctedCheckOut} onChange={(e) => setCorrectedCheckOut(e.target.value)} />
+        <input className="mtech-bill-input full" type="time" value={correctedCheckOut} onChange={(e) => setCorrectedCheckOut(e.target.value)} onClick={openNativePicker} />
 
         <div className="mtech-section-title">Corrected Meal Start</div>
-        <input className="mtech-bill-input full" type="time" value={correctedMealStart} onChange={(e) => setCorrectedMealStart(e.target.value)} />
+        <input className="mtech-bill-input full" type="time" value={correctedMealStart} onChange={(e) => setCorrectedMealStart(e.target.value)} onClick={openNativePicker} />
 
         <div className="mtech-section-title">Corrected Meal End</div>
-        <input className="mtech-bill-input full" type="time" value={correctedMealEnd} onChange={(e) => setCorrectedMealEnd(e.target.value)} />
+        <input className="mtech-bill-input full" type="time" value={correctedMealEnd} onChange={(e) => setCorrectedMealEnd(e.target.value)} onClick={openNativePicker} />
 
         <p className="mtech-muted" style={{ padding: "0.25rem 0" }}>Fill in only the field(s) that were wrong — the rest is left as recorded.</p>
+
+        {!companyProfiles.find((p) => p.id === profileId)?.technician_id && (
+          <>
+            <div className="mtech-section-title">Employee ID</div>
+            <input className="mtech-bill-input full" type="text" value={employeeIdOverride} onChange={(e) => setEmployeeIdOverride(e.target.value)} placeholder="Not on file — type it in" />
+          </>
+        )}
+
+        <div className="mtech-section-title">Exception Type</div>
+        {(Object.keys(EXCEPTION_TYPE_LABELS) as ExceptionType[]).map((t) => (
+          <label key={t} style={{ display: "flex", alignItems: "center", gap: "0.4rem", padding: "0.25rem 0", color: "#f1f5f9", fontSize: "0.85rem" }}>
+            <input type="radio" name="mobileCorrectionExceptionType" checked={exceptionType === t} onChange={() => setExceptionType(t)} />
+            {EXCEPTION_TYPE_LABELS[t]}
+          </label>
+        ))}
+        {exceptionType === "other" && (
+          <input className="mtech-bill-input full" type="text" value={otherDescription} onChange={(e) => setOtherDescription(e.target.value)} placeholder="Describe the exception…" />
+        )}
 
         <div className="mtech-section-title">Reason</div>
         <textarea
@@ -9011,10 +9394,34 @@ function MobileTimeCorrectionView({ userName, profileId, prefillDate }: { userNa
           placeholder="What happened?"
         />
 
+        <div className="mtech-section-title">Employee Signature — I confirm the information above is accurate and truthful.</div>
+        <canvas {...sigPad.canvasProps} className={`bg-white rounded-md block mx-auto w-full ${sigPad.canvasProps.className}`} style={{ maxWidth: "340px" }} />
+        <div style={{ marginTop: "0.5rem" }}>
+          <SignaturePadControls pad={sigPad} />
+        </div>
+
         <button type="button" className="mtech-save-btn" onClick={submit} disabled={submitting}>
           {submitting ? "Submitting…" : "Submit Correction"}
         </button>
-        {msg && <div className="mtech-save-msg">{msg}</div>}
+        {submitSuccess ? (
+          <div
+            style={{
+              background: "rgba(34,197,94,0.15)",
+              border: "1px solid rgba(34,197,94,0.4)",
+              borderRadius: "10px",
+              padding: "0.85rem",
+              marginTop: "0.6rem",
+              textAlign: "center",
+              color: "#4ade80",
+              fontWeight: 700,
+              fontSize: "0.95rem",
+            }}
+          >
+            ✅ Correction Submitted
+          </div>
+        ) : (
+          msg && <div className="mtech-save-msg" style={msgIsError ? { color: "#f87171" } : undefined}>{msg}</div>
+        )}
       </div>
 
       <div style={{ fontWeight: 800, fontSize: "0.95rem", color: "#f1f5f9", margin: "0.4rem 0 0.1rem" }}>My Corrections</div>

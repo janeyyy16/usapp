@@ -2,7 +2,7 @@
  * GH Tracker (CsrGhTracker.tsx) — replaces the old CSR Self Service "+1"
  * counter with a real per-CSR log of phone numbers called/attempted for a
  * day, matching the reference spreadsheet's one-column-per-agent layout.
- * See migration 0307 for why this table's RLS is row-scoped (agents can
+ * See migration 0317 for why this table's RLS is row-scoped (agents can
  * only ever see/write their own rows) rather than the "any company member"
  * pattern the rest of csr_daily_report_entries/csr_mistake_log_entries use.
  *
@@ -51,7 +51,7 @@ export async function getMyGhTrackerEntries(profileId: string, entryDate: string
 /**
  * Every CSR's entries for a date range — RLS silently narrows this to just
  * the caller's own rows unless they're CSR_MANAGER/Admin/company-superadmin
- * (see migration 0307), so this same call is safe to reuse from both the
+ * (see migration 0317), so this same call is safe to reuse from both the
  * manager's aggregated view and anywhere else that might need it; a plain
  * agent calling it just gets their own rows back, same as
  * getMyGhTrackerEntries would.

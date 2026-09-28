@@ -1,5 +1,5 @@
 -- =====================================================================
--- 0307 — GH Tracker: replaces CSR Self Service (CsrSelfServiceTally.tsx,
+-- 0317 — GH Tracker: replaces CSR Self Service (CsrSelfServiceTally.tsx,
 -- a "+1" counter writing into csr_daily_report_entries.gh/schedule/attempt/
 -- updateCount) with a real per-CSR log of the phone numbers they've called
 -- or attempted to reach that day — matching the reference spreadsheet
@@ -22,7 +22,7 @@
 --     visibleAttendanceProfileIds team-roster grant) sees every CSR's rows
 --     for the picked date, laid out spreadsheet-style like the reference.
 --
--- Run once in the Supabase SQL Editor, after 0306.
+-- Run once in the Supabase SQL Editor, after 0316.
 -- =====================================================================
 
 create table if not exists csr_gh_tracker_entries (

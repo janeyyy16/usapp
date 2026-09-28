@@ -38,7 +38,7 @@ interface Props {
   extraRoles?: string[] | null;
   /** profiles.tier_level (migration 0162) — same field Master List's "Current Technicians" tab and Staff List's "Tier Level" tab edit. Shown in the Current Rate tile; "Unassigned" when blank. */
   tierLevel?: string | null;
-  /** profiles.training_end_date (migration 0291) — the trainee daily $100
+  /** profiles.training_end_date (migration 0297) — the trainee daily $100
    *  guarantee applies to every day from this employee's hireDate through
    *  this date, inclusive. Editable here, next to Salary History. */
   trainingEndDate?: string | null;
@@ -1118,7 +1118,7 @@ export function EmployeePayrollDetailModal({
     }
   };
 
-  // Trainee daily $100 guarantee window (migration 0291) — saves immediately
+  // Trainee daily $100 guarantee window (migration 0297) — saves immediately
   // like State above, not staged behind a form. Same debounced onRateChanged
   // as handleStateChange, sharing the same timer ref: whichever one fires
   // last wins, so editing both in quick succession still only reloads the

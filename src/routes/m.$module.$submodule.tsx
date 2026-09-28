@@ -97,6 +97,7 @@ import { HiringAnalyticsPage } from "@/components/HiringAnalyticsPage";
 import { CandidateReviewsPage } from "@/components/CandidateReviewsPage";
 import { TrainingListPage } from "@/components/TrainingListPage";
 import { AbsentListPage } from "@/components/AbsentListPage";
+import { RepairKnowledgeBase } from "@/components/RepairKnowledgeBase";
 import { ExpensesModulePage } from "@/components/ExpensesModulePage";
 import { StaffListPage } from "@/components/StaffListPage";
 import { ReportHR } from "@/components/ReportHR";
@@ -127,6 +128,7 @@ import { EmployeeSelfServicePage } from "@/components/EmployeeSelfServicePage";
 import { ItTicketsPage } from "@/components/ItTicketsPage";
 import { CSRMainDashboard } from "@/components/CSRMainDashboard";
 import { CSRTeamDailyReport } from "@/components/CSRTeamDailyReport";
+import { CsrRescheduleRequestsPage } from "@/components/CsrRescheduleRequestsPage";
 import { CsrGhTracker } from "@/components/CsrGhTracker";
 import { CsrLtpReport } from "@/components/CsrLtpReport";
 import { CSRCallTracker } from "@/components/CSRCallTracker";
@@ -481,6 +483,8 @@ function SubModule() {
         ? <ReportClaimsDaily mod={mod} sub={sub} />
         : (sub as any).custom === "report-triage-daily"
         ? <ReportTriageDaily mod={mod} sub={sub} />
+        : (sub as any).custom === "repair-knowledge"
+        ? <RepairKnowledgeBase mod={mod} sub={sub} />
         : (sub as any).custom === "report-parts-daily"
         ? <ReportPartsDaily mod={mod} sub={sub} />
         : (sub as any).custom === "report-operations-daily"
@@ -529,6 +533,8 @@ function SubModule() {
         ? <CSRMainDashboard mod={mod} sub={sub} />
         : (sub as any).custom === "csr-team-daily-report"
         ? <CSRTeamDailyReport mod={mod} sub={sub} />
+        : (sub as any).custom === "csr-reschedule-requests"
+        ? <CsrRescheduleRequestsPage mod={mod} sub={sub} />
         : (sub as any).custom === "csr-gh-tracker"
         ? <CsrGhTracker mod={mod} sub={sub} />
         : (sub as any).custom === "csr-ltp-report"

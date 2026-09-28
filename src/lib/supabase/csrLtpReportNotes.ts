@@ -2,7 +2,7 @@
  * LTP Report's "CSR" and "Notes" columns (CsrLtpReport.tsx) — one row per
  * (branch, date): "csr" is whoever's assigned to that branch/task that day
  * (picked from a datalist or freely typed), "note" is a freeform note. See
- * migration 0308: RLS is the "any company member can read/write everything"
+ * migration 0318: RLS is the "any company member can read/write everything"
  * pattern (this is a shared page every CSR role opens together), not the
  * row-scoped pattern GH Tracker uses.
  */

@@ -215,6 +215,15 @@ const csrMod: ModuleDef = {
       seed: () => ({}),
     },
     {
+      slug: "reschedule-requests",
+      title: "Reschedule Requests",
+      description: "Technicians who reported a same-day reschedule — view only, add notes.",
+      custom: "csr-reschedule-requests" as any,
+      fields: [],
+      count: 0,
+      seed: () => ({}),
+    },
+    {
       slug: "csr-daily-report",
       title: "CSR Daily Report",
       description: "CSR agent performance — tasks, schedule, attempts, mistakes.",
@@ -2022,6 +2031,17 @@ const triageMod: ModuleDef = {
       description: "View timecards and request time off.",
       custom: "employee-self-service" as any,
       fields: [],
+      seed: () => ({}),
+    },
+    // Past repairs grouped by model, sourced from Completed/Claimed/Data
+    // Closed tickets — a reference for Technical Support, not a report.
+    {
+      slug: "repair-knowledge",
+      title: "Repair Knowledge",
+      description: "Past repairs by model — symptoms, parts used, and outcomes from completed tickets.",
+      custom: "repair-knowledge" as any,
+      fields: [],
+      count: 0,
       seed: () => ({}),
     },
   ],

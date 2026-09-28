@@ -1,5 +1,5 @@
 -- =====================================================================
--- 0308 — LTP Report's "CSR" and "Notes" columns
+-- 0318 — LTP Report's "CSR" and "Notes" columns
 -- (src/components/CsrLtpReport.tsx) — one row per (branch, date): "csr" is
 -- whoever's assigned to that branch/task that day (picked from a CSR
 -- datalist or freely typed — not a foreign key, since it's meant to match
@@ -13,7 +13,7 @@
 --
 -- Company-scoped via RLS, company_id auto-stamped from the caller's
 -- session — reuses csr_daily_report_extras_stamp() (migration 0276).
--- Run once in the Supabase SQL Editor, after 0307.
+-- Run once in the Supabase SQL Editor, after 0317.
 -- =====================================================================
 
 create table if not exists csr_ltp_report_notes (

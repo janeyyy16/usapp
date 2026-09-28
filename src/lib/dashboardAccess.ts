@@ -51,6 +51,10 @@ export const DASHBOARD_ROLE_GATES: Record<string, string[]> = {
   // audience as daily-report/gh-tracker; a read-only report, so every CSR
   // role can view it, not just managers.
   "ltp-report": ["ADMIN", "CSR_MANAGER", "BIZOPS_MANAGER", "BIZOPS_SENIOR_MANAGER", "CSR_AGENT", "CSR_TEAM_LEADER"],
+  // Reschedule Requests (custom: "csr-reschedule-requests") — same CSR-wide
+  // audience as daily-report/gh-tracker; view-only there too (no
+  // approve/reject, just Phone DX/Rerouted/Notes annotation).
+  "reschedule-requests": ["ADMIN", "CSR_MANAGER", "BIZOPS_MANAGER", "BIZOPS_SENIOR_MANAGER", "CSR_AGENT", "CSR_TEAM_LEADER"],
   "hr-dashboard": ["ADMIN", "HR"],
   // HR module's Paperworks page (custom: "hr-paperworks") — the Automated
   // Forms group that used to live inside hr-dashboard's own sidebar. Same
@@ -113,6 +117,7 @@ const CSR_MODULE_SUBMODULE_SLUGS = new Set([
   "csr-daily-report",
   "call-tracker",
   "csr-status-summary",
+  "reschedule-requests",
 ]);
 
 export function getDashboardRoleGate(subSlug: string): string[] | null {
