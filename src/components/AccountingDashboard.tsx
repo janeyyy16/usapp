@@ -1,3 +1,4 @@
+import { downloadPayrollAttendanceWorkbook } from "@/lib/payrollAttendanceExport";
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
 import { Link, useSearch, useNavigate } from "@tanstack/react-router";
 import { useSmartBack } from "@/hooks/useSmartBack";
@@ -1195,6 +1196,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   const [mileageTableLoading, setMileageTableLoading] = useState(false);
 
   // UI state
+  const [attendanceExportProgress, setAttendanceExportProgress] = useState<{ done: number; total: number } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
@@ -3682,6 +3684,20 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
           : b.employee.full_name.localeCompare(a.employee.full_name)
       )
     : visibleRowsUnsorted;
+  const checkedVisibleRows = visibleRows.filter(row => !row.employee.payrollExcluded);
+  const downloadFilteredAttendance = async () => {
+    if (attendanceExportProgress || checkedVisibleRows.length === 0) return;
+    const people = [...new Map(checkedVisibleRows.map(row => [row.employee.id, row.employee])).values()];
+    setAttendanceExportProgress({ done: 0, total: people.length });
+    try {
+      await downloadPayrollAttendanceWorkbook(people, genStart, genEnd, effectiveCurrency === "USD" ? "US" : "PH",
+        (done, total) => setAttendanceExportProgress({ done, total }));
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Attendance download failed.");
+    } finally {
+      setAttendanceExportProgress(null);
+    }
+  };
   const visibleTotalUSD = visibleRows.reduce((s, r) => s + r.grossPayUSD, 0);
 
   // Grouped by department, both the department groups and each group's
@@ -4559,6 +4575,17 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                     className="w-full max-w-sm bg-slate-800/50 border border-white/10 rounded-lg p-2 text-white text-sm focus:border-blue-500 focus:outline-none"
                   />
                 </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={downloadFilteredAttendance}
+                    disabled={loading || generating || attendanceExportProgress !== null || checkedVisibleRows.length === 0 || !genStart || !genEnd || genStart > genEnd}
+                    title="Download checked employees matching the current filters, with one worksheet per employee"
+                    className="px-4 py-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white rounded font-semibold transition flex items-center gap-2"
+                  >
+                    {attendanceExportProgress ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                    <span aria-live="polite">{attendanceExportProgress ? `Exporting ${attendanceExportProgress.done}/${attendanceExportProgress.total}` : "Download Excel"}</span>
+                  </button>
                 <button
                   type="button"
                   onClick={generatePayroll}
@@ -4589,6 +4616,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
                       ? `Regenerate ${effectiveCurrency === "USD" ? "Office" : "PH"} Payroll`
                       : `Generate ${effectiveCurrency === "USD" ? "Office" : "PH"} Payroll`}
                 </button>
+                </div>
               </div>
                 <table className="w-full text-sm min-w-[700px]">
                   <thead>
