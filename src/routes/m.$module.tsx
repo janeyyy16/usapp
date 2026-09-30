@@ -1,4 +1,5 @@
 import { createFileRoute, Link, Navigate, notFound, Outlet } from "@tanstack/react-router";
+import { useRedirectGuard } from "@/lib/useRedirectGuard";
 import { useEffect, useState } from "react";
 import { AppHeader } from "@/components/Header";
 import { Footer } from "@/components/Footer";
@@ -365,8 +366,13 @@ function ModuleIndex() {
   // preview (forced to [] — see auth.tsx's effectiveExtraRoles), and is
   // hydrated synchronously alongside role/email before `ready` flips true,
   // so there's no race to guard against here.
+
+  // Guards every <Navigate> below against firing more than once per
+  // distinct target — see useRedirectGuard.ts for why this is necessary.
+  const redirectOnce = useRedirectGuard();
+
   if (!ready) return null;
-  if (!email) return <Navigate to="/landing" replace />;
+  if (!email) return redirectOnce("/landing") ? <Navigate to="/landing" replace /> : null;
 
   const hasChildRoute = typeof window !== "undefined" && window.location.pathname.split("/").filter(Boolean).length > 2;
 
@@ -392,7 +398,7 @@ function ModuleIndex() {
   const hasExplicitModuleLevelOverride = getModuleRoleGate(m.slug, MODULE_LEVEL_GATE_SLUG) !== null;
 
   if (!isModuleAllowed(role, m.slug, extraRoles) && !(hasExplicitModuleLevelOverride ? false : hasSubmoduleOverrideForRole)) {
-    return <Navigate to="/home" replace />;
+    return redirectOnce("/home") ? <Navigate to="/home" replace /> : null;
   }
 
   // Trainees only see Employee Self-Service — checked independently of the
@@ -401,7 +407,7 @@ function ModuleIndex() {
   // still renders here so the per-submodule filter further down can show
   // just that one tile; every other module is blocked outright.
   if (!isModuleAllowedForTrainee(isTrainee, m.slug)) {
-    return <Navigate to="/home" replace />;
+    return redirectOnce("/home") ? <Navigate to="/home" replace /> : null;
   }
 
   // Frozen accounts only see Messages (Admin module, internal-message-support

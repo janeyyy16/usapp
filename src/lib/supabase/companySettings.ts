@@ -206,7 +206,7 @@ export async function setCompanyWeeklyPasswordResetEnabled(enabled: boolean): Pr
 /**
  * Car IQ mileage reimbursement rates ($/mi with vs. without a company-
  * installed Car IQ tracking device — AccountingDashboard.tsx's Car IQ tab).
- * Editable instead of hardcoded (migration 0320) so a rate change doesn't
+ * Editable instead of hardcoded (migration 0324) so a rate change doesn't
  * need a code deploy. null means "never set" — the caller falls back to
  * roleLabels.ts's CAR_IQ_MILEAGE_RATE_WITH/WITHOUT constants, same as
  * before this setting existed.

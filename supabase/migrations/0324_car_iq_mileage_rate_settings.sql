@@ -1,5 +1,5 @@
 -- =====================================================================
--- 0320 — Car IQ mileage rates ($/mi with vs. without) made editable
+-- 0324 — Car IQ mileage rates ($/mi with vs. without) made editable
 -- instead of hardcoded — AccountingDashboard.tsx's Car IQ tab. Same
 -- companies.settings jsonb + RPC pattern as 0067's defaultTechnician /
 -- 0267's flashTechOpenAlertEmail settings, so the two rates can change
@@ -7,7 +7,7 @@
 -- roleLabels.ts's CAR_IQ_MILEAGE_RATE_WITH/WITHOUT constants stay as the
 -- fallback defaults for a company that's never set this.
 --
--- Run once in the Supabase SQL Editor, after 0319.
+-- Run once in the Supabase SQL Editor, after 0323.
 -- =====================================================================
 
 create or replace function set_car_iq_mileage_rates(p_with numeric, p_without numeric)

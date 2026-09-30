@@ -6,7 +6,7 @@
  * everywhere else (eligibility filters, the tab's own toggle display) — this
  * table is what a payroll period reads to detect a mid-period switch and
  * split mileage pay across the two rates (see mileageCarIqSplitFor in
- * AccountingDashboard.tsx). See migration 0319.
+ * AccountingDashboard.tsx). See migration 0323.
  */
 
 import { supabase } from "./client";

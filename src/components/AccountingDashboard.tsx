@@ -318,7 +318,7 @@ export interface EmployeePayrollRow {
    */
   mileageRateOverride: number | null;
   /**
-   * Car IQ History (migration 0319) — set when this technician's Car IQ
+   * Car IQ History (migration 0323) — set when this technician's Car IQ
    * on/off status actually CHANGED partway through the selected period, so
    * mileageRateOverride's single rate doesn't cover the whole period.
    * `date` is the switch's effective date; `rateBefore`/`rateAfter` are the
@@ -1248,7 +1248,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   // JSON blob the Employee Information tab edits), not duplicated anywhere.
   const [employeeInfoByProfileId, setEmployeeInfoByProfileId] = useState<Map<string, EmployeeInfo>>(new Map());
   const [carIqHistory, setCarIqHistory] = useState<CarIqHistoryEntry[]>([]);
-  // Company-configurable Car IQ mileage rates (migration 0320) — falls back
+  // Company-configurable Car IQ mileage rates (migration 0324) — falls back
   // to roleLabels.ts's hardcoded defaults until a company sets its own, so
   // a rate change never again needs a code deploy.
   const [carIqRateWith, setCarIqRateWith] = useState(CAR_IQ_MILEAGE_RATE_WITH);
@@ -1326,7 +1326,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
       const date = effectiveDate || new Date().toISOString().slice(0, 10);
       const changedByName = displayName || email || null;
       await setEmployeeHasCarIq(profileId, nextValue);
-      // Logs this change to car_iq_history (migration 0319) too, so a
+      // Logs this change to car_iq_history (migration 0323) too, so a
       // payroll period spanning this date can detect the switch and flag
       // its mileage line for a split — employee_info.hasCarIq alone only
       // ever tells you the CURRENT status, not when it last changed.

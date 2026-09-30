@@ -20,11 +20,9 @@
  * variants), Drum Replacement, or Major Repair; every other repair_type
  * (2 Man Job included — explicitly confirmed minor) and no-repair-type-
  * set tickets are MINOR. Computed from getTechCompletedRepairCounts'
- * per-(technician, repairType) totals, so — unlike Total Tickets — it
- * does NOT reflect the day-level manual correction overrides (those only
- * ever replace a day's raw total, with no repair_type attached), which
- * is why Minor+Major can occasionally undercount a corrected period's
- * Total Tickets by a small margin.
+ * per-(technician, repairType) totals, split into a day-level breakdown the
+ * same way Total Tickets is (migration 0326) so a manual correction can
+ * replace one day's Minor or Major count independently of the other.
  *
  * "Tier Level" here is whatever's on profiles.tier_level verbatim — a
  * pre-existing, loosely-defined column (a mix of pay-tier labels like
@@ -48,11 +46,16 @@
  * own extra analytical columns (Redo Rate %, Miles/Ticket, Tickets/Hour,
  * the 3 threshold alerts) appended after, not dropped.
  * "Off Days" = scheduled weekly RDOs within the period (profiles.off_days),
- * not days actually missed. "Unexcused Off Days Total 2026" and "NCNS" are
- * blank, manually-filled columns by design — this app has no excused/
- * unexcused absence tracking or no-call-no-show tracking yet, so there's
- * nothing live to put there; neither is parsed back out on import (same as
- * Location/Manager/Tier). "Variance" = this technician's Total Completion
+ * not days actually missed. "Unexcused Off Days Total 2026" is a blank,
+ * manually-filled column by design — this app has no excused/unexcused
+ * absence tracking yet, so there's nothing live to put there, and it's
+ * not parsed back out on import (same as Location/Manager/Tier). "NCNS"
+ * has no live tracking either (no-call-no-show detection doesn't exist in
+ * this app — see visitExceptions.ts), but unlike Unexcused Off Days it DOES
+ * have a real per-day override column (migration 0326) to persist a typed
+ * number into and read back on import — it just has no live value to ever
+ * merge with, so it's purely whatever's been manually entered, per day.
+ * "Variance" = this technician's Total Completion
  * vs. the average of every technician CURRENTLY in view (filteredRows), as
  * a signed %, colored green/red in the .xlsx export (CSV can't carry
  * color). "Damage Assessment" = count of "damage" signable documents (the
@@ -240,10 +243,14 @@ interface TechPerfRow {
    *  report — see FillDamagePage.tsx) sent to this technician in the
    *  period. */
   damageAssessmentCount: number;
+  /** No live source at all (see this file's header comment) — purely
+   *  whatever's been manually entered via a technician_daily_performance_
+   *  overrides correction, 0 otherwise. */
+  ncnsCount: number;
   highRedoAlert: boolean;
   routeMileageAlert: boolean;
   lowUtilizationAlert: boolean;
-  /** True if at least one day within the current period has a manual correction (technician_daily_performance_overrides) feeding Total Tickets/Miles/Hours Worked. */
+  /** True if at least one day within the current period has a manual correction (technician_daily_performance_overrides) feeding Total Tickets/Miles/Hours Worked/Damage Assessment/Minor Ticket/Major Ticket/Reschedule/NCNS. */
   hasOverride: boolean;
 }
 
@@ -329,6 +336,7 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
   const [ticketListFor, setTicketListFor] = useState<{ id: string; name: string } | null>(null);
   const [mileageListFor, setMileageListFor] = useState<{ id: string; name: string } | null>(null);
   const [offDaysListFor, setOffDaysListFor] = useState<{ id: string; name: string } | null>(null);
+  const [hoursListFor, setHoursListFor] = useState<{ id: string; name: string } | null>(null);
   const [importing, setImporting] = useState(false);
   const [templateGenerating, setTemplateGenerating] = useState(false);
   const [importResult, setImportResult] = useState<{ rowsApplied: number; skipped: string[] } | null>(null);
@@ -338,13 +346,26 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
   const [managerFilter, setManagerFilter] = useState<string[]>([]);
   const [tierFilter, setTierFilter] = useState<string[]>([]);
   const [groupBy, setGroupBy] = useState<GroupBy>("none");
-  // Ref to the (default, ungrouped) table's horizontal-scroll container so
-  // a floating scrollbar pinned to the bottom of the viewport can mirror
-  // its scroll position — same pattern TicketList.tsx uses, needed here
-  // too now that this table has 20+ columns. If Group By is active there
-  // can be more than one table on screen; this only tracks whichever one
-  // mounts last, same acceptable limitation as elsewhere this pattern's used.
-  const tableScrollRef = useRef<HTMLDivElement | null>(null);
+  // One horizontal-scroll ref PER group's table (not a single shared one) —
+  // same floating-scrollbar-pinned-to-the-viewport pattern TicketList.tsx
+  // uses, needed here too now that this table has 20+ columns. With Group
+  // By active there can be several of these tables on screen at once; a
+  // single shared ref would only ever track whichever one mounted last,
+  // leaving every other group's wide table with no floating scrollbar at
+  // all. Lazily creates one stable RefObject per group key (kept in a
+  // useRef Map so it survives re-renders) and reused for both that group's
+  // scroll container and its own <FloatingHorizontalScrollbar> below —
+  // each one hides itself independently when its own table isn't the one
+  // currently in view.
+  const groupScrollRefs = useRef(new Map<string, React.RefObject<HTMLDivElement | null>>());
+  const getGroupScrollRef = (key: string): React.RefObject<HTMLDivElement | null> => {
+    let ref = groupScrollRefs.current.get(key);
+    if (!ref) {
+      ref = { current: null };
+      groupScrollRefs.current.set(key, ref);
+    }
+    return ref;
+  };
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [selectedTechId, setSelectedTechId] = useState<string | null>(null);
@@ -382,23 +403,8 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
       setDailyTickets(dailyCompleted);
       setDailyOverrides(overrides);
 
-      const rescheduleByProfileId = new Map<string, number>();
-      for (const r of reschedules) rescheduleByProfileId.set(r.profileId, (rescheduleByProfileId.get(r.profileId) ?? 0) + 1);
-
       const cancelledByName = new Map<string, number>();
       for (const c of cancelledCounts) cancelledByName.set(c.technician.trim().toLowerCase(), c.count);
-
-      // "damage" signable documents sent to this technician (recipientId)
-      // within the period — createdAt is a timestamp, so compared as a
-      // plain date-string prefix against periodStart/periodEnd, same
-      // convention dailyTickets' own date filtering already uses.
-      const damageByProfileId = new Map<string, number>();
-      for (const d of damageDocs) {
-        if (!d.recipientId) continue;
-        const dateKey = d.createdAt.slice(0, 10);
-        if (dateKey < periodStart || dateKey > periodEnd) continue;
-        damageByProfileId.set(d.recipientId, (damageByProfileId.get(d.recipientId) ?? 0) + 1);
-      }
 
       const techs = allUsers.filter((u) => u.is_active && TECHNICIAN_PAY_ROLES.has(normalizeRole(u.role)));
       const dimensionByName = new Map<string, { location: string; manager: string; tier: string }>();
@@ -447,6 +453,51 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
       for (const [key, total] of ticketsByName) {
         const dailySum = Array.from(ticketsByNameByDay.get(key)?.values() ?? []).reduce((s, n) => s + n, 0);
         unscheduledTicketsByName.set(key, Math.max(0, total - dailySum));
+      }
+
+      // Same per-day breakdown as ticketsByNameByDay above, split into
+      // Minor/Major (Damage Assessment/Reschedule further below) — the
+      // period-total-only maps minorByName/majorByName above them had no
+      // per-day breakdown at all until migration 0326 gave these 4 figures
+      // an override column to replace one day of at a time, same as Total
+      // Tickets/Miles/Hours Worked already do.
+      const bumpDay = (map: Map<string, Map<string, number>>, key: string, day: string) => {
+        if (!map.has(key)) map.set(key, new Map());
+        const days = map.get(key)!;
+        days.set(day, (days.get(day) ?? 0) + 1);
+      };
+      const minorByNameByDay = new Map<string, Map<string, number>>();
+      const majorByNameByDay = new Map<string, Map<string, number>>();
+      for (const d of dailyCompleted) {
+        const key = d.technician.trim().toLowerCase();
+        bumpDay(MAJOR_REPAIR_TYPES.has(d.repairType) ? majorByNameByDay : minorByNameByDay, key, d.date);
+      }
+      // Same "leftover" reconciliation as unscheduledTicketsByName above —
+      // a completed ticket with no schedule date can't appear in the daily
+      // breakdown, but still counts toward minorByName/majorByName's
+      // period total, so it's added back in untouched.
+      const unscheduledMinorByName = new Map<string, number>();
+      for (const [key, total] of minorByName) {
+        const dailySum = Array.from(minorByNameByDay.get(key)?.values() ?? []).reduce((s, n) => s + n, 0);
+        unscheduledMinorByName.set(key, Math.max(0, total - dailySum));
+      }
+      const unscheduledMajorByName = new Map<string, number>();
+      for (const [key, total] of majorByName) {
+        const dailySum = Array.from(majorByNameByDay.get(key)?.values() ?? []).reduce((s, n) => s + n, 0);
+        unscheduledMajorByName.set(key, Math.max(0, total - dailySum));
+      }
+
+      // Reschedule/Damage Assessment: every row already carries a real
+      // date (no "unscheduled" concept the way completed tickets have), so
+      // no leftover-reconciliation term is needed for either.
+      const rescheduleByProfileIdByDay = new Map<string, Map<string, number>>();
+      for (const r of reschedules) bumpDay(rescheduleByProfileIdByDay, r.profileId, r.workDate);
+      const damageByProfileIdByDay = new Map<string, Map<string, number>>();
+      for (const d of damageDocs) {
+        if (!d.recipientId) continue;
+        const dateKey = d.createdAt.slice(0, 10);
+        if (dateKey < periodStart || dateKey > periodEnd) continue;
+        bumpDay(damageByProfileIdByDay, d.recipientId, dateKey);
       }
 
       // Mileage: one effective total per distinct (technician, work_date) —
@@ -557,7 +608,7 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
       const sumWithDailyOverride = (
         liveByDay: Map<string, number> | undefined,
         overrideByDay: Map<string, DailyPerformanceOverride> | undefined,
-        field: "totalTickets" | "miles" | "hoursWorked"
+        field: "totalTickets" | "miles" | "hoursWorked" | "damageAssessment" | "minorTicket" | "majorTicket" | "reschedule" | "ncns"
       ): number => {
         const dayKeys = new Set<string>([...(liveByDay?.keys() ?? []), ...(overrideByDay?.keys() ?? [])]);
         let sum = 0;
@@ -590,8 +641,19 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
           : redoMap.get(nameKey)?.length ?? 0;
         const miles = sumWithDailyOverride(milesByDayForTech, techOverrides, "miles");
         const hoursWorked = sumWithDailyOverride(hoursByProfileByDay.get(t.id), techOverrides, "hoursWorked");
+        const minorTicketCount = sumWithDailyOverride(minorByNameByDay.get(nameKey), techOverrides, "minorTicket") + (unscheduledMinorByName.get(nameKey) ?? 0);
+        const majorTicketCount = sumWithDailyOverride(majorByNameByDay.get(nameKey), techOverrides, "majorTicket") + (unscheduledMajorByName.get(nameKey) ?? 0);
+        const rescheduleCount = sumWithDailyOverride(rescheduleByProfileIdByDay.get(t.id), techOverrides, "reschedule");
+        const damageAssessmentCount = sumWithDailyOverride(damageByProfileIdByDay.get(t.id), techOverrides, "damageAssessment");
+        // NCNS has no live source at all (see this file's header comment) —
+        // calling sumWithDailyOverride with no live map degrades exactly
+        // right on its own: only the days someone actually entered a value
+        // for contribute to the sum, everything else contributes 0.
+        const ncnsCount = sumWithDailyOverride(undefined, techOverrides, "ncns");
         const hasOverride = Array.from(techOverrides?.values() ?? []).some(
-          (o) => o.totalTickets != null || o.redoCount != null || o.miles != null || o.hoursWorked != null
+          (o) =>
+            o.totalTickets != null || o.redoCount != null || o.miles != null || o.hoursWorked != null ||
+            o.damageAssessment != null || o.minorTicket != null || o.majorTicket != null || o.reschedule != null || o.ncns != null
         );
         const overrideWorkedDays = Array.from(techOverrides?.entries() ?? [])
           .filter(([, o]) => o.hoursWorked != null && o.hoursWorked > 0)
@@ -612,8 +674,8 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
           daysWorked,
           hoursWorked,
           totalTickets,
-          minorTicketCount: minorByName.get(nameKey) ?? 0,
-          majorTicketCount: majorByName.get(nameKey) ?? 0,
+          minorTicketCount,
+          majorTicketCount,
           redoCount,
           redoRatePct,
           miles,
@@ -621,9 +683,10 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
           ticketsPerHour,
           offDaysCount: countOffDaysInRange(t.off_days, periodStart, periodEnd),
           offDays: t.off_days ?? [],
-          rescheduleCount: rescheduleByProfileId.get(t.id) ?? 0,
+          rescheduleCount,
           cancelledCount: cancelledByName.get(nameKey) ?? 0,
-          damageAssessmentCount: damageByProfileId.get(t.id) ?? 0,
+          damageAssessmentCount,
+          ncnsCount,
           highRedoAlert: redoRatePct != null && redoRatePct > 5,
           routeMileageAlert: milesPerTicket != null && milesPerTicket > 30,
           lowUtilizationAlert: weeklyEquivalentHours < 32,
@@ -749,6 +812,21 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
       .sort((a, b) => b.date.localeCompare(a.date));
   }, [mileageListFor, mileageDaily]);
 
+  // The real per-day hours (calcWorkedHours + paid-meal-credit off this
+  // technician's own timecard punches, see hoursByProfileByDay in load())
+  // behind a clicked Hours Worked total — same "show the days it's built
+  // from" transparency the Mileage/Total Tickets breakdowns already give,
+  // for whatever Period (Weekly/Monthly/Custom) is currently selected.
+  const hoursListRows = useMemo(() => {
+    if (!hoursListFor) return [];
+    const dayMap = hoursDaily.get(hoursListFor.id);
+    if (!dayMap) return [];
+    return Array.from(dayMap.entries())
+      .filter(([, hrs]) => hrs > 0)
+      .map(([date, hours]) => ({ date, hours }))
+      .sort((a, b) => b.date.localeCompare(a.date));
+  }, [hoursListFor, hoursDaily]);
+
   // The actual dates behind a clicked Off Days count — every date in the
   // period whose weekday falls in this technician's scheduled off_days
   // (Admin User Management's Off Days picker), same rule
@@ -815,10 +893,10 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
     else { setSortKey(key); setSortDir("asc"); }
   };
 
-  const top5Chart = useMemo(
+  const top10Chart = useMemo(
     () => [...filteredRows]
       .sort((a, b) => b.totalTickets - a.totalTickets)
-      .slice(0, 5)
+      .slice(0, 10)
       .map((r) => ({ name: r.name.split(" ")[0] || r.name, fullName: r.name, value: r.totalTickets })),
     [filteredRows],
   );
@@ -866,7 +944,7 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
       ],
       sortedRows.map((r) => [
         r.name, fmtVariance(varianceByRowId.get(r.id) ?? null), r.damageAssessmentCount, r.minorTicketCount, r.majorTicketCount, r.redoCount, r.totalTickets,
-        r.daysWorked > 0 ? fmt1(r.totalTickets / r.daysWorked) : "—", r.rescheduleCount, "", r.cancelledCount, fmt1(r.miles), r.daysWorked, r.offDaysCount,
+        r.daysWorked > 0 ? fmt1(r.totalTickets / r.daysWorked) : "—", r.rescheduleCount, r.ncnsCount, r.cancelledCount, fmt1(r.miles), r.daysWorked, r.offDaysCount,
         "", fmt1(r.hoursWorked), r.location, r.manager, r.tier,
         r.redoRatePct != null ? fmt1(r.redoRatePct) : "—", r.milesPerTicket != null ? fmt1(r.milesPerTicket) : "—",
         r.ticketsPerHour != null ? fmt1(r.ticketsPerHour) : "—", r.highRedoAlert ? "Yes" : "", r.routeMileageAlert ? "Yes" : "", r.lowUtilizationAlert ? "Yes" : "",
@@ -961,21 +1039,22 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
         // different (and much more confusing) thing to a technician who
         // really did work that day but has zero logged for it.
         //
-        // Every value column is left BLANK on every day row: for the 4
+        // Every value column is left BLANK on every day row: for the 9
         // fields that actually support a per-day override (Total
-        // Completion/Redo/Mileage/Hours Worked), blank means "no change"
-        // on import, so leaving them blank is what makes re-importing an
-        // untouched row a true no-op instead of silently re-asserting a
-        // number as a permanent override. The rest (Variance, Damage
-        // Assessment, Minor/Major Ticket, Average Completion, Reschedule,
-        // Cancelled, Working Days, Off Days) are period-level, not per-day,
-        // figures that aren't read back on import at all — repeating them
-        // on every one of a technician's day rows read as if they were
-        // themselves per-day data, so they're blank here too and shown
-        // once instead, in the reference block below. NCNS and Unexcused
-        // Off Days Total 2026 are always blank (no live source, see this
-        // file's header comment) — a place for HR to type a number by
-        // hand, not something this export or the importer reads back.
+        // Completion/Redo/Mileage/Hours Worked/Damage Assessment/Minor
+        // Ticket/Major Ticket/Reschedule/NCNS — migration 0326 added the
+        // last 5), blank means "no change" on import, so leaving them
+        // blank is what makes re-importing an untouched row a true no-op
+        // instead of silently re-asserting a number as a permanent
+        // override. The rest (Variance, Average Completion, Cancelled,
+        // Working Days, Off Days) are period-level, not per-day, figures
+        // that aren't read back on import at all — repeating them on every
+        // one of a technician's day rows read as if they were themselves
+        // per-day data, so they're blank here too and shown once instead,
+        // in the reference block below. Unexcused Off Days Total 2026 is
+        // always blank (no live source, no override column either) — a
+        // place for HR to type a number by hand, not something this export
+        // or the importer reads back.
         for (let date = periodStart; date <= periodEnd; date = addDaysISO(date, 1)) {
           sheet.addRow({
             name: r.name,
@@ -1013,7 +1092,7 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
       // re-import, see handleImportFile).
       sheet.addRow({});
       const noteRow = sheet.addRow({
-        name: "All technicians — add a row below (Name + Date + at least one value) to correct a day with no activity yet. Redo/Total Completion/Mileage/Hours Worked below are the CURRENT totals, for reference.",
+        name: "All technicians — add a row below (Name + Date + at least one value) to correct a day with no activity yet. Damage Assessment/Minor Ticket/Major Ticket/Redo/Total Completion/Reschedule/NCNS/Mileage/Hours Worked below are the CURRENT totals, for reference.",
       });
       noteRow.font = { italic: true, color: { argb: "FF64748B" } };
       for (const r of sortedRows) {
@@ -1028,6 +1107,7 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
           totalTickets: r.totalTickets,
           avgCompletion: r.daysWorked > 0 ? fmt1(r.totalTickets / r.daysWorked) : "—",
           reschedule: r.rescheduleCount,
+          ncns: r.ncnsCount,
           cancelled: r.cancelledCount,
           miles: fmt1(r.miles),
           daysWorked: r.daysWorked,
@@ -1095,6 +1175,11 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
         const redoIdx = idxAny("redo", "redo count");
         const milesIdx = idxAny("mileage", "miles");
         const hoursIdx = idx("hours worked");
+        const damageAssessmentIdx = idx("damage assessment");
+        const minorTicketIdx = idx("minor ticket");
+        const majorTicketIdx = idx("major ticket");
+        const rescheduleIdx = idx("reschedule");
+        const ncnsIdx = idx("ncns");
         const locationIdx = idx("location");
         if (nameIdx === -1 || dateIdx === -1) {
           throw new Error('This doesn\'t look like a Technician Performance import file — missing "Name"/"Date" columns.');
@@ -1121,7 +1206,19 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
         };
 
         const skipped: string[] = [];
-        const toWrite: { profileId: string; workDate: string; totalTickets?: number | null; redoCount?: number | null; miles?: number | null; hoursWorked?: number | null }[] = [];
+        const toWrite: {
+          profileId: string;
+          workDate: string;
+          totalTickets?: number | null;
+          redoCount?: number | null;
+          miles?: number | null;
+          hoursWorked?: number | null;
+          damageAssessment?: number | null;
+          minorTicket?: number | null;
+          majorTicket?: number | null;
+          reschedule?: number | null;
+          ncns?: number | null;
+        }[] = [];
         for (let i = 1; i < aoa.length; i++) {
           const cells = aoa[i];
           const name = cellToStr(cells[nameIdx]);
@@ -1143,7 +1240,16 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
           if (redoIdx !== -1) { const n = parseNum(cells[redoIdx]); if (n !== undefined) entry.redoCount = n; }
           if (milesIdx !== -1) { const n = parseNum(cells[milesIdx]); if (n !== undefined) entry.miles = n; }
           if (hoursIdx !== -1) { const n = parseNum(cells[hoursIdx]); if (n !== undefined) entry.hoursWorked = n; }
-          if (entry.totalTickets === undefined && entry.redoCount === undefined && entry.miles === undefined && entry.hoursWorked === undefined) continue;
+          if (damageAssessmentIdx !== -1) { const n = parseNum(cells[damageAssessmentIdx]); if (n !== undefined) entry.damageAssessment = n; }
+          if (minorTicketIdx !== -1) { const n = parseNum(cells[minorTicketIdx]); if (n !== undefined) entry.minorTicket = n; }
+          if (majorTicketIdx !== -1) { const n = parseNum(cells[majorTicketIdx]); if (n !== undefined) entry.majorTicket = n; }
+          if (rescheduleIdx !== -1) { const n = parseNum(cells[rescheduleIdx]); if (n !== undefined) entry.reschedule = n; }
+          if (ncnsIdx !== -1) { const n = parseNum(cells[ncnsIdx]); if (n !== undefined) entry.ncns = n; }
+          if (
+            entry.totalTickets === undefined && entry.redoCount === undefined && entry.miles === undefined && entry.hoursWorked === undefined &&
+            entry.damageAssessment === undefined && entry.minorTicket === undefined && entry.majorTicket === undefined &&
+            entry.reschedule === undefined && entry.ncns === undefined
+          ) continue;
           toWrite.push(entry);
         }
         if (toWrite.length === 0) throw new Error("No usable rows found — every row was either unmatched or had no values to import.");
@@ -1191,7 +1297,13 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
 
   return (
     <div className="min-h-screen flex flex-col">
-      <main className="flex-1 max-w-[1500px] mx-auto w-full px-4 sm:px-6 py-8">
+      {/* max-w-[1900px] (not unbounded) — same convention TicketList.tsx's
+          own very-wide table uses: wide enough that a big/ultrawide monitor
+          actually gets to use the extra room (more of this table's 20+
+          columns fit without scrolling), while `w-full` + the responsive
+          px-4/sm:px-6 padding still let it shrink correctly on a smaller
+          screen — the floating horizontal scrollbar picks up the rest. */}
+      <main className="flex-1 max-w-[1900px] mx-auto w-full px-4 sm:px-6 py-8">
         <div className="relative rounded-2xl border border-white/10 bg-gradient-to-br from-blue-600/20 via-indigo-600/10 to-transparent px-6 py-6 mb-5">
           <div className="flex items-center gap-3 flex-wrap">
             <button onClick={goBack} className="btn hover:bg-white/15 shrink-0"><ChevronLeft className="h-4 w-4" /></button>
@@ -1421,14 +1533,14 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
                 </div>
               </div>
             )}
-            {top5Chart.length > 0 && (
+            {top10Chart.length > 0 && (
               <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
                 <div className="flex items-center gap-1.5 mb-4">
                   <Star className="h-4 w-4 text-emerald-400" />
-                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Top 5 Technicians (Total Tickets)</p>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Top 10 Technicians (Total Tickets)</p>
                 </div>
                 <ResponsiveContainer width="100%" height={200} debounce={200}>
-                  <BarChart data={top5Chart} margin={{ left: -10 }}>
+                  <BarChart data={top10Chart} margin={{ left: -10 }}>
                     <XAxis dataKey="name" tick={{ fill: "#94a3b8", fontSize: 11 }} />
                     <YAxis tick={{ fill: "#94a3b8", fontSize: 11 }} allowDecimals={false} />
                     <Tooltip
@@ -1438,13 +1550,15 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
                       labelFormatter={(_, payload) => payload?.[0]?.payload?.fullName ?? ""}
                     />
                     <Bar dataKey="value" radius={[4, 4, 0, 0]} name="Total Tickets">
-                      {top5Chart.map((_, i) => <Cell key={i} fill={CHART_BAR_FILL} />)}
+                      {top10Chart.map((_, i) => <Cell key={i} fill={CHART_BAR_FILL} />)}
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
               </div>
             )}
-            {groupedRows.map(({ groupName, rows: groupRows }) => (
+            {groupedRows.map(({ groupName, rows: groupRows }) => {
+              const groupScrollRef = getGroupScrollRef(groupName ?? "__all__");
+              return (
               <div key={groupName ?? "all"} className="rounded-xl border border-white/10 bg-white/[0.03] overflow-hidden">
                 {groupName != null && (
                   <div className="px-4 py-2.5 border-b border-white/10 bg-white/5 flex items-center justify-between">
@@ -1454,7 +1568,7 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
                     </span>
                   </div>
                 )}
-                <div className="overflow-x-auto" ref={tableScrollRef}>
+                <div className="overflow-x-auto" ref={groupScrollRef}>
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-white/10 bg-white/5">
@@ -1527,7 +1641,7 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
                             </td>
                             <td className="px-3 py-2 text-right">{r.daysWorked > 0 ? fmt1(r.totalTickets / r.daysWorked) : "—"}</td>
                             <td className="px-3 py-2 text-right">{r.rescheduleCount}</td>
-                            <td className="px-3 py-2 text-right text-muted-foreground">—</td>
+                            <td className="px-3 py-2 text-right">{r.ncnsCount}</td>
                             <td className="px-3 py-2 text-right">{r.cancelledCount}</td>
                             <td className="px-3 py-2 text-right">
                               {r.miles > 0 ? (
@@ -1559,7 +1673,20 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
                               )}
                             </td>
                             <td className="px-3 py-2 text-right text-muted-foreground">—</td>
-                            <td className="px-3 py-2 text-right">{fmt1(r.hoursWorked)}</td>
+                            <td className="px-3 py-2 text-right">
+                              {r.hoursWorked > 0 ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setHoursListFor({ id: r.id, name: r.name })}
+                                  className="text-blue-400 hover:text-blue-300 hover:underline underline-offset-2"
+                                  title="View hours breakdown"
+                                >
+                                  {fmt1(r.hoursWorked)}
+                                </button>
+                              ) : (
+                                fmt1(r.hoursWorked)
+                              )}
+                            </td>
                             <td className="px-3 py-2 text-muted-foreground">{r.location}</td>
                             <td className="px-3 py-2 text-muted-foreground">{r.manager}</td>
                             <td className="px-3 py-2 text-muted-foreground">{r.tier}</td>
@@ -1580,17 +1707,18 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
                     </tbody>
                   </table>
                 </div>
+                {/* Floating horizontal scrollbar — pinned to the bottom of
+                    the viewport so the user can scroll THIS group's wide
+                    table sideways without first scrolling all the way down.
+                    Hides itself automatically when this table isn't the one
+                    currently in view (e.g. a different group is on screen),
+                    or when its own native scrollbar is already reachable. */}
+                <FloatingHorizontalScrollbar targetRef={groupScrollRef} />
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
-
-        {/* Floating horizontal scrollbar — pinned to the bottom of the
-            viewport so the user can scroll this wide table sideways
-            without first scrolling all the way down. Hides itself
-            automatically when the table's own native scrollbar comes into
-            view. */}
-        <FloatingHorizontalScrollbar targetRef={tableScrollRef} />
       </main>
 
       {ticketListFor && (
@@ -1688,6 +1816,50 @@ export function TechnicianPerformanceReport({ mod }: { mod: ModuleDef; sub: SubM
                             </span>
                           )}
                         </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {hoursListFor && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => setHoursListFor(null)}>
+          <div
+            className="bg-slate-900 border border-white/15 rounded-xl w-full max-w-lg max-h-[80vh] flex flex-col shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-4 border-b border-white/10 bg-slate-950 rounded-t-xl">
+              <div>
+                <p className="font-semibold text-white">Hours Breakdown — {hoursListFor.name}</p>
+                <p className="text-xs text-slate-400">{periodStart} – {periodEnd} · {fmt1(hoursListRows.reduce((s, d) => s + d.hours, 0))} total hours</p>
+              </div>
+              <button onClick={() => setHoursListFor(null)} className="text-white/40 hover:text-white/80 transition">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <p className="px-5 pt-3 text-[11px] text-slate-400">
+              Real hours per day from this technician's own timecard — Check In/Check Out minus any unpaid meal break (<span className="text-slate-300">calcWorkedHours</span>), plus any paid-meal credit their role gets. A day with a manual correction (technician_daily_performance_overrides) shows this raw punched value here regardless — the table's own total already reflects the correction.
+            </p>
+            <div className="overflow-y-auto flex-1 p-2">
+              {hoursListRows.length === 0 ? (
+                <p className="text-sm text-slate-400 text-center py-8">No punches in this period.</p>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs text-slate-400 uppercase">
+                      <th className="px-3 py-2">Date</th>
+                      <th className="px-3 py-2 text-right">Hours</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {hoursListRows.map((d) => (
+                      <tr key={d.date} className="hover:bg-white/5">
+                        <td className="px-3 py-2 text-slate-300">{d.date}</td>
+                        <td className="px-3 py-2 text-right font-medium">{fmt1(d.hours)}</td>
                       </tr>
                     ))}
                   </tbody>

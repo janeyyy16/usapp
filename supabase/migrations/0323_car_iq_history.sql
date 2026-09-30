@@ -1,5 +1,5 @@
 -- =====================================================================
--- 0319 — Car IQ History (AccountingDashboard.tsx's Car IQ tab) — an
+-- 0323 — Car IQ History (AccountingDashboard.tsx's Car IQ tab) — an
 -- effective-dated log of a technician's Car IQ on/off status, mirroring
 -- salary_entries' own effective-dated pattern for hourly rate ("Start Date"
 -- is editable after the fact for a backdated entry, same as Salary
