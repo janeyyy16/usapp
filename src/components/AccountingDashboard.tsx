@@ -1,4 +1,3 @@
-import { downloadPayrollAttendanceWorkbook } from "@/lib/payrollAttendanceExport";
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
 import { Link, useSearch, useNavigate } from "@tanstack/react-router";
 import { useSmartBack } from "@/hooks/useSmartBack";
@@ -199,7 +198,7 @@ export interface SupabaseEmployee {
    *  Technicians" tab and Staff List's own "Tier Level" tab edit; shown here
    *  as a yellow badge beside Role. */
   tierLevel: string | null;
-  /** profiles.training_end_date (migration 0291) — the trainee daily $100
+  /** profiles.training_end_date (migration 0297) — the trainee daily $100
    *  guarantee applies to every day from this employee's hireDate through
    *  this date, inclusive. Null means no trainee window is set. Distinct
    *  from isTrainee, which is a single permanent flag with no date range —
@@ -2284,7 +2283,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
     return premium;
   }
 
-  // Trainee daily $100 guarantee (migration 0291, profiles.training_end_date):
+  // Trainee daily $100 guarantee (migration 0297, profiles.training_end_date):
   // every day from hireDate through trainingEndDate (inclusive) is a trainee
   // day. If that day's actual pay falls short of $100, the shortfall is
   // topped up — a floor, not a flat replacement, so a trainee who has a big
@@ -2515,7 +2514,7 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
   // preview total.
   const techCustomTotalByProfile = new Map<string, number>();
   // Same total, minus any line NOT flagged isWageIncludable (migration
-  // 0290) — an expense reimbursement, a flat per-diem stipend, or an
+  // 0291) — an expense reimbursement, a flat per-diem stipend, or an
   // unrelated cash adjustment (a copay, a withheld deduction) isn't wages,
   // so FLSA's weighted regular-rate calc (techIncludablePay below) has to
   // leave it out even though it still counts toward Total Payment via
@@ -3690,6 +3689,10 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
     const people = [...new Map(checkedVisibleRows.map(row => [row.employee.id, row.employee])).values()];
     setAttendanceExportProgress({ done: 0, total: people.length });
     try {
+      // Loaded on click: a static import pulled HrCalendarTab and its UI
+      // modules into the server bundle out of order ("Cannot access 'cva'
+      // before initialization"), and the Worker failed to start.
+      const { downloadPayrollAttendanceWorkbook } = await import("@/lib/payrollAttendanceExport");
       await downloadPayrollAttendanceWorkbook(people, genStart, genEnd, effectiveCurrency === "USD" ? "US" : "PH",
         (done, total) => setAttendanceExportProgress({ done, total }));
     } catch (error) {

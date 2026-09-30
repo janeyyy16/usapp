@@ -83,14 +83,10 @@ type CellColor = "approved" | "pending" | "hrPlotted";
 // its own red cell instead of blending into the leave-type orange. The
 // remaining 2 HR Status options (Resigned/Terminated) aren't attendance
 // types at all and never populate a cell.
-export const HR_STATUS_TO_PTO_TYPE: Partial<Record<string, PtoType>> = {
-  Vacation: "vacation",
-  Sick: "sick",
-  Personal: "personal",
-  Holiday: "holiday",
-  Unpaid: "unpaid",
-  Bereavement: "bereavement",
-};
+// Defined in src/lib/supabase/pto.ts (so src/lib code can use it without
+// importing this component); re-exported for existing importers.
+import { HR_STATUS_TO_PTO_TYPE } from "@/lib/supabase/pto";
+export { HR_STATUS_TO_PTO_TYPE };
 
 // hrPlottedByProfile's cells can be a real PtoType (a leave type HR set via
 // Absent List's HR Status) OR the special "absent" marker (Absent List's own
@@ -301,6 +297,14 @@ export function HrCalendarTab({ employees, myProfileId, myDisplayName }: Props) 
   // type filter are included, so a filtered-out request behaves like an
   // empty cell (colorless, clicking it opens "Add time off" rather than
   // showing a request the filter is hiding).
+  // A leave spanning a weekend (e.g. Friday–Tuesday) only covers working
+  // days — the person's own rest days stay "R", same as the hours math in
+  // pto.ts (workingDayCount), which never charges rest days. Falls back to
+  // Sat/Sun for anyone with no rest days set on their profile.
+  const restDaysByProfile = useMemo(
+    () => new Map(employees.map((e) => [e.id, new Set(e.offDays && e.offDays.length > 0 ? e.offDays : [0, 6])])),
+    [employees]
+  );
   const cellsByProfile = useMemo(() => {
     const map = new Map<string, Map<string, PtoRequestRow>>();
     for (const r of requests) {
@@ -312,12 +316,14 @@ export function HrCalendarTab({ employees, myProfileId, myDisplayName }: Props) 
         byDate = new Map();
         map.set(r.profileId, byDate);
       }
+      const restDays = restDaysByProfile.get(r.profileId) ?? new Set([0, 6]);
       for (let cur = r.startDate; cur <= r.endDate; cur = nextDate(cur)) {
+        if (restDays.has(new Date(`${cur}T00:00:00`).getDay())) continue;
         byDate.set(cur, r);
       }
     }
     return map;
-  }, [requests, typeFilter]);
+  }, [requests, typeFilter, restDaysByProfile]);
 
   // Absent List's HR Status (attendance_notes.hr_note) for whichever
   // (person, day) cells fall inside the visible 2-month window — the

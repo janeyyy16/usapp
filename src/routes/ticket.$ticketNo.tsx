@@ -2,19 +2,24 @@ import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { AppHeader } from "@/components/Header";
 import { Footer } from "@/components/Footer";
+import { PartInfoModal, type PartInfoVendor } from "@/components/PartInfoModal";
+import type { MarconePartInfo } from "@/lib/marconeApi";
+import type { EncompassPartInfo } from "@/lib/encompassApi";
 import { savePartOrder, createPartOrderFromTicket, placeMarconeOrder, isMarconeDist, placeEncompassOrder, isEncompassDist, type MarconeOrderPayload, type ShipToAddress } from "@/lib/supabase/partOrders";
 import { getPartAddresses, getLocations } from "@/lib/supabase/locationManagement";
 import { PART_STATUS_OPTIONS } from "@/lib/partStatuses";
-import { Copy, Map as MapIcon, CalendarDays, Send, ExternalLink, Pencil, Lock, Smartphone, ClipboardCheck, ChevronDown, X } from "lucide-react";
+import { Copy, Map as MapIcon, CalendarDays, Send, ExternalLink, Pencil, Lock, Smartphone, ClipboardCheck, ChevronDown, X, Search, Settings } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { isFirebaseReady, auth as firebaseAuth } from "@/lib/firebase/config";
-import { getGmailConnectionStatus, disconnectGmail, type GmailConnectionStatus, type GmailRegion } from "@/lib/supabase/gmailConnection";
+import { getGmailConnectionStatus, getGmailConnectRoles, disconnectGmail, type GmailConnectionStatus, type GmailRegion } from "@/lib/supabase/gmailConnection";
+import { GmailConnectRolesModal } from "@/components/GmailConnectRolesModal";
 import { getRecentDropshipRecipients, recordDropshipRecipient, type DropshipRecipient } from "@/lib/supabase/dropshipRecipients";
 import { useIsPhone } from "@/lib/device";
 import { TicketPhotos } from "@/components/TicketPhotos";
 import { MarconePartsOrderModal, type AddressBookEntry, type MarconePartLine } from "@/components/MarconePartsOrderModal";
 import { TruckStockBatchModal, type TruckStockBatchSelection } from "@/components/TruckStockBatchModal";
 import { TicketSidebar } from "@/components/TicketSidebar";
+import { TechTipsPanel } from "@/components/TechTipsPanel";
 import { TIME_FRAMES } from "@/lib/timeframes";
 import { CLAIM_STATUSES, CLAIM_TOS, PAYMENT_METHODS } from "@/lib/claimDropdowns";
 import { resolveTierCode } from "@/lib/tierCodes";
@@ -103,6 +108,15 @@ const LOCATION_PART_DISTRIBUTORS: Record<string, string[]> = {
   Birmingham: ["Marcone- Birmingham / Montgomery", "Encompass-Birmingham / Montgomery"],
   Montgomery: ["Marcone- Birmingham / Montgomery", "Encompass-Birmingham / Montgomery"],
 };
+
+/** Part lookup stock line: "in stock: 12 (Richmond 5, Baltimore 7)" — only warehouses that have it, top 4. */
+function stockSummary(total: number, warehouses: { name?: string; qty: number }[]): string {
+  if (total <= 0) return "out of stock";
+  const withStock = warehouses.filter((w) => w.qty > 0).sort((a, b) => b.qty - a.qty);
+  const shown = withStock.slice(0, 4).map((w) => `${w.name || "Warehouse"} ${w.qty}`);
+  if (withStock.length > 4) shown.push(`+${withStock.length - 4} more`);
+  return `in stock: ${total}${shown.length ? ` (${shown.join(", ")})` : ""}`;
+}
 
 function partDistOptionsForLocation(location: string | null | undefined): string[] {
   return LOCATION_PART_DISTRIBUTORS[(location || "").trim()] ?? UNIVERSAL_PART_DISTRIBUTORS;
@@ -1203,6 +1217,8 @@ function TicketDetailsPage() {
     TICKET_DETAILS_TABS,
     "general",
   );
+  // Tracking tab's Tech Tips section starts collapsed.
+  const [techTipsOpen, setTechTipsOpen] = useState(false);
   const [newServicerNote, setNewServicerNote] = useState("");
   const [servicerComments, setServicerComments] = useState<Array<{ id: string; body: string; authorName: string; authorRole: string; createdAt: string }>>([]);
   const [newVisitStatus, setNewVisitStatus] = useState("Visited");
@@ -1428,6 +1444,11 @@ function TicketDetailsPage() {
   // Marcone /parts/lookup state for the inline Add row's "Lookup" button.
   const [marconeLookupBusy, setMarconeLookupBusy] = useState(false);
   const [marconeLookupMsg, setMarconeLookupMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  // Last successful Lookup — enables the magnifying glass (Part Info popup) for that part.
+  const [partInfoLookup, setPartInfoLookup] = useState<
+    { partNumber: string; vendor: PartInfoVendor; marcone?: MarconePartInfo; encompass?: EncompassPartInfo } | null
+  >(null);
+  const [partInfoOpen, setPartInfoOpen] = useState(false);
   // Which Part No the draft's current partDesc/partPrice/coreValue actually
   // belong to — either the last part a Lookup was run for, or (when editing
   // an existing row) that row's own saved part number. Lets handleMarconeLookup
@@ -1495,6 +1516,8 @@ function TicketDetailsPage() {
   // once the ticket's model/problem description are known; re-runs if
   // either changes (e.g. after editing Product Information).
   const [partSuggestions, setPartSuggestions] = useState<PartSuggestion[]>([]);
+  // "Suggested (from past tickets)" chips start collapsed.
+  const [partSuggestionsOpen, setPartSuggestionsOpen] = useState(false);
   const [partSuggestionsLoading, setPartSuggestionsLoading] = useState(false);
 
   // Edit mode state for schedule information
@@ -4655,8 +4678,9 @@ function TicketDetailsPage() {
         }));
         lastMarconeFillPartNoRef.current = partNumber;
         lastMarconeFillDistRef.current = partDist;
-        const stockLine = d.inStock ? "in stock" : "out of stock";
+        const stockLine = stockSummary(d.totalAvailable ?? 0, (d.inventory ?? []).map((w) => ({ name: w.warehouseName, qty: Number(w.quantityAvailable ?? 0) || 0 })));
         const discLine = d.isDiscontinued ? " · discontinued" : "";
+        setPartInfoLookup({ partNumber, vendor: "marcone", marcone: d });
         setMarconeLookupMsg({
           kind: "ok",
           text: `Found ${d.make || ""} ${d.partNumber || partNumber} · Marcone: ${stockLine}${discLine}.`,
@@ -4684,7 +4708,8 @@ function TicketDetailsPage() {
       }));
       lastMarconeFillPartNoRef.current = partNumber;
       lastMarconeFillDistRef.current = partDist;
-      const stockLine = d.inStock ? "in stock" : "out of stock";
+      setPartInfoLookup({ partNumber, vendor: "encompass", encompass: d });
+      const stockLine = stockSummary(d.totalAvailable, d.availabilityByLocation.map((l) => ({ name: l.name || l.number, qty: l.available })));
       setMarconeLookupMsg({
         kind: "ok",
         text: `Found ${d.mfgName || ""} ${d.partNumber || partNumber} · Encompass: ${stockLine}.`,
@@ -5123,7 +5148,17 @@ function TicketDetailsPage() {
   // happens to be connected. An Admin can still connect the same account
   // to both if they want; nothing forces it to differ.
   const gmailRegion: GmailRegion = "PARTS";
-  const canConnectGmail = String(currentUserRole || "").toUpperCase() === "ADMIN" || String(currentUserRole || "").toUpperCase() === "SUPERADMIN";
+  // Admin/SuperAdmin always; other roles only if an Admin granted them via the gear (migration 0329).
+  const myGmailRoles = [currentUserRole, ...(currentUserExtraRoles ?? [])].filter(Boolean).map((r) => String(r).toUpperCase());
+  const isGmailAdmin = myGmailRoles.some((r) => r === "ADMIN" || r === "SUPERADMIN" || r === "SUPERSUPERADMIN");
+  const [gmailConnectRoles, setGmailConnectRolesState] = useState<string[]>([]);
+  const [gmailRolesOpen, setGmailRolesOpen] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    getGmailConnectRoles(gmailRegion).then((roles) => !cancelled && setGmailConnectRolesState(roles));
+    return () => { cancelled = true; };
+  }, [gmailRegion]);
+  const canConnectGmail = isGmailAdmin || gmailConnectRoles.some((r) => myGmailRoles.includes(r.toUpperCase()));
 
   const loadGmailStatus = useCallback(async () => {
     setGmailStatusLoading(true);
@@ -5617,6 +5652,25 @@ function TicketDetailsPage() {
             >
               {marconeLookupBusy ? "…" : "Lookup"}
             </button>
+            <button
+              type="button"
+              onClick={() => setPartInfoOpen(true)}
+              disabled={!partInfoLookup || partInfoLookup.partNumber !== partDraft.partNo.trim()}
+              title={partInfoLookup && partInfoLookup.partNumber === partDraft.partNo.trim() ? "Part info & warehouse availability" : "Click Lookup first"}
+              aria-label="Part info"
+              className="shrink-0 rounded border border-sky-400/40 bg-sky-500/15 px-1.5 py-1 text-sky-200 hover:bg-sky-500/25 disabled:opacity-30 disabled:cursor-not-allowed transition"
+            >
+              <Search className="h-3.5 w-3.5" />
+            </button>
+            {partInfoOpen && partInfoLookup && (
+              <PartInfoModal
+                partNumber={partInfoLookup.partNumber}
+                initialVendor={partInfoLookup.vendor}
+                initialMarcone={partInfoLookup.marcone}
+                initialEncompass={partInfoLookup.encompass}
+                onClose={() => setPartInfoOpen(false)}
+              />
+            )}
           </div>
           {marconeLookupMsg ? (
             <div className={`mt-1 text-[10px] ${marconeLookupMsg.kind === "ok" ? "text-emerald-300" : "text-rose-300"}`}>
@@ -5631,7 +5685,16 @@ function TicketDetailsPage() {
             <div className="mt-1 text-[10px] text-slate-500">Checking past tickets for suggestions…</div>
           ) : partSuggestions.length > 0 ? (
             <div className="mt-1.5">
-              <div className="text-[9px] uppercase tracking-wide text-slate-500 mb-0.5">Suggested (from past tickets)</div>
+              <button
+                type="button"
+                onClick={() => setPartSuggestionsOpen((o) => !o)}
+                aria-expanded={partSuggestionsOpen}
+                className="flex items-center gap-1 text-[9px] uppercase tracking-wide text-slate-500 hover:text-slate-300 mb-0.5"
+              >
+                Suggested (from past tickets) · {partSuggestions.length}
+                <ChevronDown className={`h-3 w-3 transition-transform ${partSuggestionsOpen ? "rotate-180" : ""}`} />
+              </button>
+              {partSuggestionsOpen && (
               <div className="flex flex-wrap gap-1">
                 {partSuggestions.map((s) => (
                   <button
@@ -5648,6 +5711,7 @@ function TicketDetailsPage() {
                   </button>
                 ))}
               </div>
+              )}
             </div>
           ) : null}
         </td>
@@ -5910,7 +5974,7 @@ function TicketDetailsPage() {
                 const internalAlerts = alertMessages.filter((a) => a.showInternal);
                 if (internalAlerts.length === 0) return null;
                 return (
-                  <div className="flex items-center gap-2 flex-1">
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
                     {internalAlerts.slice(0, 1).map((alert) => {
                       const by = (alert.createdBy && profileNameById[alert.createdBy]) || alert.createdBy || "Unknown";
                       const when = alert.createdAt ? new Date(alert.createdAt).toLocaleString() : "";
@@ -5921,7 +5985,8 @@ function TicketDetailsPage() {
                           title={`By ${by} • ${when}`}
                         >
                           <span className="text-amber-200 font-bold text-sm whitespace-nowrap">⚠️ ALERT:</span>
-                          <span className="text-white font-semibold text-sm truncate flex-1">{alert.text}</span>
+                          {/* Wraps to 2 lines inside the header card; the full text is on hover. */}
+                          <span className="text-white font-semibold text-sm line-clamp-2 break-words flex-1 min-w-0" title={alert.text}>{alert.text}</span>
                           <span className="text-amber-200/80 text-xs whitespace-nowrap hidden lg:inline font-medium">
                             {by.split('@')[0]} • {when.split(',')[0]}
                           </span>
@@ -7152,6 +7217,38 @@ function TicketDetailsPage() {
 
         {activeTab === "tracking" && (
           <div className="space-y-8">
+            {/* Tech Tips — the product's repair guide and what the tech
+                recorded against it per visit (filled in from the mobile
+                app's Tips tab; read-only here). */}
+            <div id="section-tech-tips" className="scroll-mt-28">
+              <button
+                type="button"
+                onClick={() => setTechTipsOpen((o) => !o)}
+                aria-expanded={techTipsOpen}
+                className="flex items-center gap-2 font-semibold text-slate-300 hover:text-white mb-4"
+              >
+                Tech Tips
+                <ChevronDown className={`h-4 w-4 transition-transform ${techTipsOpen ? "rotate-180" : ""}`} />
+                {!techTipsOpen && <span className="text-xs font-normal text-slate-500">Repair guide &amp; recorded test readings — click to show</span>}
+              </button>
+              {techTipsOpen && (
+              <div className="rounded-lg border border-white/10 bg-slate-900/40 p-4">
+                <TechTipsPanel
+                  ticketId={ticketDbId}
+                  productType={ticket?.productCategory || ""}
+                  model={ticket?.model}
+                  symptom={visitLogEntries[0]?.symptomCx || ""}
+                  visits={visitLogEntries.map((v, idx) => ({
+                    id: v.id,
+                    label: `V${visitLogEntries.length - idx}${v.scheduleDate ? ` · ${v.scheduleDate}` : ""}`,
+                  }))}
+                  editable={false}
+                  authorName=""
+                />
+              </div>
+              )}
+            </div>
+
             {/* Related Tickets */}
             <div id="section-related-tickets" className="scroll-mt-28">
               <h4 className="font-semibold text-slate-300 mb-4">Related Tickets</h4>
@@ -7399,6 +7496,25 @@ function TicketDetailsPage() {
                     <span className="text-[10px] text-slate-500" title="An Admin needs to connect Gmail before Send will work">
                       Gmail not connected — ask an Admin
                     </span>
+                  )}
+                  {isGmailAdmin && (
+                    <button
+                      type="button"
+                      onClick={() => setGmailRolesOpen(true)}
+                      className="rounded border border-white/15 bg-slate-800 p-1.5 text-slate-300 transition hover:bg-slate-700"
+                      title="Choose which roles can connect the Parts/Drop-Ship Gmail"
+                      aria-label="Gmail connect permissions"
+                    >
+                      <Settings className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                  {gmailRolesOpen && (
+                    <GmailConnectRolesModal
+                      region={gmailRegion}
+                      title="Parts / Drop-Ship Gmail — Connect permission"
+                      onClose={() => setGmailRolesOpen(false)}
+                      onSaved={setGmailConnectRolesState}
+                    />
                   )}
                 </div>
                 )}

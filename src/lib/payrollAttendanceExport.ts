@@ -1,10 +1,9 @@
 import type { Worksheet } from "exceljs";
 import type { SupabaseEmployee } from "@/components/AccountingDashboard";
-import { HR_STATUS_TO_PTO_TYPE } from "@/components/HrCalendarTab";
 import { getAttendanceForRange, computeScheduledDutyHours, computeMealTimeCredit, startOfWeekSunday, splitRegularOvertimeWeekly, hoursDiff, type AttendanceRow } from "./supabase/timecards";
 import { getSalaryHistory, rateEffectiveOn } from "./supabase/salary";
 import { getTicketAttendanceForTechnician } from "./supabase/technicianWhereabouts";
-import { getCompanyPtoRequests, isPaidPtoType, type PtoType } from "./supabase/pto";
+import { getCompanyPtoRequests, isPaidPtoType, HR_STATUS_TO_PTO_TYPE, type PtoType } from "./supabase/pto";
 import { getAttendanceNotes } from "./supabase/attendanceNotes";
 import { getCompanyHolidaysInRange } from "./supabase/companyHolidays";
 import { getPendingCorrectionsInRange } from "./supabase/timecardCorrections";
@@ -363,7 +362,8 @@ export function styleAttendanceWorkbook(sheet: Worksheet, employeeName: string, 
   footer.border = { top: { style: "thin", color: { argb: border } } };
   footer.alignment = { vertical: "middle", wrapText: true };
   sheet.getRow(footerRow).height = 28;
-  sheet.pageSetup = { paperSize: 8, orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0, printArea: `A1:Q${footerRow}`, printTitlesRow: "1:1", margins: { left: 0.25, right: 0.25, top: 0.55, bottom: 0.5, header: 0.2, footer: 0.2 } };
+  // 8 = A3 in Excel's paper-size codes; exceljs's PaperSize enum just doesn't list it.
+  sheet.pageSetup = { paperSize: 8 as unknown as NonNullable<Worksheet["pageSetup"]["paperSize"]>, orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0, printArea: `A1:Q${footerRow}`, printTitlesRow: "1:1", margins: { left: 0.25, right: 0.25, top: 0.55, bottom: 0.5, header: 0.2, footer: 0.2 } };
   const safeName = employeeName.replace(/&/g, "&&");
   sheet.headerFooter.oddHeader = `&L&BPayroll Attendance&B&C${safeName}&R${period}`;
   sheet.headerFooter.oddFooter = "&LConfidential • Payroll worksheet&C&A&RPage &P of &N";
