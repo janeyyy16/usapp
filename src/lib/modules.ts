@@ -482,6 +482,16 @@ const hrMod: ModuleDef = {
       count: 0,
       seed: () => ({}),
     },
+    // One 4-digit company code per day; field staff type it to Time In (migration 0344).
+    {
+      slug: "clock-in-codes",
+      title: "Clock-In Codes",
+      description: "Today's 4-digit company code that technicians and branch leaders enter to Time In.",
+      custom: "clock-in-codes" as any,
+      fields: [],
+      count: 0,
+      seed: () => ({}),
+    },
     // Where a Forward Candidate recipient (often a Branch Manager with no
     // other reason to be in HR) comes back to see just what was sent to
     // them and leave their Interviewer Note — self-scoping by recipient_id
@@ -1885,6 +1895,14 @@ const adminMod: ModuleDef = {
       seed: () => ({}),
     },
     {
+      slug: "approval-chain",
+      title: "Approval Chain",
+      description: "Areas, Senior Branch Managers and branches — and who approves each field employee's Time Corrections / PTO and can clock them in — plus the Philippines department chain.",
+      custom: "approval-chain" as any,
+      fields: [],
+      seed: () => ({}),
+    },
+    {
       slug: "it-tickets",
       title: "IT Tickets",
       description: "View and manage IT support tickets submitted by employees. IT and Admins can edit/assign/delete; Senior Managers can view.",
@@ -1977,6 +1995,16 @@ const branchTechMod: ModuleDef = {
       description: "Repair guides by appliance — shown as Tech Tips inside tickets.",
       custom: "tech-guides" as any,
       fields: [],
+      seed: () => ({}),
+    },
+    // Same page as HR → Clock-In Codes (today's company code for Time In, migration 0344).
+    {
+      slug: "clock-in-codes",
+      title: "Clock-In Codes",
+      description: "Today's 4-digit company code that technicians and branch leaders enter to Time In.",
+      custom: "clock-in-codes" as any,
+      fields: [],
+      count: 0,
       seed: () => ({}),
     },
   ],

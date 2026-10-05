@@ -10,8 +10,10 @@
  * Self-contained (own data fetch/team-scoping), same pattern as
  * CorrectionsTab.tsx right beside it in Absent List.
  */
+import { CorrectionOverallBadge } from "@/components/CorrectionStageBadges";
 import { useEffect, useMemo, useState } from "react";
-import { Download, Loader2, RefreshCw, XCircle } from "lucide-react";
+import { Download, Loader2, Paperclip, RefreshCw, XCircle } from "lucide-react";
+import { TIME_ZONES, type ScheduleTimezone } from "@/lib/serverTime";
 import { logModuleActivity } from "@/lib/supabase/moduleActivityLog";
 import { useAuth } from "@/lib/auth";
 import { getCompanyUsers, type ProfileRow } from "@/lib/supabase/users";
@@ -22,7 +24,7 @@ import { getCompanyTimecardCorrections, updateCorrectionPdfUrl, rejectCorrection
 import { getCompanyEmployeeRequests, updateEmployeeRequestPdfUrl, updateEmployeeRequestStatus, type EmployeeRequestRow } from "@/lib/supabase/employeeRequests";
 import { getCompanyPtoRequests, updatePtoPdfUrl, reviewPtoStage, type PtoRequestRow } from "@/lib/supabase/pto";
 import { createNotification } from "@/lib/supabase/notifications";
-import { EXCEPTION_TYPE_LABELS } from "@/lib/exceptionVisitReportTemplate";
+import { EXCEPTION_TYPE_LABELS, correctionIssueLabel, correctionIssueKey, correctionIssueOptions } from "@/lib/exceptionVisitReportTemplate";
 import { TICKET_DISPUTE_EXCEPTION_TYPE_LABELS } from "@/lib/ticketDisputeReportTemplate";
 import { downloadSignableDocumentPdf } from "@/lib/downloadSignableDocumentPdf";
 import { AttachmentPreviewModal } from "@/components/AttachmentPreviewModal";
@@ -48,14 +50,60 @@ function managerBadge(c: ExceptionReportLike): { label: string; className: strin
     : { label: "Manager: Pending", className: "bg-yellow-500/20 text-yellow-300 border-yellow-500/30" };
 }
 
-function hrBadge(c: ExceptionReportLike): { label: string; className: string } {
+/** `hrWaitsForManager` false for Time Corrections — HR signs in any order there. */
+function hrBadge(c: ExceptionReportLike, hrWaitsForManager = true): { label: string; className: string } {
   if (c.hrPaperworkStatus === "approved") return { label: "HR: Approved", className: "bg-green-500/20 text-green-300 border-green-500/30" };
   if (c.hrPaperworkStatus === "additional_review_required") return { label: "HR: Additional Review Required", className: "bg-red-500/20 text-red-300 border-red-500/30" };
   // HR can't act until the manager has signed (see CorrectionSignModals.tsx/TicketDisputeSignModals.tsx) — reflect that in the label rather than a bare "Pending".
   return {
-    label: c.managerSignatureUrl ? "HR: Pending" : "HR: Awaiting Manager First",
+    label: c.managerSignatureUrl || !hrWaitsForManager ? "HR: Pending" : "HR: Awaiting Manager First",
     className: "bg-yellow-500/20 text-yellow-300 border-yellow-500/30",
   };
+}
+
+/**
+ * Paperwork Status cell — same look as Attendance Monitoring's corrections:
+ * a bold Approved / Rejected pill once decided, and on a rejected request the
+ * signatures nobody needs anymore are greyed "Not needed" instead of yellow
+ * "Pending". An approved request keeps its signature badges (HR may still sign).
+ */
+type PaperworkBadge = { label: string; className: string; /** The approval step behind it, when known — "pending" once decided means it wasn't needed. */ stage?: string };
+
+/** Accounting step (Time Corrections and leave) — approves with a click, no signature. */
+function accountingBadge(status: string): PaperworkBadge {
+  if (status === "approved") return { label: "Accounting: Approved", className: "bg-green-500/20 text-green-300 border-green-500/30", stage: status };
+  if (status === "rejected") return { label: "Accounting: Rejected", className: "bg-red-500/20 text-red-300 border-red-500/30", stage: status };
+  return { label: "Accounting: Pending", className: "bg-yellow-500/20 text-yellow-300 border-yellow-500/30", stage: status };
+}
+
+/** YYYY-MM-DD in local time — same format as Work Date. */
+const isoDay = (iso: string) => {
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso.slice(0, 10) : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+function PaperworkStatus({ status, badges }: { status: string; badges: PaperworkBadge[] }) {
+  const overall = status === "denied" ? "rejected" : status;
+  const rejected = overall === "rejected";
+  const approved = overall === "approved";
+  return (
+    <div className="flex flex-col items-start gap-1">
+      {(overall === "approved" || rejected) && <CorrectionOverallBadge status={overall as "approved" | "rejected"} />}
+      {badges.map((b) => {
+        // Not needed: anything still open on a rejected request, or a step that never voted on an approved one (any 2 of 3 decide it).
+        const notNeeded = (rejected && /Pending|Awaiting/.test(b.label)) || (approved && b.stage === "pending");
+        return (
+          <span
+            key={b.label}
+            className={`inline-block px-2 py-0.5 rounded text-[11px] font-semibold border w-fit ${notNeeded ? "bg-slate-500/10 text-slate-500 border-slate-500/20" : b.className}`}
+            title={notNeeded ? (rejected ? "Not needed — the request was rejected" : "Not needed — already approved by the other two steps") : undefined}
+          >
+            {notNeeded ? `${b.label.split(":")[0]}: Not needed` : b.label}
+          </span>
+        );
+      })}
+    </div>
+  );
 }
 
 export function ExceptionReportsTab() {
@@ -103,6 +151,10 @@ export function ExceptionReportsTab() {
   }, []);
 
   const profileById = new Map(profiles.map((p) => [p.id, p]));
+  // Ticket Dispute "Claimed Time" — shown in the technician's own time zone, same as Ticket Time Disputes.
+  const disputeTz = (id: string): ScheduleTimezone => (profileById.get(id)?.schedule_timezone as ScheduleTimezone) || "CST";
+  const fmtClaimed = (iso: string | null, tz: ScheduleTimezone) =>
+    iso ? new Intl.DateTimeFormat("en-US", { timeZone: TIME_ZONES[tz].timeZone, hour: "numeric", minute: "2-digit" }).format(new Date(iso)) : "?";
   const profileName = (id: string) => profileById.get(id)?.display_name || profileById.get(id)?.email || "—";
 
   const myProfile = myProfileId ? profileById.get(myProfileId) ?? null : null;
@@ -196,14 +248,8 @@ export function ExceptionReportsTab() {
     if (!confirm(message)) return;
     setRejectingId(r.id);
     try {
-      await updateEmployeeRequestStatus(r.id, "rejected", myProfileId);
-      await createNotification({
-        recipientId: r.profileId,
-        senderId: myProfileId,
-        senderName: displayName || "HR",
-        body: `❌ Your ticket time dispute for ${ticket} was rejected by HR.`,
-        linkTo: "/m/dashboard/employee-self-service?tab=requests",
-      }).catch((err) => console.error("Failed to notify ticket dispute rejection:", err));
+      // Asks for the reason and notifies the employee (with it) — see updateEmployeeRequestStatus.
+      await updateEmployeeRequestStatus(r.id, "rejected", myProfileId, undefined, displayName || "HR");
       void logModuleActivity({
         module: "attendance-monitoring",
         actorName: displayName || "HR",
@@ -296,9 +342,23 @@ export function ExceptionReportsTab() {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }, [ptoRequests, search, teamScopedIds, myProfileId, profiles]);
 
-  const reports = allReports.filter((c) => inGroup(c.profileId));
-  const ticketReports = allTicketReports.filter((r) => inGroup(r.profileId));
-  const slUlReports = allSlUlReports.filter((r) => inGroup(r.profileId));
+  // Work Date column sort (Time Correction view) — newest first by default.
+  const [workDateSort, setWorkDateSort] = useState<"desc" | "asc">("desc");
+  const [issueFilter, setIssueFilter] = useState<string>("all");
+  // Status mini-tabs (upper right). PTO's "denied" counts as Rejected.
+  const [statusTab, setStatusTab] = useState<"all" | "pending" | "approved" | "rejected">("all");
+  const statusOf = (st: string) => (st === "denied" ? "rejected" : st);
+  const inStatus = (st: string) => statusTab === "all" || statusOf(st) === statusTab;
+  const reports = [...allReports.filter((c) => inGroup(c.profileId) && (issueFilter === "all" || correctionIssueKey(c.exceptionType) === issueFilter) && inStatus(c.status))].sort((a, b) => {
+      const d = a.workDate.localeCompare(b.workDate) || (a.createdAt ?? "").localeCompare(b.createdAt ?? "");
+      return workDateSort === "desc" ? -d : d;
+    });
+  const ticketReports = allTicketReports.filter((r) => inGroup(r.profileId) && inStatus(r.status));
+  const slUlReports = allSlUlReports.filter((r) => inGroup(r.profileId) && inStatus(r.status));
+  // Counts for the status tabs — current view and staff group, before the status filter.
+  const statusBase: { status: string; profileId: string }[] = (subView === "timeCorrection" ? allReports : subView === "ticketDispute" ? allTicketReports : allSlUlReports).filter((r) => inGroup(r.profileId));
+  const statusCounts = { all: statusBase.length, pending: 0, approved: 0, rejected: 0 } as Record<string, number>;
+  for (const r of statusBase) statusCounts[statusOf(r.status)] = (statusCounts[statusOf(r.status)] ?? 0) + 1;
 
   const currentBase: { profileId: string }[] =
     subView === "timeCorrection" ? allReports : subView === "ticketDispute" ? allTicketReports : allSlUlReports;
@@ -343,6 +403,28 @@ export function ExceptionReportsTab() {
             </button>
           </div>
         </div>
+        <div className="flex justify-end mt-2">
+          <div className="inline-flex rounded-lg border border-white/10 bg-slate-800/40 p-0.5" role="tablist" aria-label="Status">
+            {([
+              ["all", "All", "text-slate-200"],
+              ["pending", "Pending", "text-yellow-300"],
+              ["approved", "Approved", "text-green-300"],
+              ["rejected", "Rejected", "text-red-300"],
+            ] as const).map(([key, label, tone]) => (
+              <button
+                key={key}
+                type="button"
+                role="tab"
+                aria-selected={statusTab === key}
+                onClick={() => setStatusTab(key)}
+                className={`px-3 py-1 rounded-md text-xs font-semibold transition inline-flex items-center gap-1.5 ${statusTab === key ? `bg-white/10 ${tone}` : "text-slate-400 hover:text-white"}`}
+              >
+                {label}
+                <span className="rounded-full bg-black/25 px-1.5 text-[10px] tabular-nums">{statusCounts[key] ?? 0}</span>
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="mb-4 mt-3 flex flex-wrap items-end gap-4">
           <div>
             <label className="block text-xs text-slate-400 uppercase mb-2">Search Employee</label>
@@ -378,18 +460,42 @@ export function ExceptionReportsTab() {
               ))}
             </div>
           </div>
+          {subView === "timeCorrection" && (
+            <div>
+              <span className="block text-xs text-slate-400 uppercase mb-2">Issue</span>
+              <select
+                value={issueFilter}
+                onChange={(e) => setIssueFilter(e.target.value)}
+                className="bg-slate-800/50 border border-white/10 rounded-lg p-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+              >
+                <option value="all">All Issues</option>
+                {correctionIssueOptions(allReports).map((o) => (
+                  <option key={o.value} value={o.value}>{o.label} ({o.count})</option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
         {subView === "timeCorrection" ? (
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-white/10">
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Employee</th>
-              <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Work Date</th>
+              <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Submitted</th>
+              <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">
+                <button
+                  type="button"
+                  onClick={() => setWorkDateSort((d) => (d === "desc" ? "asc" : "desc"))}
+                  title={workDateSort === "desc" ? "Newest first — click for oldest first" : "Oldest first — click for newest first"}
+                  className="inline-flex items-center gap-1 uppercase hover:text-white"
+                >
+                  Work Date <span className="text-[10px]">{workDateSort === "desc" ? "▼" : "▲"}</span>
+                </button>
+              </th>
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Actual Time</th>
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Requested Time</th>
-              <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Exception Type</th>
+              <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Issue</th>
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Paperwork Status</th>
-              <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Submitted</th>
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">PDF</th>
             </tr>
           </thead>
@@ -400,7 +506,7 @@ export function ExceptionReportsTab() {
               <tr><td colSpan={8} className="px-3 py-8 text-center text-slate-400">No exception report PDFs yet.</td></tr>
             ) : reports.map((c) => {
               const mgrBadge = managerBadge(c);
-              const hrStatusBadge = hrBadge(c);
+              const hrStatusBadge = hrBadge(c, false);
               return (
                 <tr key={c.id} className="border-b border-white/5 hover:bg-white/5 transition">
                   <td className="px-3 py-3">
@@ -413,20 +519,14 @@ export function ExceptionReportsTab() {
                       {profileName(c.profileId)}
                     </button>
                   </td>
+                  <td className="px-3 py-3 text-slate-300">{isoDay(c.createdAt)}</td>
                   <td className="px-3 py-3 text-slate-300">{c.workDate}</td>
                   <td className="px-3 py-3 text-slate-300"><ActualTime c={c} /></td>
                   <td className="px-3 py-3 text-amber-200"><RequestedTime c={c} /></td>
-                  <td className="px-3 py-3 text-slate-300">{c.exceptionType ? EXCEPTION_TYPE_LABELS[c.exceptionType] : "—"}</td>
+                  <td className="px-3 py-3 text-slate-300">{correctionIssueLabel(c.exceptionType, c.otherDescription)}</td>
                   <td className="px-3 py-3">
-                    <div className="flex flex-col gap-1">
-                      {c.status === "rejected" && (
-                        <span className="inline-block px-2 py-0.5 rounded text-[11px] font-semibold border w-fit bg-red-500/20 text-red-300 border-red-500/30">Rejected</span>
-                      )}
-                      <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-semibold border w-fit ${mgrBadge.className}`}>{mgrBadge.label}</span>
-                      <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-semibold border w-fit ${hrStatusBadge.className}`}>{hrStatusBadge.label}</span>
-                    </div>
+                    <PaperworkStatus status={c.status} badges={[{ ...mgrBadge, stage: c.managerStatus }, { ...hrStatusBadge, stage: c.hrStatus }, accountingBadge(c.accountingStatus)]} />
                   </td>
-                  <td className="px-3 py-3 text-slate-300">{new Date(c.createdAt).toLocaleDateString()}</td>
                   <td className="px-3 py-3">
                     <div className="flex items-center gap-1.5">
                       <button
@@ -445,7 +545,7 @@ export function ExceptionReportsTab() {
                       >
                         {regeneratingId === c.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />} Regenerate
                       </button>
-                      {isFullRequestsAdmin && c.hrPaperworkStatus === "pending" && c.managerSignatureUrl && (
+                      {isFullRequestsAdmin && c.hrPaperworkStatus === "pending" && (
                         <button
                           type="button"
                           onClick={() => setSigningCorrectionHr(c)}
@@ -477,22 +577,25 @@ export function ExceptionReportsTab() {
           <thead>
             <tr className="border-b border-white/10">
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Employee</th>
+              <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Submitted</th>
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Ticket #</th>
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Dispute Type</th>
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Exception Type</th>
+              <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Claimed Time</th>
+              <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Reason</th>
+              <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Photos</th>
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Paperwork Status</th>
-              <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Submitted</th>
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">PDF</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={7} className="px-3 py-8 text-center text-slate-400"><Loader2 className="h-4 w-4 animate-spin inline" /></td></tr>
+              <tr><td colSpan={10} className="px-3 py-8 text-center text-slate-400"><Loader2 className="h-4 w-4 animate-spin inline" /></td></tr>
             ) : ticketReports.length === 0 ? (
-              <tr><td colSpan={7} className="px-3 py-8 text-center text-slate-400">No exception report PDFs yet.</td></tr>
+              <tr><td colSpan={10} className="px-3 py-8 text-center text-slate-400">No exception report PDFs yet.</td></tr>
             ) : ticketReports.map((r) => {
               const mgrBadge = managerBadge(r);
-              const hrStatusBadge = hrBadge(r);
+              const hrStatusBadge = hrBadge(r, false);
               const submittedDate = r.createdAt.slice(0, 10);
               return (
                 <tr key={r.id} className="border-b border-white/5 hover:bg-white/5 transition">
@@ -506,6 +609,7 @@ export function ExceptionReportsTab() {
                       {profileName(r.profileId)}
                     </button>
                   </td>
+                  <td className="px-3 py-3 text-slate-300">{isoDay(r.createdAt)}</td>
                   <td className="px-3 py-3 text-slate-300">{r.ticketNo || "—"}</td>
                   <td className="px-3 py-3">
                     {r.disputeMode === "reschedule" ? (
@@ -515,16 +619,47 @@ export function ExceptionReportsTab() {
                     )}
                   </td>
                   <td className="px-3 py-3 text-slate-300">{r.exceptionType ? TICKET_DISPUTE_EXCEPTION_TYPE_LABELS[r.exceptionType] : "—"}</td>
-                  <td className="px-3 py-3">
-                    <div className="flex flex-col gap-1">
-                      {r.status === "rejected" && (
-                        <span className="inline-block px-2 py-0.5 rounded text-[11px] font-semibold border w-fit bg-red-500/20 text-red-300 border-red-500/30">Rejected</span>
-                      )}
-                      <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-semibold border w-fit ${mgrBadge.className}`}>{mgrBadge.label}</span>
-                      <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-semibold border w-fit ${hrStatusBadge.className}`}>{hrStatusBadge.label}</span>
-                    </div>
+                  <td className="px-3 py-3 text-slate-200 whitespace-nowrap">
+                    {r.disputeMode === "reschedule" && (r.rescheduleActualDay || r.rescheduleDate) ? (
+                      <span className="text-blue-200">{r.rescheduleActualDay || "—"} → {r.rescheduleDate || "—"}</span>
+                    ) : r.disputedStartTime || r.disputedEndTime ? (
+                      <>
+                        {fmtClaimed(r.disputedStartTime, disputeTz(r.profileId))} – {fmtClaimed(r.disputedEndTime, disputeTz(r.profileId))}{" "}
+                        <span className="text-slate-500 text-[11px]">{disputeTz(r.profileId)}</span>
+                      </>
+                    ) : (
+                      "—"
+                    )}
                   </td>
-                  <td className="px-3 py-3 text-slate-300">{new Date(r.createdAt).toLocaleDateString()}</td>
+                  <td className="px-3 py-3 text-slate-300 max-w-[240px]">
+                    <span className="line-clamp-2" title={r.details}>{r.details || "—"}</span>
+                  </td>
+                  <td className="px-3 py-3">
+                    {r.attachments.length === 0 ? (
+                      <span className="text-slate-500">—</span>
+                    ) : (
+                      <div className="flex flex-wrap gap-1">
+                        {r.attachments.map((a) => (
+                          <button
+                            key={a.url}
+                            type="button"
+                            onClick={() => setPreviewing({ url: a.url, title: `${profileName(r.profileId)} — ${r.ticketNo || "photo"}` })}
+                            title={a.name}
+                            className="block h-10 w-10 overflow-hidden rounded border border-white/10 bg-slate-800 hover:border-blue-500 transition"
+                          >
+                            {/\.pdf(\?|$)/i.test(a.url) ? (
+                              <span className="flex h-full w-full items-center justify-center text-slate-400"><Paperclip className="h-4 w-4" /></span>
+                            ) : (
+                              <img src={a.url} alt={a.name} className="h-full w-full object-cover" />
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-3 py-3">
+                    <PaperworkStatus status={r.status} badges={[mgrBadge, hrStatusBadge]} />
+                  </td>
                   <td className="px-3 py-3">
                     <div className="flex items-center gap-1.5">
                       <button
@@ -543,7 +678,7 @@ export function ExceptionReportsTab() {
                       >
                         {regeneratingId === r.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />} Regenerate
                       </button>
-                      {isFullRequestsAdmin && r.hrPaperworkStatus === "pending" && r.managerSignatureUrl && (
+                      {isFullRequestsAdmin && r.hrPaperworkStatus === "pending" && (
                         <button
                           type="button"
                           onClick={() => setSigningTicketHr(r)}
@@ -575,11 +710,11 @@ export function ExceptionReportsTab() {
           <thead>
             <tr className="border-b border-white/10">
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Employee</th>
+              <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Submitted</th>
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Type</th>
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Dates</th>
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Exception Type</th>
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Paperwork Status</th>
-              <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Submitted</th>
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">PDF</th>
             </tr>
           </thead>
@@ -590,7 +725,7 @@ export function ExceptionReportsTab() {
               <tr><td colSpan={7} className="px-3 py-8 text-center text-slate-400">No exception report PDFs yet.</td></tr>
             ) : slUlReports.map((r) => {
               const mgrBadge = managerBadge(r);
-              const hrStatusBadge = hrBadge(r);
+              const hrStatusBadge = hrBadge(r, false);
               const submittedDate = r.createdAt.slice(0, 10);
               return (
                 <tr key={r.id} className="border-b border-white/5 hover:bg-white/5 transition">
@@ -604,19 +739,13 @@ export function ExceptionReportsTab() {
                       {profileName(r.profileId)}
                     </button>
                   </td>
+                  <td className="px-3 py-3 text-slate-300">{isoDay(r.createdAt)}</td>
                   <td className="px-3 py-3 text-slate-300">{PTO_LEAVE_TYPE_LABELS[r.ptoType] || r.ptoType}</td>
                   <td className="px-3 py-3 text-slate-300">{r.startDate === r.endDate ? r.startDate : `${r.startDate} – ${r.endDate}`}</td>
                   <td className="px-3 py-3 text-slate-300">{r.exceptionType ? EXCEPTION_TYPE_LABELS[r.exceptionType] : "—"}</td>
                   <td className="px-3 py-3">
-                    <div className="flex flex-col gap-1">
-                      {r.status === "denied" && (
-                        <span className="inline-block px-2 py-0.5 rounded text-[11px] font-semibold border w-fit bg-red-500/20 text-red-300 border-red-500/30">Rejected</span>
-                      )}
-                      <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-semibold border w-fit ${mgrBadge.className}`}>{mgrBadge.label}</span>
-                      <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-semibold border w-fit ${hrStatusBadge.className}`}>{hrStatusBadge.label}</span>
-                    </div>
+                    <PaperworkStatus status={r.status} badges={[{ ...mgrBadge, stage: r.managerStatus }, { ...hrStatusBadge, stage: r.hrStatus }, accountingBadge(r.accountingStatus)]} />
                   </td>
-                  <td className="px-3 py-3 text-slate-300">{new Date(r.createdAt).toLocaleDateString()}</td>
                   <td className="px-3 py-3">
                     <div className="flex items-center gap-1.5">
                       <button
@@ -635,7 +764,7 @@ export function ExceptionReportsTab() {
                       >
                         {regeneratingId === r.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />} Regenerate
                       </button>
-                      {isFullRequestsAdmin && r.hrPaperworkStatus === "pending" && r.managerSignatureUrl && (
+                      {isFullRequestsAdmin && r.hrPaperworkStatus === "pending" && (
                         <button
                           type="button"
                           onClick={() => setSigningPtoHr(r)}

@@ -67,7 +67,7 @@ export function PoStatusPage() {
         }
       } catch (error) {
         console.error('Error loading part orders:', error);
-        if (!cancelled) { setOrders([]); setLoadError("Unable to load P/O records. Check that migration 0333 has been applied, then reload."); }
+        if (!cancelled) { setOrders([]); setLoadError("Unable to load P/O records. Check that migration 0351 has been applied, then reload."); }
       }
     };
     load();

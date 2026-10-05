@@ -24,6 +24,8 @@ import {
 } from "@/lib/supabase/timecards";
 import { getAttendanceNotes, upsertAttendanceNote } from "@/lib/supabase/attendanceNotes";
 import { getCompanyTraineeEntries, type TraineeTimecardEntry } from "@/lib/supabase/traineeTimecards";
+import { traineeFlagFor, traineeFlagLabel, type TrainingCandidate } from "@/lib/traineeFlag";
+import { getTrainingDates } from "@/lib/supabase/trainingDates";
 import { getCompanyHolidaysInRange, type CompanyHolidayRow } from "@/lib/supabase/companyHolidays";
 import { getBranchRoles, type BranchRoles } from "@/lib/supabase/generalInfo";
 import { ActivityLogPanel } from "@/components/ActivityLogPanel";
@@ -31,6 +33,9 @@ import { logModuleActivity } from "@/lib/supabase/moduleActivityLog";
 import { getOrCreateDmThread, sendMessage } from "@/lib/supabase/messaging";
 import { getLatestVisitUpdatesByProfileIds, getTicketsScheduledInRange, type LatestVisitUpdate, type ScheduledTicketRow } from "@/lib/supabase/tickets";
 import { resolveTeamLeadOrManager, visibleAttendanceProfileIds } from "@/lib/notifyRouting";
+import { correctionIssueLabel, correctionIssueKey, correctionIssueOptions } from "@/lib/exceptionVisitReportTemplate";
+import { chainCanClockIn } from "@/lib/approvalDirectory";
+import { CorrectionStageBadges, CorrectionOverallBadge } from "@/components/CorrectionStageBadges";
 import { getCsrTeamComposition, type CsrTeamComposition } from "@/lib/supabase/csrTeams";
 import { ATTENDANCE_GRACE_MINUTES, addMinutesToHHMM, nowInTimezone, timezoneForBranch, DEFAULT_ATTENDANCE_TIMEZONE, payGraceMinutesFor, applyGraceToCheckIn, roundCheckOutToSchedule, toSeconds, ON_TIME_BUFFER_SECONDS } from "@/lib/attendanceGrace";
 import { getServerNow } from "@/lib/serverTime";
@@ -58,6 +63,11 @@ import {
   type CorrectionStatus,
 } from "@/lib/supabase/timecardCorrections";
 import { CorrectionManagerSignModal, CorrectionHrSignModal } from "@/components/CorrectionSignModals";
+
+/** A pending trainee punch shown as a regular timecard entry (approved days are already copied to timecard_entries). */
+function traineeAsEntry(t: TraineeTimecardEntry): CompanyTimecardEntry {
+  return { profileId: t.profileId, workDate: t.workDate, checkIn: t.checkIn, checkOut: t.checkOut, mealStart: t.mealStart, mealEnd: t.mealEnd, clockedInBy: null, notes: "", correctedBy: null };
+}
 
 interface DailyRecord {
   profileId: string;
@@ -321,6 +331,13 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
   const [loading, setLoading] = useState(true);
   const [myProfileId, setMyProfileId] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<ProfileRow[]>([]);
+  // HR training dates (Hiring) — for the "Trainee — not started" flag on Missing Clock In.
+  const [trainingCandidates, setTrainingCandidates] = useState<TrainingCandidate[]>([]);
+  const trainingCompanyId = profiles[0]?.company_id ?? null;
+  useEffect(() => {
+    if (!trainingCompanyId) return;
+    getTrainingDates(trainingCompanyId).then(setTrainingCandidates).catch(() => setTrainingCandidates([]));
+  }, [trainingCompanyId]);
   // employee_info.hireDate per profile — a new hire has no attendance
   // obligation before this date, but every day-iteration loop below used to
   // only account for off_days/company holidays/future dates, so a
@@ -621,8 +638,13 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
     } else {
       for (const e of dailyDateEntries) map.set(e.profileId, e);
     }
+    // A trainee's punch sits in the trainee timecard until their manager approves the day —
+    // count it as their clock-in so they don't show as Missing Clock In.
+    for (const t of traineeEntries) {
+      if (t.workDate === dailyDate && t.status === "pending" && t.checkIn && !map.has(t.profileId)) map.set(t.profileId, traineeAsEntry(t));
+    }
     return map;
-  }, [dailyDate, rangeStart, rangeEnd, entries, dailyDateEntries]);
+  }, [dailyDate, rangeStart, rangeEnd, entries, dailyDateEntries, traineeEntries]);
 
   // Custom Attendance Summary — lets HR/managers pick any date range instead
   // of being limited to the current week or month-to-date. Defaults to the
@@ -783,6 +805,18 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
   // PTO Management tab (KPI tile + both request lists) — same team scoping
   // as visibleProfiles/Daily Attendance above, so a manager-tier viewer only
   // ever sees their own team's PTO requests, never the whole company's.
+  // PTO Requests table status tabs — "denied" shows under Rejected.
+  const [ptoStatusTab, setPtoStatusTab] = useState<"pending" | "approved" | "rejected">("pending");
+  const ptoStatusMatches = (status: string, tab: "pending" | "approved" | "rejected") => (tab === "rejected" ? status === "denied" : status === tab);
+  // Dates / Submitted column sort — newest first; click a header to sort by it, again to flip.
+  const [ptoSort, setPtoSort] = useState<{ key: "dates" | "submitted"; dir: "desc" | "asc" }>({ key: "submitted", dir: "desc" });
+  const togglePtoSort = (key: "dates" | "submitted") =>
+    setPtoSort((cur) => (cur.key === key ? { key, dir: cur.dir === "desc" ? "asc" : "desc" } : { key, dir: "desc" }));
+  /** Submitted date as YYYY-MM-DD (local) — same format as the Dates column. */
+  const ptoSubmittedDay = (iso: string) => {
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? iso.slice(0, 10) : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
   const visiblePtoRequests = useMemo(() => {
     if (teamScopedIds === null) return ptoRequests;
     return ptoRequests.filter((r) => teamScopedIds.has(r.profileId));
@@ -795,6 +829,14 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
     const types = ptoLeaveTab === "paid" ? PAID_LEAVE_PTO_TYPES : UNPAID_LEAVE_PTO_TYPES;
     return visiblePtoRequests.filter((r) => types.includes(r.ptoType));
   }, [visiblePtoRequests, ptoLeaveTab]);
+
+  // PTO Requests table rows: current status tab, sorted by the chosen column.
+  const sortedPtoTableRows = useMemo(() => {
+    const rows = leaveTabPtoRequests.filter((r) => ptoStatusMatches(r.status, ptoStatusTab));
+    const keyOf = (r: PtoRequestRow) => (ptoSort.key === "dates" ? `${r.startDate}|${r.createdAt}` : r.createdAt);
+    return [...rows].sort((a, b) => (ptoSort.dir === "desc" ? keyOf(b).localeCompare(keyOf(a)) : keyOf(a).localeCompare(keyOf(b))));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [leaveTabPtoRequests, ptoStatusTab, ptoSort]);
 
   const entriesByKey = useMemo(() => {
     const map = new Map<string, CompanyTimecardEntry>();
@@ -924,8 +966,12 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
   const rangeEntryByKey = useMemo(() => {
     const map = new Map<string, CompanyTimecardEntry>();
     for (const e of rangeFilterEntries) map.set(`${e.profileId}|${e.workDate}`, e);
+    for (const t of traineeEntries) {
+      const k = `${t.profileId}|${t.workDate}`;
+      if (t.status === "pending" && t.checkIn && !map.has(k)) map.set(k, traineeAsEntry(t));
+    }
     return map;
-  }, [rangeFilterEntries]);
+  }, [rangeFilterEntries, traineeEntries]);
 
   // One record per employee per date in [filterDateFrom, filterDateTo], inclusive.
   const rangeRecords: DailyRecord[] = useMemo(() => {
@@ -1492,6 +1538,10 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
   // the snapshot only ADDS visibility (for the rare case the requester's
   // manager_name doesn't currently resolve back to this viewer at all, e.g.
   // it's stale/blank but the id was captured correctly), never removes it.
+  // Work Date column sort — newest first by default, click the header to flip.
+  const [workDateSort, setWorkDateSort] = useState<"desc" | "asc">("desc");
+  // Issue filter (Time Correction "Issue", migration 0333) — older corrections fall under Others.
+  const [correctionIssueFilter, setCorrectionIssueFilter] = useState<string>("all");
   const filteredCorrections = useMemo(() => {
     const q = correctionSearch.trim().toLowerCase();
     return corrections.filter((c) => {
@@ -1508,6 +1558,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
       }
       if (correctionWorkDateFrom && c.workDate < correctionWorkDateFrom) return false;
       if (correctionWorkDateTo && c.workDate > correctionWorkDateTo) return false;
+      if (correctionIssueFilter !== "all" && correctionIssueKey(c.exceptionType) !== correctionIssueFilter) return false;
       if (q && !profileName(c.profileId).toLowerCase().includes(q)) return false;
       return true;
     });
@@ -1516,6 +1567,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
     correctionEraFilter,
     correctionSearch,
     correctionStatusFilter,
+    correctionIssueFilter,
     correctionDepartmentFilter,
     correctionBranchFilter,
     correctionWorkDateFrom,
@@ -1525,6 +1577,10 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
     allProfileById,
     myProfileId,
   ]);
+  const sortedCorrections = useMemo(() => [...filteredCorrections].sort((a, b) => {
+      const d = a.workDate.localeCompare(b.workDate) || (a.createdAt ?? "").localeCompare(b.createdAt ?? "");
+      return workDateSort === "desc" ? -d : d;
+    }), [filteredCorrections, workDateSort]);
   // Pending count among whatever's currently filtered/listed above — not
   // the whole company's pending total — so it stays meaningful once a
   // manager/branch/date filter narrows the table down.
@@ -1941,7 +1997,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                               (by {record.clockedInBy})
                             </span>
                           )}
-                          {(record.date ?? dailyDate) === todayISO && TECHNICIAN_PAY_ROLES.has(record.role) && record.checkIn === "—" && !record.isOffDay && (
+                          {(record.date ?? dailyDate) === todayISO && TECHNICIAN_PAY_ROLES.has(record.role) && record.checkIn === "—" && !record.isOffDay && chainCanClockIn(myProfileId, record.profileId) !== false && (
                             <button
                               type="button"
                               disabled={clockingInIds.has(record.profileId)}
@@ -2359,19 +2415,56 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                     Unpaid Leave
                   </button>
                 </div>
-                <button onClick={() => setShowPtoForm(true)} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold transition">
-                  + New PTO Request
-                </button>
               </div>
 
               <div className="bg-slate-900/50 border border-white/10 rounded-lg p-6 overflow-x-auto">
-                <h2 className="text-lg font-bold text-white mb-4">PTO Requests</h2>
+                <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
+                  <h2 className="text-lg font-bold text-white">PTO Requests</h2>
+                  <div className="inline-flex rounded-lg border border-white/10 bg-slate-800/40 p-0.5" role="tablist" aria-label="PTO status">
+                    {([
+                      ["pending", "Pending", "text-yellow-300"],
+                      ["approved", "Approved", "text-green-300"],
+                      ["rejected", "Rejected", "text-red-300"],
+                    ] as const).map(([key, label, tone]) => (
+                      <button
+                        key={key}
+                        type="button"
+                        role="tab"
+                        aria-selected={ptoStatusTab === key}
+                        onClick={() => setPtoStatusTab(key)}
+                        className={`px-3 py-1 rounded-md text-xs font-semibold transition inline-flex items-center gap-1.5 ${ptoStatusTab === key ? `bg-white/10 ${tone}` : "text-slate-400 hover:text-white"}`}
+                      >
+                        {label}
+                        <span className="rounded-full bg-black/25 px-1.5 text-[10px] tabular-nums">{leaveTabPtoRequests.filter((r) => ptoStatusMatches(r.status, key)).length}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-white/10">
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Employee</th>
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Type</th>
-                      <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Dates</th>
+                      <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">
+                        <button
+                          type="button"
+                          onClick={() => togglePtoSort("dates")}
+                          title="Sort — click to flip newest / oldest"
+                          className={`inline-flex items-center gap-1 uppercase hover:text-white ${ptoSort.key === "dates" ? "text-white" : ""}`}
+                        >
+                          Dates <span className="text-[10px]">{ptoSort.key === "dates" ? (ptoSort.dir === "desc" ? "▼" : "▲") : "↕"}</span>
+                        </button>
+                      </th>
+                      <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">
+                        <button
+                          type="button"
+                          onClick={() => togglePtoSort("submitted")}
+                          title="Sort — click to flip newest / oldest"
+                          className={`inline-flex items-center gap-1 uppercase hover:text-white ${ptoSort.key === "submitted" ? "text-white" : ""}`}
+                        >
+                          Submitted <span className="text-[10px]">{ptoSort.key === "submitted" ? (ptoSort.dir === "desc" ? "▼" : "▲") : "↕"}</span>
+                        </button>
+                      </th>
                       <th className="px-3 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Days</th>
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Status</th>
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Actions</th>
@@ -2379,10 +2472,10 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                   </thead>
                   <tbody>
                     {loading ? (
-                      <tr><td colSpan={6} className="px-3 py-8 text-center text-slate-400">Loading…</td></tr>
-                    ) : leaveTabPtoRequests.filter(r => r.status === "pending").length === 0 ? (
-                      <tr><td colSpan={6} className="px-3 py-8 text-center text-slate-400">No pending PTO requests.</td></tr>
-                    ) : leaveTabPtoRequests.filter(r => r.status === "pending").map((request) => {
+                      <tr><td colSpan={7} className="px-3 py-8 text-center text-slate-400">Loading…</td></tr>
+                    ) : sortedPtoTableRows.length === 0 ? (
+                      <tr><td colSpan={7} className="px-3 py-8 text-center text-slate-400">No {ptoStatusTab} PTO requests.</td></tr>
+                    ) : sortedPtoTableRows.map((request) => {
                       // request.managerId is a snapshot resolved once at
                       // submission time — if the requester's manager_name
                       // has since changed, canReviewPtoStage's fallback
@@ -2403,6 +2496,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                         <td className="px-3 py-3 text-white font-medium">{profileName(request.profileId)}</td>
                         <td className="px-3 py-3 text-slate-300">{PTO_TYPE_LABELS[request.ptoType]}</td>
                         <td className="px-3 py-3 text-slate-300">{request.startDate} to {request.endDate}</td>
+                        <td className="px-3 py-3 text-slate-300 whitespace-nowrap">{ptoSubmittedDay(request.createdAt)}</td>
                         <td className="px-3 py-3 text-center text-slate-300">{Math.round(request.hoursRequested / 8)}</td>
                         <td className="px-3 py-3">
                           <div className="flex flex-col gap-1">
@@ -2451,23 +2545,26 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                                 </button>
                               </div>
                             )}
-                            {request.exceptionType !== null && request.hrPaperworkStatus === "pending" && canReviewPtoStage(request, "hr", myProfileId, role, extraRoles, displayName, requesterManagerName, requesterManagersManagerName) && (
-                              request.managerSignatureUrl ? (
-                                <button type="button" onClick={() => setSigningPtoHrFor(request)} className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-semibold transition">
-                                  Sign Exception Report (HR)
+                            {request.exceptionType !== null && request.hrPaperworkStatus === "pending" && request.hrStatus !== "pending" && canReviewPtoStage(request, "hr", myProfileId, role, extraRoles, displayName, requesterManagerName, requesterManagersManagerName) && (
+                              <div className="flex gap-1">
+                                <span className="text-[10px] text-slate-500 self-center">HR:</span>
+                                <button type="button" title="Sign the Exception Report as HR" onClick={() => setSigningPtoHrFor(request)} className="px-2 py-1 bg-green-600 hover:bg-green-700 text-white rounded text-xs transition flex items-center gap-1">
+                                  <CheckCircle className="h-3 w-3" />
                                 </button>
-                              ) : (
-                                <span className="text-[10px] text-slate-500">Exception Report: awaiting manager signature</span>
-                              )
+                              </div>
                             )}
                             {request.hrStatus === "pending" && canReviewPtoStage(request, "hr", myProfileId, role, extraRoles, displayName, requesterManagerName, requesterManagersManagerName) && (
                               <div className="flex gap-1">
                                 <span className="text-[10px] text-slate-500 self-center">HR:</span>
-                                {request.exceptionType === null && (
-                                  <button type="button" title="Approve as HR" onClick={() => handlePtoStageAction(request, "hr", "approved")} disabled={busyPtoId === request.id} className="px-2 py-1 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded text-xs transition flex items-center gap-1">
-                                    {busyPtoId === request.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <CheckCircle className="h-3 w-3" />}
-                                  </button>
-                                )}
+                                <button
+                          type="button"
+                          title={request.exceptionType !== null && request.hrPaperworkStatus === "pending" ? "Approve & sign as HR" : "Approve as HR"}
+                          onClick={() => (request.exceptionType !== null && request.hrPaperworkStatus === "pending" ? setSigningPtoHrFor(request) : handlePtoStageAction(request, "hr", "approved"))}
+                          disabled={busyPtoId === request.id}
+                          className="px-2 py-1 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded text-xs transition flex items-center gap-1"
+                        >
+                          {busyPtoId === request.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <CheckCircle className="h-3 w-3" />}
+                        </button>
                                 <button type="button" title="Reject as HR" onClick={() => handlePtoStageAction(request, "hr", "rejected")} disabled={busyPtoId === request.id} className="px-2 py-1 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white rounded text-xs transition flex items-center gap-1">
                                   {busyPtoId === request.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <XCircle className="h-3 w-3" />}
                                 </button>
@@ -2587,6 +2684,19 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                     </select>
                   </div>
                   <div>
+                    <label className="block text-xs text-slate-400 uppercase mb-2">Filter by Issue</label>
+                    <select
+                      value={correctionIssueFilter}
+                      onChange={(e) => setCorrectionIssueFilter(e.target.value)}
+                      className="w-full bg-slate-800/50 border border-white/10 rounded-lg p-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+                    >
+                      <option value="all">All Issues</option>
+                      {correctionIssueOptions(corrections).map((o) => (
+                        <option key={o.value} value={o.value}>{o.label} ({o.count})</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
                     <label className="block text-xs text-slate-400 uppercase mb-2">Filter by Department</label>
                     <select
                       value={correctionDepartmentFilter}
@@ -2643,7 +2753,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                       />
                     </div>
                   </div>
-                  <div className="flex items-end justify-end gap-2 md:col-span-2">
+                  <div className="flex items-end justify-end gap-2">
                     <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-2 text-sm">
                       <span className="text-yellow-300/80">Pending: </span>
                       <span className="font-semibold text-yellow-300">{correctionPendingCount}</span>
@@ -2658,7 +2768,17 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                   <thead>
                     <tr className="border-b border-white/10">
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Employee</th>
-                      <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Work Date</th>
+                      <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">
+                <button
+                  type="button"
+                  onClick={() => setWorkDateSort((d) => (d === "desc" ? "asc" : "desc"))}
+                  title={workDateSort === "desc" ? "Newest first — click for oldest first" : "Oldest first — click for newest first"}
+                  className="inline-flex items-center gap-1 uppercase hover:text-white"
+                >
+                  Work Date <span className="text-[10px]">{workDateSort === "desc" ? "▼" : "▲"}</span>
+                </button>
+              </th>
+              <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Issue</th>
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Original Time</th>
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Requested Time</th>
                       <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Reason</th>
@@ -2668,10 +2788,10 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                   </thead>
                   <tbody>
                     {loading ? (
-                      <tr><td colSpan={7} className="px-3 py-8 text-center text-slate-400">Loading…</td></tr>
+                      <tr><td colSpan={8} className="px-3 py-8 text-center text-slate-400">Loading…</td></tr>
                     ) : filteredCorrections.length === 0 ? (
-                      <tr><td colSpan={7} className="px-3 py-8 text-center text-slate-400">{correctionSearch.trim() || correctionStatusFilter !== "all" || correctionDepartmentFilter !== "all" || correctionBranchFilter !== "all" || correctionWorkDateFrom || correctionWorkDateTo ? "No correction requests match your search/filter." : "No correction requests yet."}</td></tr>
-                    ) : filteredCorrections.map((correction) => (
+                      <tr><td colSpan={8} className="px-3 py-8 text-center text-slate-400">{correctionSearch.trim() || correctionStatusFilter !== "all" || correctionIssueFilter !== "all" || correctionDepartmentFilter !== "all" || correctionBranchFilter !== "all" || correctionWorkDateFrom || correctionWorkDateTo ? "No correction requests match your search/filter." : "No correction requests yet."}</td></tr>
+                    ) : sortedCorrections.map((correction) => (
                       <tr key={correction.id} className="border-b border-white/5 hover:bg-white/5 transition">
                         <td className="px-3 py-3 text-white font-medium">
                           <a href={`/employee/${correction.profileId}`} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 hover:underline cursor-pointer">
@@ -2679,35 +2799,14 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                           </a>
                         </td>
                         <td className="px-3 py-3 text-slate-300">{correction.workDate}</td>
+                        <td className="px-3 py-3 text-slate-300">{correctionIssueLabel(correction.exceptionType, correction.otherDescription)}</td>
                         <td className="px-3 py-3 text-slate-300">{correction.originalCheckIn || "—"} → {correction.originalCheckOut || "—"}</td>
                         <td className="px-3 py-3 text-amber-200">
                           <RequestedTime c={correction} />
                         </td>
                         <td className="px-3 py-3 text-slate-300">{correction.reason || "—"}</td>
                         <td className="px-3 py-3">
-                          <div className="flex flex-col gap-1">
-                            <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-semibold border ${
-                              correction.managerStatus === "approved" ? "bg-green-500/20 text-green-300 border-green-500/30"
-                              : correction.managerStatus === "rejected" ? "bg-red-500/20 text-red-300 border-red-500/30"
-                              : "bg-yellow-500/20 text-yellow-300 border-yellow-500/30"
-                            }`}>
-                              Manager: {correction.managerStatus.charAt(0).toUpperCase() + correction.managerStatus.slice(1)}
-                            </span>
-                            <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-semibold border ${
-                              correction.hrStatus === "approved" ? "bg-green-500/20 text-green-300 border-green-500/30"
-                              : correction.hrStatus === "rejected" ? "bg-red-500/20 text-red-300 border-red-500/30"
-                              : "bg-yellow-500/20 text-yellow-300 border-yellow-500/30"
-                            }`}>
-                              HR: {correction.hrStatus.charAt(0).toUpperCase() + correction.hrStatus.slice(1)}
-                            </span>
-                            <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-semibold border ${
-                              correction.accountingStatus === "approved" ? "bg-green-500/20 text-green-300 border-green-500/30"
-                              : correction.accountingStatus === "rejected" ? "bg-red-500/20 text-red-300 border-red-500/30"
-                              : "bg-yellow-500/20 text-yellow-300 border-yellow-500/30"
-                            }`}>
-                              Accounting: {correction.accountingStatus.charAt(0).toUpperCase() + correction.accountingStatus.slice(1)}
-                            </span>
-                          </div>
+                          <CorrectionStageBadges row={correction} />
                         </td>
                         <td className="px-3 py-3">
                           {correction.status === "pending" ? (
@@ -2715,7 +2814,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                               View Timecard
                             </button>
                           ) : (
-                            <span className="text-slate-400 text-xs">{correction.status === "approved" ? "Approved" : "Rejected"}</span>
+                            <CorrectionOverallBadge status={correction.status} size="md" />
                           )}
                         </td>
                       </tr>
@@ -3007,13 +3106,11 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                   </div>
                 )}
                 {selectedCorrection.exceptionType !== null && selectedCorrection.hrPaperworkStatus === "pending" && canReviewCorrectionStage(selectedCorrection, "hr", myProfileId, role, extraRoles) && (
-                  selectedCorrection.managerSignatureUrl ? (
-                    <button onClick={() => setSigningHrCorrection(true)} className="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition font-semibold text-sm">
-                      Sign Exception Report (HR)
-                    </button>
-                  ) : (
-                    <p className="text-xs text-slate-500">Exception Report: awaiting manager signature before HR can sign.</p>
-                  )
+                  // HR doesn't wait for the manager — any 2 of Manager / HR / Accounting, in any order.
+                  <button onClick={() => setSigningHrCorrection(true)} className="w-full px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition font-semibold text-sm flex items-center justify-center gap-2">
+                    <CheckCircle className="h-4 w-4" />
+                    Approve & Sign as HR
+                  </button>
                 )}
                 {selectedCorrection.accountingStatus === "pending" && canReviewCorrectionStage(selectedCorrection, "accounting", myProfileId, role, extraRoles) && (
                   <div className="grid gap-3 md:grid-cols-2">
@@ -3198,7 +3295,17 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                     <div key={record.profileId} className="bg-slate-800/50 border border-red-500/30 rounded-lg p-4 hover:bg-slate-800/70 transition">
                       <div className="flex items-start justify-between">
                         <div className="flex-1">
-                          <p className="text-white font-semibold">{record.name}</p>
+                          <p className="text-white font-semibold flex flex-wrap items-center gap-1.5">
+                            {record.name}
+                            {(() => {
+                              const flag = traineeFlagFor(profiles.find((p) => p.id === record.profileId), trainingCandidates, record.date || dailyDate);
+                              return flag ? (
+                                <span className={`px-1.5 py-px rounded text-[10px] font-bold border ${flag.notStarted ? "bg-slate-500/20 text-slate-300 border-slate-500/40" : "bg-amber-500/15 text-amber-300 border-amber-500/40"}`}>
+                                  {traineeFlagLabel(flag)}
+                                </span>
+                              ) : null;
+                            })()}
+                          </p>
                           <p className="text-xs text-slate-400 mt-1">{record.department || "—"} • {record.location || "—"}</p>
                           <p className="text-xs text-slate-500 mt-2">Manager: {record.manager || "—"}</p>
                         </div>
@@ -3206,7 +3313,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                           <span className="inline-block px-3 py-1 bg-red-500/20 text-red-300 text-xs font-semibold rounded border border-red-500/40">
                             No Clock In
                           </span>
-                          {record.date === todayISO && TECHNICIAN_PAY_ROLES.has(record.role) && (
+                          {record.date === todayISO && TECHNICIAN_PAY_ROLES.has(record.role) && chainCanClockIn(myProfileId, record.profileId) !== false && (
                             <button
                               type="button"
                               disabled={clockingInIds.has(record.profileId)}

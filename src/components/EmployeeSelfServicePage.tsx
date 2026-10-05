@@ -36,7 +36,7 @@ import {
 import { zonedDateKey } from "@/lib/serverTime";
 import { buildCorrectionSubmissionPdf } from "@/lib/timecardCorrectionPdf";
 import { buildPtoSubmissionPdf } from "@/lib/ptoExceptionReportPdf";
-import { EXCEPTION_TYPE_LABELS, type ExceptionType } from "@/lib/exceptionVisitReportTemplate";
+import { EXCEPTION_TYPE_LABELS, CORRECTION_ISSUE_LABELS, isCorrectionIssueType, type ExceptionType, type CorrectionIssueType } from "@/lib/exceptionVisitReportTemplate";
 import { getRoleDepartmentBreakdown } from "@/lib/roleLabels";
 import { useSignaturePad } from "@/hooks/useSignaturePad";
 import { SignaturePadControls } from "@/components/SignaturePad";
@@ -79,6 +79,8 @@ interface Request {
   status: "pending" | "approved" | "rejected" | "closed";
   submittedDate: string;
   details: string;
+  /** Why it was rejected — "Rejected by <name> (<step>): <reason>" lines, shown in a red box. */
+  rejectionReason?: string | null;
 }
 
 const PTO_TYPE_LABEL: Record<PtoType, string> = {
@@ -172,12 +174,22 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
     // into Time Correction (migration 0304), Sick Leave, and Unpaid Leave
     // (migration 0306) requests — shared here since only one modal is ever
     // open at a time. See timecardCorrectionPdf.ts / ptoExceptionReportPdf.ts.
-    exceptionType: "missed_workday" as ExceptionType,
+    // Time Correction asks for the Issue (migration 0333) instead — see the
+    // effect below that swaps the default when the modal type changes.
+    exceptionType: "missed_workday" as ExceptionType | CorrectionIssueType,
     otherDescription: "",
     // Only shown/used when the employee's own profile has no technician_id
     // on file — "let them type it in when it's blank" per the original ask.
     employeeIdOverride: "",
   });
+  // Time Correction uses the Issue list; Sick / Unpaid Leave keep the Exception
+  // Type list. Keep the shared field on a valid choice for whichever is open.
+  useEffect(() => {
+    setFormData((f) => {
+      if (modalType === "correction") return f.exceptionType === "other" || isCorrectionIssueType(f.exceptionType) ? f : { ...f, exceptionType: "forgot_to_clock" };
+      return isCorrectionIssueType(f.exceptionType) ? { ...f, exceptionType: "missed_workday" } : f;
+    });
+  }, [modalType]);
   const [submitSuccess, setSubmitSuccess] = useState(false);
   const correctionSigPad = useSignaturePad({ width: 400, height: 110, defaultName: displayName || "" });
   // Reused for both Sick Leave and Unpaid Leave (mutually exclusive modal states).
@@ -315,6 +327,7 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
         status: r.status === "denied" ? "rejected" : r.status === "cancelled" ? "closed" : r.status,
         submittedDate: r.createdAt.slice(0, 10),
         details: `${PTO_TYPE_LABEL[r.ptoType] ?? r.ptoType}: ${r.startDate} to ${r.endDate} (${r.hoursRequested}h)${r.reason ? ` - ${r.reason}` : ""}\n${managerLine} | ${hrLine}`,
+        rejectionReason: r.status === "denied" ? r.reviewNote : null,
       });
     }
     for (const r of myCorrections) {
@@ -333,6 +346,7 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
         status: r.status,
         submittedDate: r.createdAt.slice(0, 10),
         details: `Date: ${r.workDate} - requested ${r.correctedCheckIn || "—"} to ${r.correctedCheckOut || "—"} (was ${r.originalCheckIn || "—"} to ${r.originalCheckOut || "—"})${(r.correctedMealStart || r.correctedMealEnd) ? `\nMeal: requested ${r.correctedMealStart || "—"} to ${r.correctedMealEnd || "—"} (was ${r.originalMealStart || "—"} to ${r.originalMealEnd || "—"})` : ""}${r.reason ? `. ${r.reason}` : ""}\n${corrManagerLine} | ${corrHrLine} | ${corrAccountingLine}${r.status === "approved" ? "\n✅ Your timecard has been updated with the corrected time." : ""}`,
+        rejectionReason: r.status === "rejected" ? r.reviewNote : null,
       });
     }
     for (const r of myEmployeeRequests) {
@@ -341,7 +355,8 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
         type: r.requestType === "attendance_dispute" ? "Attendance Dispute" : "Payroll Inquiry",
         status: r.status,
         submittedDate: r.createdAt.slice(0, 10),
-        details: r.details + (r.reviewNote ? `\n\nResponse: ${r.reviewNote}` : ""),
+        details: r.details + (r.reviewNote && r.status !== "rejected" ? `\n\nResponse: ${r.reviewNote}` : ""),
+        rejectionReason: r.status === "rejected" ? r.reviewNote || null : null,
       });
     }
     return items.sort((a, b) => b.submittedDate.localeCompare(a.submittedDate));
@@ -559,7 +574,7 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
                 directManagerName: managerProfile?.display_name || managerProfile?.email || "",
               },
               dateOfIncident: formData.startDate,
-              exceptionType: formData.exceptionType,
+              exceptionType: formData.exceptionType as ExceptionType, // never an Issue value here — the effect above resets it for leave
               otherDescription: formData.otherDescription,
               detailedReason: formData.details,
               employeeSignatureDataUrl: sickSignatureDataUrl,
@@ -573,7 +588,7 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
               reason: `Branch: ${formData.branch} | Position: ${ROLE_LABELS[formData.position] || formData.position || "N/A"} - ${formData.details}`,
               requestedBy: myProfileId,
               managerId: managerProfile?.id ?? null,
-              exceptionType: formData.exceptionType,
+              exceptionType: formData.exceptionType as ExceptionType, // never an Issue value here — the effect above resets it for leave
               otherDescription: formData.otherDescription,
               employeeSignatureUrl,
               employeeSignatureName: displayName || "",
@@ -651,7 +666,7 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
                 directManagerName: managerProfile?.display_name || managerProfile?.email || "",
               },
               dateOfIncident: formData.startDate,
-              exceptionType: formData.exceptionType,
+              exceptionType: formData.exceptionType as ExceptionType, // never an Issue value here — the effect above resets it for leave
               otherDescription: formData.otherDescription,
               detailedReason: formData.details,
               employeeSignatureDataUrl: unpaidSignatureDataUrl,
@@ -665,7 +680,7 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
               reason: `Branch: ${formData.branch} | Position: ${ROLE_LABELS[formData.position] || formData.position || "N/A"} - ${formData.details}`,
               requestedBy: myProfileId,
               managerId: managerProfile?.id ?? null,
-              exceptionType: formData.exceptionType,
+              exceptionType: formData.exceptionType as ExceptionType, // never an Issue value here — the effect above resets it for leave
               otherDescription: formData.otherDescription,
               employeeSignatureUrl,
               employeeSignatureName: displayName || "",
@@ -723,6 +738,11 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
           const effectiveMealEnd = formData.correctedMealEnd || existing?.mealEnd || "";
           if (isCheckOutBeforeCheckIn(effectiveMealStart, effectiveMealEnd)) {
             alert(`Meal end (${effectiveMealEnd}) is before meal start (${effectiveMealStart}). Double-check the AM/PM on the time picker.`);
+            setSubmitting(false);
+            return;
+          }
+          if (formData.exceptionType === "other" && !formData.otherDescription.trim()) {
+            alert("Please specify the issue for “Other”.");
             setSubmitting(false);
             return;
           }
@@ -1578,6 +1598,12 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
                           <p className="text-sm font-semibold text-white">{request.type}</p>
                           <p className="text-xs text-slate-400 mt-1">Submitted: {request.submittedDate}</p>
                           <p className="text-sm text-slate-300 mt-2 whitespace-pre-line">{request.details}</p>
+                          {request.status === "rejected" && (
+                            <div className="mt-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2">
+                              <p className="text-[11px] font-semibold uppercase tracking-wide text-red-300">Reason rejected</p>
+                              <p className="text-sm text-red-100 whitespace-pre-line">{request.rejectionReason || "No reason was given."}</p>
+                            </div>
+                          )}
                         </div>
                         <span className={`px-3 py-1 rounded text-xs font-semibold whitespace-nowrap ml-3 ${getStatusColor(request.status)}`}>
                           {getStatusIcon(request.status)} {request.status.charAt(0).toUpperCase() + request.status.slice(1)}
@@ -1781,9 +1807,12 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
                         );
                       })()}
                       <div>
-                        <label className="text-xs font-semibold text-white block mb-1">Exception Type</label>
+                        <label className="text-xs font-semibold text-white block mb-1">{modalType === "correction" ? "Issue" : "Exception Type"}</label>
                         <div className="flex flex-col gap-1.5">
-                          {(Object.keys(EXCEPTION_TYPE_LABELS) as ExceptionType[]).map((t) => (
+                          {(modalType === "correction"
+                            ? (Object.keys(CORRECTION_ISSUE_LABELS) as CorrectionIssueType[]).map((t) => [t, t === "other" ? "Other: Specify" : CORRECTION_ISSUE_LABELS[t]] as const)
+                            : (Object.keys(EXCEPTION_TYPE_LABELS) as ExceptionType[]).map((t) => [t, EXCEPTION_TYPE_LABELS[t]] as const)
+                          ).map(([t, label]) => (
                             <label key={t} className="flex items-center gap-2 text-sm text-white">
                               <input
                                 type="radio"
@@ -1791,14 +1820,14 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
                                 checked={formData.exceptionType === t}
                                 onChange={() => setFormData({ ...formData, exceptionType: t })}
                               />
-                              {EXCEPTION_TYPE_LABELS[t]}
+                              {label}
                             </label>
                           ))}
                         </div>
                         {formData.exceptionType === "other" && (
                           <input
                             type="text"
-                            placeholder="Describe the exception…"
+                            placeholder={modalType === "correction" ? "Specify the issue…" : "Describe the exception…"}
                             value={formData.otherDescription}
                             onChange={(e) => setFormData({ ...formData, otherDescription: e.target.value })}
                             className="w-full mt-2 px-3 py-2 bg-slate-800 border border-white/10 rounded text-white text-sm focus:outline-none focus:border-blue-500 placeholder-slate-500"
@@ -1919,6 +1948,12 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
                           <p className="text-sm font-semibold text-white">{request.type}</p>
                           <p className="text-xs text-slate-400 mt-1">Submitted: {request.submittedDate}</p>
                           <p className="text-sm text-slate-300 mt-2 whitespace-pre-line">{request.details}</p>
+                          {request.status === "rejected" && (
+                            <div className="mt-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2">
+                              <p className="text-[11px] font-semibold uppercase tracking-wide text-red-300">Reason rejected</p>
+                              <p className="text-sm text-red-100 whitespace-pre-line">{request.rejectionReason || "No reason was given."}</p>
+                            </div>
+                          )}
                         </div>
                         <span className={`px-3 py-1 rounded text-xs font-semibold whitespace-nowrap ml-3 ${getStatusColor(request.status)}`}>
                           {getStatusIcon(request.status)} {request.status.charAt(0).toUpperCase() + request.status.slice(1)}

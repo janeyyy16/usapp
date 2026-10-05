@@ -25,6 +25,8 @@ import { handleLoginLockoutRequest } from "./lib/server/loginLockoutBridge";
 import { handlePasswordResetRequest } from "./lib/server/passwordResetRequestBridge";
 import { handleItBypassLoginRequest } from "./lib/server/itBypassLoginBridge";
 
+const CANONICAL_ORIGIN = "https://adminhubsolution.com";
+
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
 };
@@ -123,6 +125,19 @@ export default {
     // error responses are returned verbatim instead of being swallowed into the
     // 500 HTML page.
     const url = new URL(request.url);
+    // The app's real address is adminhubsolution.com — anyone landing on the
+    // Worker's *.workers.dev address (old bookmarks/links) is sent to the same
+    // page there. Page navigations only: /api/* (OAuth callbacks, anything
+    // POSTing here) and /assets/* (a tab already open on workers.dev loading
+    // its next code chunk) are served as before.
+    if (
+      url.hostname.endsWith(".workers.dev") &&
+      (request.method === "GET" || request.method === "HEAD") &&
+      !url.pathname.startsWith("/api/") &&
+      !url.pathname.startsWith("/assets/")
+    ) {
+      return Response.redirect(`${CANONICAL_ORIGIN}${url.pathname}${url.search}`, 302);
+    }
     if (url.pathname === "/api/supabase-token") {
       const merged = await resolveServerEnv(env);
       return await handleSupabaseTokenRequest(request, merged);
@@ -269,6 +284,28 @@ export default {
       ).then(
         (result) => console.log("flashTechOpenAlerts:", JSON.stringify(result)),
         (error) => console.error("flashTechOpenAlerts failed:", error),
+      ),
+    );
+
+    // Yesterday's missed technician clock-ins -> "meeting required" + notify
+    // their managers (migration 0348). Idempotent, so every hourly tick can
+    // run it; only the first one after midnight Central actually adds rows.
+    ctx.waitUntil(
+      import("./lib/server/missedClockInMeetings").then(
+        ({ runMissedClockInMeetings }) => runMissedClockInMeetings(merged),
+      ).then(
+        (result) => { if (result.newMeetings || result.errors.length) console.log("missedClockInMeetings:", JSON.stringify(result)); },
+        (error) => console.error("missedClockInMeetings failed:", error),
+      ),
+    );
+    // Missed Time Out not corrected before the next Time In -> correction
+    // meeting (migration 0349). Also idempotent.
+    ctx.waitUntil(
+      import("./lib/server/missedClockInMeetings").then(
+        ({ runMissedTimeOutMeetings }) => runMissedTimeOutMeetings(merged),
+      ).then(
+        (result) => { if (result.newMeetings || result.errors.length) console.log("missedTimeOutMeetings:", JSON.stringify(result)); },
+        (error) => console.error("missedTimeOutMeetings failed:", error),
       ),
     );
 

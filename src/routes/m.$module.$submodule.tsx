@@ -57,6 +57,7 @@ import { RepairStatusesPage } from "@/components/RepairStatusesPage";
 import { DataMigrationPage } from "@/components/DataMigrationPage";
 import { LoginSecurityPage } from "@/components/LoginSecurityPage";
 import { AccessibilityManagementPage } from "@/components/AccessibilityManagementPage";
+import { ApprovalChainPage } from "@/components/ApprovalChainPage";
 import { FlashTechCalendarPage } from "@/components/FlashTechCalendarPage";
 // Richer parts components pulled from the upstream usapp repo. Where they
 // overlap with the existing *Page wrappers above we prefer the upstream
@@ -96,6 +97,7 @@ import { HrOnboardingChecklistPage } from "@/components/HrOnboardingChecklistPag
 import { TechnicianFormChecklistPage } from "@/components/TechnicianFormChecklistPage";
 import { HiringAnalyticsPage } from "@/components/HiringAnalyticsPage";
 import { CandidateReviewsPage } from "@/components/CandidateReviewsPage";
+import { ClockInCodesTab } from "@/components/ClockInCodesTab";
 import { TrainingListPage } from "@/components/TrainingListPage";
 import { AbsentListPage } from "@/components/AbsentListPage";
 import { RepairKnowledgeBase } from "@/components/RepairKnowledgeBase";
@@ -584,6 +586,8 @@ function SubModule() {
         ? <TrainingListPage />
         : (sub as any).custom === "candidate-reviews"
         ? <CandidateReviewsPage />
+        : (sub as any).custom === "clock-in-codes"
+        ? <ClockInCodesTab standalone backModule={mod.slug} />
         : (sub as any).custom === "absent-list"
         ? <AbsentListPage mod={mod} sub={sub} />
         : (sub as any).custom === "flash-tech"
@@ -610,6 +614,8 @@ function SubModule() {
         ? <LoginSecurityPage mod={mod} sub={sub} />
         : (sub as any).custom === "accessibility-management"
         ? <AccessibilityManagementPage mod={mod} sub={sub} />
+        : (sub as any).custom === "approval-chain"
+        ? <ApprovalChainPage mod={mod} sub={sub} />
         : (sub as any).custom === "flash-tech-calendar"
         ? <FlashTechCalendarPage mod={mod} sub={sub} />
         : (sub as any).custom === "company-settings"

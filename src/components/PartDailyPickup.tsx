@@ -1,8 +1,12 @@
+import { ClockInCodeModal } from "@/components/ClockInCodeModal";
 import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate } from "@tanstack/react-router";
 import { useSmartBack } from "@/hooks/useSmartBack";
-import { ChevronLeft, Printer, Save, Check, History } from "lucide-react";
+import { ChevronLeft, Printer, Save, Check, History, PackageCheck } from "lucide-react";
+import { BranchBarChart } from "@/components/BranchBarChart";
+import { DonutSummaryCard } from "@/components/DonutSummaryCard";
+import { CollectionStatusSummary } from "@/components/CollectionStatusSummary";
 import { LOCATIONS } from "@/lib/locations";
 import { useAuth } from "@/lib/auth";
 import { getCompanyUsers } from "@/lib/supabase/users";
@@ -32,20 +36,6 @@ function repairStatusClass(status: string): string {
 
 const TODAY=new Date().toISOString().slice(0,10);
 
-// TEMPORARY fallback — the real query (getPartsForDailyPickup) matches
-// parts with status "Tech Pickup" AND an exact ticket schedule_date, so
-// it's very easy for it to legitimately return nothing (no real part
-// happens to be scheduled for the picked date yet). Rather than always
-// showing an empty table, fall back to these example rows so there's
-// always something to test the Picked Up toggle / "I'm Done" flow
-// against. Ids are prefixed "ex-" so Save knows never to persist them.
-export const EXAMPLE_PICKUP_ROWS: PartPickupRow[] = [
-  { id: "ex-pu-1", techName: "Abel Severino", ticketNo: "26000671722HS", repairStatus: "OP-Waiting for Part", partNo: "11101010016460", description: "Fixed Speed Reciprocating Comp", po: "1007567278-10-AV", quantity: 1, coreValue: 45, partStatus: "Tech Pickup", pickedUp: false, action: "", comment: "", inTransit: false, location: "Atlanta" },
-  { id: "ex-pu-2", techName: "Darrin Stewart", ticketNo: "1007567278-10-AV", repairStatus: "CL-Claimed", partNo: "4056017371", description: "Pipe", po: "PO-260702-001", quantity: 2, coreValue: 0, partStatus: "Tech Pickup", pickedUp: true, action: "Picked up at office", comment: "", inTransit: false, location: "Memphis" },
-  { id: "ex-pu-3", techName: "John Godfrey", ticketNo: "SA-3349588-AV", repairStatus: "OP-Ready for Service", partNo: "WE22X37340", description: "User Interface Board FL Dryer 87 & 95", po: "12-606043-0526", quantity: 1, coreValue: 0, partStatus: "Tech Pickup", pickedUp: false, action: "", comment: "", inTransit: true, location: "Nashville" },
-  { id: "ex-pu-4", techName: "Zonate Grant", ticketNo: "1234567", repairStatus: "TR-Need Triage", partNo: "WE04X24719", description: "Button Start ASM", po: "75112201", quantity: 1, coreValue: 12.5, partStatus: "Tech Pickup", pickedUp: false, action: "", comment: "Waiting on tech", inTransit: false, location: "Birmingham" },
-  { id: "ex-pu-5", techName: "Erick Guzman Juarez", ticketNo: "1007685370-10-AV", repairStatus: "OP-Waiting for Part", partNo: "140156010054", description: "Manifold, Water Filter, W/NO Con", po: "1-55553", quantity: 1, coreValue: 0, partStatus: "Tech Pickup", pickedUp: true, action: "Picked up", comment: "", inTransit: false, location: "San Antonio" },
-];
 
 export function PartDailyPickup({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
   const navigate = useNavigate();
@@ -59,6 +49,8 @@ export function PartDailyPickup({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
   const canSeeNotes = heldRoles.includes("PARTS_ORDER") || heldRoles.includes("SUPERADMIN");
   const [location,setLocation]=useState("");const [locOpen,setLocOpen]=useState(false);
   const [tech,setTech]=useState("");const [techOpen,setTechOpen]=useState(false);
+  // Picking a technician offers "Clock in with HR's code" when they aren't clocked in yet (ClockInCodeModal decides).
+  const [codeTech,setCodeTech]=useState<string|null>(null);
   const [pickupDate,setPickupDate]=useState(TODAY);
   const [rows,setRows]=useState<PartPickupRow[]>([]);
   const [technicianRoster,setTechnicianRoster]=useState<string[]>([]);
@@ -67,7 +59,6 @@ export function PartDailyPickup({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
   const [loadError,setLoadError]=useState<string|null>(null);
   const [saveError,setSaveError]=useState<string|null>(null);
   const [saved,setSaved]=useState(false);
-  const [usingExampleData,setUsingExampleData]=useState(false);
   // Snapshot of what was last loaded/saved, keyed by id — diffed against
   // current `rows` on Save so only real pickedUp flips get logged, same
   // "log the meaningful state change" spirit as Part Receive's activity
@@ -116,13 +107,9 @@ export function PartDailyPickup({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
     setLoadError(null);
     getPartsForDailyPickup({ location: location || undefined, technician: tech || undefined, pickupDate })
       .then((data) => {
-        const finalRows =
-          data.length === 0
-            ? EXAMPLE_PICKUP_ROWS.filter((r) => (!location || r.location === location) && (!tech || r.techName === tech))
-            : data;
-        setRows(finalRows);
-        setUsingExampleData(data.length === 0);
-        originalRowsRef.current = new Map(finalRows.map((r) => [r.id, r]));
+        // Real parts only — no example rows when nothing matches.
+        setRows(data);
+        originalRowsRef.current = new Map(data.map((r) => [r.id, r]));
       })
       .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false));
@@ -178,6 +165,17 @@ export function PartDailyPickup({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
 
   const COLS=["Tech Name","Ticket #","Repair Status","Part No","Description","PO","Unique ID","Qty","Core Value","Part Status","Picked Up","Action",...(canSeeNotes?["Notes"]:[]),"In Transit"];
 
+  // Branch Summary (same as Part Daily Collection).
+  const PICKUP_NO_LOCATION = "(No location)";
+  const pickupBranchSummary = Array.from(new Set(rows.map((r) => r.location || PICKUP_NO_LOCATION)))
+    .map((loc) => {
+      const items = rows.filter((r) => (r.location || PICKUP_NO_LOCATION) === loc);
+      return { location: loc, notPickedUp: items.filter((r) => !r.pickedUp).length, pickedUp: items.filter((r) => r.pickedUp).length };
+    })
+    .filter((b) => b.notPickedUp + b.pickedUp > 0)
+    .sort((a, b) => b.notPickedUp - a.notPickedUp || a.location.localeCompare(b.location));
+  const pickupTotals = { notPickedUp: rows.filter((r) => !r.pickedUp).length, pickedUp: rows.filter((r) => r.pickedUp).length };
+
   return(<div className="min-h-screen flex flex-col"><main className="flex-1 w-full min-w-0 px-4 lg:px-6 py-8">
     <div className="flex items-center justify-between gap-3 mb-6">
       <div className="flex items-center gap-3">
@@ -190,6 +188,50 @@ export function PartDailyPickup({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
     </div>
 
     {/* Filters */}
+    {/* Same layout as Part Daily Collection: branch bar chart, status donut, and the per-branch written summary with each technician's attendance. */}
+    <div className="panel mb-6">
+      <div className="flex items-center gap-2.5 mb-4">
+        <PackageCheck className="h-4 w-4 text-blue-400 shrink-0" />
+        <div>
+          <h3 className="text-[0.95rem] font-semibold uppercase tracking-wide" style={{ color: "#64b5f6" }}>Branch Summary</h3>
+          <p className="text-xs text-muted-foreground -mt-0.5">Click a branch to filter the table below</p>
+        </div>
+      </div>
+      <div className="flex flex-col lg:flex-row gap-4 items-stretch">
+        <BranchBarChart
+          title="Parts for Pickup by Branch"
+          totalLabel="Total Parts for Pickup"
+          unitLabel="Number of Parts"
+          bars={pickupBranchSummary.map((b) => ({
+            location: b.location,
+            total: b.notPickedUp + b.pickedUp,
+            detail: `${b.notPickedUp} not picked up · ${b.pickedUp} picked up`,
+          }))}
+          selected={location}
+          onSelect={(l) => setLocation(l === PICKUP_NO_LOCATION ? "" : l)}
+          noLocationKey={PICKUP_NO_LOCATION}
+        />
+        <div className="flex-1 flex flex-wrap gap-4 lg:self-start">
+          <DonutSummaryCard
+            title="Status"
+            data={[
+              { name: "Picked up", value: pickupTotals.pickedUp },
+              { name: "Not picked up", value: pickupTotals.notPickedUp },
+            ]}
+            colorFor={(name) => (name === "Picked up" ? "#22c55e" : "#f59e0b")}
+            centerValue={String(pickupTotals.pickedUp + pickupTotals.notPickedUp)}
+            centerLabel="Total Parts"
+          />
+          <CollectionStatusSummary
+            items={rows.map((r) => ({ location: r.location, techName: r.techName, done: r.pickedUp }))}
+            verb="picked up"
+            heading="Parts Daily Pickup"
+            remarkSource="Pickup"
+          />
+        </div>
+      </div>
+    </div>
+
     <div className="panel mb-4">
       <div className="flex flex-wrap items-end gap-3">
         <div className="flex flex-col gap-1 min-w-[140px]">
@@ -200,7 +242,7 @@ export function PartDailyPickup({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
         <div className="flex flex-col gap-1 min-w-[160px]">
           <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Technician</label>
           <button ref={techD.ref} onClick={()=>setTechOpen(o=>!o)} className="glass-input w-full text-sm py-1.5 px-3 rounded-md flex items-center justify-between gap-2"><span className={tech?"":"text-muted-foreground"}>{tech||"All"}</span><Chev o={techOpen}/></button>
-          {techOpen&&techD.pos&&createPortal(<div ref={techL} style={{...DS,top:techD.pos.top,left:techD.pos.left,width:techD.pos.width}}><button onClick={()=>{setTech("");setTechOpen(false);}} className={`w-full text-left px-3 py-2 text-sm hover:bg-white/5 ${tech===""?"bg-blue-600 text-white":"text-slate-400"}`}>— All —</button>{technicianRoster.map((t,i)=><button key={i} onClick={()=>{setTech(t);setTechOpen(false);}} className={`w-full text-left px-3 py-2 text-sm hover:bg-white/5 ${tech===t?"bg-blue-600 text-white":""}`}>{t}</button>)}</div>,document.body)}
+          {techOpen&&techD.pos&&createPortal(<div ref={techL} style={{...DS,top:techD.pos.top,left:techD.pos.left,width:techD.pos.width}}><button onClick={()=>{setTech("");setTechOpen(false);}} className={`w-full text-left px-3 py-2 text-sm hover:bg-white/5 ${tech===""?"bg-blue-600 text-white":"text-slate-400"}`}>— All —</button>{technicianRoster.map((t,i)=><button key={i} onClick={()=>{setTech(t);setTechOpen(false);setCodeTech(t);}} className={`w-full text-left px-3 py-2 text-sm hover:bg-white/5 ${tech===t?"bg-blue-600 text-white":""}`}>{t}</button>)}</div>,document.body)}
         </div>
         <div className="flex flex-col gap-1">
           <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Pickup Date*</label>
@@ -215,16 +257,13 @@ export function PartDailyPickup({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
     </div>
 
     {/* Table */}
-    {usingExampleData && !loading && (
-      <p className="text-xs text-amber-400 mb-2">No real parts scheduled for pickup on this date — showing example data instead.</p>
-    )}
     <div className="panel p-0 w-full">
       {loadError ? (
         <p className="text-sm text-red-400 px-4 py-6">Failed to load parts: {loadError}</p>
       ) : loading ? (
         <p className="text-sm text-muted-foreground px-4 py-6">Loading…</p>
       ) : rows.length === 0 ? (
-        <p className="text-sm text-muted-foreground px-4 py-6">No parts need pickup for these filters.</p>
+        <p className="text-sm text-muted-foreground px-4 py-6">No parts in Tech Pickup for this date — a part shows here when its status is Tech Pickup and its ticket is scheduled on the Pickup Date.</p>
       ) : (
       <div className="overflow-x-auto">
         <table className="w-full text-xs">
@@ -282,6 +321,7 @@ export function PartDailyPickup({mod,sub}:{mod:ModuleDef;sub:SubModuleDef}){
       {saved&&<span className="text-green-400 text-sm flex items-center gap-1"><Check className="h-4 w-4"/>Saved successfully</span>}
       <button onClick={handleSave} disabled={saving||loading||rows.length===0} className="btn bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-2 px-8 disabled:opacity-50"><Save className="h-3.5 w-3.5"/>{saving?"Saving…":"Save All Changes"}</button>
     </div>
+    {codeTech&&<ClockInCodeModal techName={codeTech} onClose={()=>setCodeTech(null)}/>}
   </main>
 
   {activityLogOpen && (
