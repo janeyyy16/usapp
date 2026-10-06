@@ -1,4 +1,4 @@
-import { createFileRoute, Link, Navigate, Outlet, notFound, useLocation } from "@tanstack/react-router";
+import { createFileRoute, Link, Navigate, Outlet, notFound, redirect, useLocation } from "@tanstack/react-router";
 import { useRedirectGuard } from "@/lib/useRedirectGuard";
 import { AppHeader } from "@/components/Header";
 import { Footer } from "@/components/Footer";
@@ -98,6 +98,10 @@ import { TechnicianFormChecklistPage } from "@/components/TechnicianFormChecklis
 import { HiringAnalyticsPage } from "@/components/HiringAnalyticsPage";
 import { CandidateReviewsPage } from "@/components/CandidateReviewsPage";
 import { ClockInCodesTab } from "@/components/ClockInCodesTab";
+import { TicketGuidesPage } from "@/components/TicketGuidesPage";
+import { SelfServiceGuidePage } from "@/components/SelfServiceGuidePage";
+import { GettingStartedGuidePage } from "@/components/GettingStartedGuidePage";
+import { ApproverGuidePage } from "@/components/ApproverGuidePage";
 import { TrainingListPage } from "@/components/TrainingListPage";
 import { AbsentListPage } from "@/components/AbsentListPage";
 import { RepairKnowledgeBase } from "@/components/RepairKnowledgeBase";
@@ -144,6 +148,10 @@ import { OperationsDashboard } from "@/components/OperationsDashboard";
 import { ReceivingStatusPage } from "@/components/ReceivingStatusPage";
 import { TicketOperationReport } from "@/components/TicketOperationReport";
 
+const MOVED_SUBMODULES: Record<string, { module: string; submodule: string }> = {
+  "tickets/operation": { module: "bizops", submodule: "operation" },
+};
+
 export const Route = createFileRoute("/m/$module/$submodule")({
   ssr: false,
   head: ({ params }) => ({
@@ -152,6 +160,9 @@ export const Route = createFileRoute("/m/$module/$submodule")({
     }],
   }),
   loader: async ({ params }) => {
+    // Pages that moved to another module — old links/bookmarks land on the new spot.
+    const moved = MOVED_SUBMODULES[`${params.module}/${params.submodule}`];
+    if (moved) throw redirect({ to: "/m/$module/$submodule", params: moved, replace: true });
     const m = getModule(params.module);
     const s = getSubModule(params.module, params.submodule);
     if (!m || !s) throw notFound();
@@ -586,6 +597,14 @@ function SubModule() {
         ? <TrainingListPage />
         : (sub as any).custom === "candidate-reviews"
         ? <CandidateReviewsPage />
+        : (sub as any).custom === "ticket-guides"
+        ? <TicketGuidesPage />
+        : (sub as any).custom === "self-service-guide"
+        ? <SelfServiceGuidePage />
+        : (sub as any).custom === "getting-started-guide"
+        ? <GettingStartedGuidePage />
+        : (sub as any).custom === "approver-guide"
+        ? <ApproverGuidePage />
         : (sub as any).custom === "clock-in-codes"
         ? <ClockInCodesTab standalone backModule={mod.slug} />
         : (sub as any).custom === "absent-list"

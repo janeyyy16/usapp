@@ -1,5 +1,8 @@
-import { AlertCircle, AlertTriangle, Clock, Users, UserCheck, UserX, Bell, MessageSquare, ChevronLeft, ChevronRight, ChevronDown, Download, Calendar, FileText, CheckCircle, XCircle, Loader2, Settings } from "lucide-react";
+import { AlertCircle, AlertTriangle, Compass, Clock, Users, UserCheck, UserX, Bell, MessageSquare, ChevronLeft, ChevronRight, ChevronDown, Download, Calendar, FileText, CheckCircle, XCircle, Loader2, Settings } from "lucide-react";
 import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from "react";
+import { runTour, takeQueuedTour } from "@/lib/tours/runTour";
+import { APPROVER_TOUR, APPROVER_TOUR_TARGET } from "@/lib/tours/approverTour";
+import { useTourRunning } from "@/lib/tours/useTourRunning";
 import { useSearch, useNavigate } from "@tanstack/react-router";
 import { useSmartBack } from "@/hooks/useSmartBack";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
@@ -35,6 +38,7 @@ import { getLatestVisitUpdatesByProfileIds, getTicketsScheduledInRange, type Lat
 import { resolveTeamLeadOrManager, visibleAttendanceProfileIds } from "@/lib/notifyRouting";
 import { correctionIssueLabel, correctionIssueKey, correctionIssueOptions } from "@/lib/exceptionVisitReportTemplate";
 import { chainCanClockIn } from "@/lib/approvalDirectory";
+import { ClockInCodePrompt } from "@/components/ClockInCodePrompt";
 import { CorrectionStageBadges, CorrectionOverallBadge } from "@/components/CorrectionStageBadges";
 import { getCsrTeamComposition, type CsrTeamComposition } from "@/lib/supabase/csrTeams";
 import { ATTENDANCE_GRACE_MINUTES, addMinutesToHHMM, nowInTimezone, timezoneForBranch, DEFAULT_ATTENDANCE_TIMEZONE, payGraceMinutesFor, applyGraceToCheckIn, roundCheckOutToSchedule, toSeconds, ON_TIME_BUFFER_SECONDS } from "@/lib/attendanceGrace";
@@ -310,6 +314,20 @@ function CheckboxFilter({
   );
 }
 
+/** "Jackson,TN" / " Jackson ,  TN" → "Jackson, TN" — so one branch typed two ways shows (and filters) once. */
+const normBranchLabel = (b: string | null | undefined): string => String(b ?? "").trim().replace(/\s*,\s*/g, ", ");
+/** Made-up request the approvals tour shows in the signature windows when nothing real is waiting (preview — never signed or saved). */
+const TOUR_SAMPLE_PTO: PtoRequestRow = {
+  id: "tour-sample", profileId: "tour-sample", ptoType: "sick", startDate: "2026-10-06", endDate: "2026-10-06", hoursRequested: 8,
+  reason: "Sample sick day for the guided tour.", status: "pending", requestedBy: null, managerId: null,
+  managerStatus: "pending", managerReviewedBy: null, managerReviewedAt: null, hrStatus: "pending", hrReviewedBy: null, hrReviewedAt: null,
+  accountingStatus: "pending", accountingReviewedBy: null, accountingReviewedAt: null, reviewedBy: null, reviewedAt: null, reviewNote: null,
+  createdAt: "2026-10-05T09:00:00Z", attachmentPath: null, attachmentAddedBy: null, attachmentAddedAt: null, attachmentRemovedBy: null, attachmentRemovedAt: null,
+  exceptionType: "missed_workday", otherDescription: "", employeeSignatureUrl: null, employeeSignatureName: "Sample Employee", employeeSignedAt: null,
+  managerComments: "", managerSignatureUrl: null, managerSignatureName: null, managerSignedAt: null, hrPaperworkStatus: "pending",
+  hrSignatureUrl: null, hrSignatureName: null, hrSignedAt: null, hrReceivedDate: null, hrReviewerName: null, pdfUrl: null,
+};
+
 export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef }) {
   const navigate = useNavigate();
   const goBack = useSmartBack(() => navigate({ to: "/m/$module", params: { module: mod.slug } }));
@@ -482,6 +500,9 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
   const [busyPtoId, setBusyPtoId] = useState<string | null>(null);
   const [signingPtoManagerFor, setSigningPtoManagerFor] = useState<PtoRequestRow | null>(null);
   const [signingPtoHrFor, setSigningPtoHrFor] = useState<PtoRequestRow | null>(null);
+  // Guided tour: sample signature window when nothing real is waiting on this person.
+  const [tourSampleSign, setTourSampleSign] = useState<"manager" | "hr" | null>(null);
+  const tourRunning = useTourRunning();
   const [correctionStageBusy, setCorrectionStageBusy] = useState(false);
   const [signingManagerCorrection, setSigningManagerCorrection] = useState(false);
   const [signingHrCorrection, setSigningHrCorrection] = useState(false);
@@ -1009,14 +1030,19 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
     () => Array.from(new Set(alertBaseRecords.map((r) => r.department).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
     [alertBaseRecords]
   );
+  // Every branch the viewer can see (not just the ones with someone missing
+  // right now — a branch with nobody missing still belongs in the list),
+  // with spelling variants like "Jackson,TN" / "Jackson, TN" merged.
   const alertLocations = useMemo(
-    () => Array.from(new Set(alertBaseRecords.map((r) => r.location).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
-    [alertBaseRecords]
+    () =>
+      Array.from(new Set([...visibleProfiles.map((p) => normBranchLabel(p.assigned_branch)), ...alertBaseRecords.map((r) => normBranchLabel(r.location))].filter(Boolean)))
+        .sort((a, b) => a.localeCompare(b)),
+    [alertBaseRecords, visibleProfiles]
   );
   const alertFilteredRecords = useMemo(
     () =>
       alertBaseRecords.filter(
-        (r) => (alertDeptFilter === "all" || r.department === alertDeptFilter) && (alertLocationFilter === "all" || r.location === alertLocationFilter)
+        (r) => (alertDeptFilter === "all" || r.department === alertDeptFilter) && (alertLocationFilter === "all" || normBranchLabel(r.location) === alertLocationFilter)
       ),
     [alertBaseRecords, alertDeptFilter, alertLocationFilter]
   );
@@ -1038,7 +1064,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
       if (record.checkIn === "—") return false;
       if (searchEmployee && !record.name.toLowerCase().includes(searchEmployee.toLowerCase())) return false;
       if (filterDepartments.length > 0 && !filterDepartments.includes(record.department)) return false;
-      if (filterLocations.length > 0 && !filterLocations.includes(record.location)) return false;
+      if (filterLocations.length > 0 && !filterLocations.includes(normBranchLabel(record.location))) return false;
       // checkIn is already guaranteed above — this now only additionally
       // requires a completed checkOut.
       if (completeOnly && record.checkOut === "—") return false;
@@ -1068,7 +1094,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
   const departments = Array.from(
     new Set(visibleProfiles.map(profileDepartment).filter(Boolean))
   ) as string[];
-  const locations = Array.from(new Set(visibleProfiles.map((p) => p.assigned_branch).filter(Boolean))) as string[];
+  const locations = Array.from(new Set(visibleProfiles.map((p) => normBranchLabel(p.assigned_branch)).filter(Boolean))).sort((a, b) => a.localeCompare(b));
 
   // Weekly/Monthly summary tables get their own department + branch filters
   // since they're a separate section below the Daily Attendance table/filters.
@@ -1232,7 +1258,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
         if (record.checkIn !== "—" || record.isOffDay || record.hasPendingCorrection) return false;
         if (searchEmployee && !record.name.toLowerCase().includes(searchEmployee.toLowerCase())) return false;
         if (filterDepartments.length > 0 && !filterDepartments.includes(record.department)) return false;
-        if (filterLocations.length > 0 && !filterLocations.includes(record.location)) return false;
+        if (filterLocations.length > 0 && !filterLocations.includes(normBranchLabel(record.location))) return false;
         return true;
       })
       .sort((a, b) => (dateRangeActive && a.date !== b.date ? (a.date! < b.date! ? -1 : 1) : a.name.localeCompare(b.name)));
@@ -1366,9 +1392,11 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
   // src/lib/serverTime.ts), not the manager's own browser clock, for the
   // same reason self-punches do (TimeClockMenu.tsx).
   const [clockingInIds, setClockingInIds] = useState<Set<string>>(new Set());
+  // "Clock In" on a missing clock-in needs today's clock-in code first
+  // (checked by the database for that employee, "entered by" this viewer).
+  const [codeFor, setCodeFor] = useState<DailyRecord | null>(null);
   const handleProxyClockIn = async (record: DailyRecord) => {
     if (!myProfileId) return;
-    if (!window.confirm(`Clock in ${record.name} now?`)) return;
     setClockingInIds((prev) => new Set(prev).add(record.profileId));
     try {
       const branchTz = timezoneForBranch(record.location);
@@ -1602,6 +1630,44 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
     });
   }, [correctionHistory, corrections, teamScopedIds, myProfileId]);
 
+  // Guided tour (Guides → Approving Requests): switches tabs and opens the
+  // Missing Clock In list for the step inside it. Look-only.
+  const approverTourOpts = {
+    setTab: (t: string) => setActiveTab(t as typeof activeTab),
+    openPanel: (panel: string) => {
+      if (panel === "missing-clockin") {
+        setSelectedAlertType("missing-clockin");
+        setAlertDeptFilter("all");
+        setAlertLocationFilter("all");
+        setAlertModalOpen(true);
+        return;
+      }
+      // Signature windows: press the real "Approve & sign" / "Sign as HR" button
+      // on a request waiting on this person (the button only exists when they
+      // can act). Nothing waiting = no button = the step is skipped.
+      const button = panel === "pto-manager-sign" ? '[title="Approve & sign as manager"]' : panel === "pto-hr-sign" ? '[title="Sign the Exception Report as HR"]' : null;
+      if (!button) return;
+      setPtoStatusTab("pending");
+      // Always a sample request (preview — can't be signed), so every approver sees these steps.
+      setTourSampleSign(panel === "pto-manager-sign" ? "manager" : "hr");
+    },
+    // Close without signing or saving anything.
+    closePanel: (panel: string) => {
+      if (panel === "missing-clockin") setAlertModalOpen(false);
+      if (panel === "pto-manager-sign") setSigningPtoManagerFor(null);
+      if (panel === "pto-hr-sign") setSigningPtoHrFor(null);
+      setTourSampleSign(null);
+    },
+  };
+  const approverTourStartedRef = useRef(false);
+  useEffect(() => {
+    if (approverTourStartedRef.current) return;
+    if (takeQueuedTour(APPROVER_TOUR_TARGET) !== APPROVER_TOUR.id) return;
+    approverTourStartedRef.current = true;
+    window.setTimeout(() => void runTour(APPROVER_TOUR, approverTourOpts), 1000);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const tabConfig = [
     { id: "corrections", label: "Corrections", Icon: FileText },
     { id: "daily-attendance", label: "Daily Attendance", Icon: Clock },
@@ -1614,11 +1680,21 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
 
   return (
     <div className="min-h-screen flex flex-col">
+      {codeFor && (
+        <ClockInCodePrompt
+          profileId={codeFor.profileId}
+          onVerified={async () => {
+            await handleProxyClockIn(codeFor);
+            setCodeFor(null);
+          }}
+          onCancel={() => setCodeFor(null)}
+        />
+      )}
       {/* Floating quick-nav — duplicates the tab row below as a left-edge
           panel so jumping between tabs doesn't need scrolling back up on a
           long page. Collapsed to icons-only by default; the chevron
           expands it to show labels too. */}
-      <nav className="fixed left-3 top-1/2 z-40 flex -translate-y-1/2 flex-col gap-1 rounded-2xl border border-white/10 bg-slate-900/85 p-1.5 shadow-lg backdrop-blur-md motion-safe:transition-[width] motion-safe:duration-200">
+      <nav data-tour="am-tabs" className="fixed left-3 top-1/2 z-40 flex -translate-y-1/2 flex-col gap-1 rounded-2xl border border-white/10 bg-slate-900/85 p-1.5 shadow-lg backdrop-blur-md motion-safe:transition-[width] motion-safe:duration-200">
         <button
           type="button"
           onClick={toggleSidebarExpanded}
@@ -1655,6 +1731,14 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
           <div className="flex items-center gap-3 mb-6">
             <button type="button" onClick={goBack} className="btn hover:bg-white/15">
               <ChevronLeft className="h-4 w-4" /> {mod.label}
+            </button>
+            <button
+              type="button"
+              onClick={() => void runTour(APPROVER_TOUR, approverTourOpts)}
+              title="Guided tour: approving your team's requests"
+              className="inline-flex items-center gap-1.5 rounded border border-sky-400/40 bg-sky-500/15 px-2.5 py-1.5 text-xs font-semibold text-sky-200 transition hover:bg-sky-500/25"
+            >
+              <Compass className="h-4 w-4" /> Tour
             </button>
           </div>
           <div className="flex flex-wrap items-start justify-between gap-4">
@@ -1765,13 +1849,14 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
           {/* Tab Content */}
           {activeTab === "daily-attendance" && (
             <>
-              <div className="bg-slate-900/50 border border-white/10 rounded-lg p-4 backdrop-blur">
+              <div data-tour="am-alerts" className="bg-slate-900/50 border border-white/10 rounded-lg p-4 backdrop-blur">
                 <h2 className="text-sm font-bold text-white mb-2 flex items-center gap-2">
                   <AlertCircle className="h-4 w-4 text-orange-400" />
                   Attendance Alerts
                 </h2>
                 <div className="grid gap-2 sm:grid-cols-3">
                   <button
+                    data-tour="am-missing-clockin"
                     onClick={() => { setSelectedAlertType("missing-clockin"); setAlertDeptFilter("all"); setAlertLocationFilter("all"); setAlertModalOpen(true); }}
                     className="bg-gradient-to-br from-red-500/15 to-red-600/5 border border-red-500/40 rounded p-2 hover:border-red-500/60 hover:bg-red-500/20 transition cursor-pointer"
                   >
@@ -2001,7 +2086,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                             <button
                               type="button"
                               disabled={clockingInIds.has(record.profileId)}
-                              onClick={() => handleProxyClockIn(record)}
+                              onClick={() => setCodeFor(record)}
                               className="ml-2 inline-flex items-center px-2 py-0.5 rounded-md bg-green-500/20 hover:bg-green-500/30 disabled:opacity-50 text-green-300 text-xs font-semibold transition"
                             >
                               {clockingInIds.has(record.profileId) ? "Clocking in…" : "Clock In"}
@@ -2397,7 +2482,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
           {activeTab === "pto-management" && (
             <div className="space-y-6">
               <div className="flex items-center justify-between">
-                <div className="flex gap-2">
+                <div data-tour="am-pto-leave" className="flex gap-2">
                   <button
                     onClick={() => setPtoLeaveTab("paid")}
                     className={`px-4 py-2 rounded-lg text-sm font-semibold transition ${
@@ -2417,7 +2502,24 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                 </div>
               </div>
 
-              <div className="bg-slate-900/50 border border-white/10 rounded-lg p-6 overflow-x-auto">
+              {/* Guided tour only: a made-up request waiting on you, so the approval steps always have something to show. */}
+              {tourRunning && (
+                <div data-tour="am-pto-sample" className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-amber-300 mb-2">Sample request — shown during the tour only</div>
+                  <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+                    <span className="text-white font-semibold">Sample Employee</span>
+                    <span className="text-slate-300">Sick Leave · Oct 6, 2026 · 1 day</span>
+                    <span className="px-2 py-0.5 rounded text-xs bg-yellow-500/20 text-yellow-300 border border-yellow-500/30">Pending</span>
+                    <span className="text-xs text-slate-400">Manager: Pending · HR: Pending · Accounting: Pending</span>
+                    <span className="ml-auto flex items-center gap-1">
+                      <span className="text-[10px] text-slate-500">Mgr:</span>
+                      <span className="px-2 py-1 bg-green-600 text-white rounded inline-flex" title="Approve & sign as manager"><CheckCircle className="h-3 w-3" /></span>
+                      <span className="px-2 py-1 bg-red-600 text-white rounded inline-flex" title="Reject as manager"><XCircle className="h-3 w-3" /></span>
+                    </span>
+                  </div>
+                </div>
+              )}
+              <div data-tour="am-pto-table" className="bg-slate-900/50 border border-white/10 rounded-lg p-6 overflow-x-auto">
                 <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
                   <h2 className="text-lg font-bold text-white">PTO Requests</h2>
                   <div className="inline-flex rounded-lg border border-white/10 bg-slate-800/40 p-0.5" role="tablist" aria-label="PTO status">
@@ -2527,7 +2629,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                           </div>
                         </td>
                         <td className="px-3 py-3">
-                          <div className="flex flex-col gap-1.5">
+                          <div data-tour="am-pto-actions" className="flex flex-col gap-1.5">
                             {request.managerStatus === "pending" && canReviewPtoStage(request, "manager", myProfileId, role, extraRoles, displayName, requesterManagerName, requesterManagersManagerName) && (
                               <div className="flex gap-1">
                                 <span className="text-[10px] text-slate-500 self-center">Mgr:</span>
@@ -2636,7 +2738,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
 
           {activeTab === "corrections" && (
             <div className="space-y-6">
-              <div className="bg-slate-900/50 border border-white/10 rounded-lg p-6 overflow-x-auto">
+              <div data-tour="am-corr" className="bg-slate-900/50 border border-white/10 rounded-lg p-6 overflow-x-auto">
                 <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
                   <h2 className="text-lg font-bold text-white">Attendance Corrections</h2>
                   <div className="flex gap-1.5">
@@ -2659,7 +2761,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                 {correctionEraFilter === "old" && (
                   <p className="text-xs text-slate-500 mb-3">Submitted before the Exception Report requirement — kept here for the record only.</p>
                 )}
-                <div className="grid gap-3 md:grid-cols-4 mb-4">
+                <div data-tour="am-corr-filters" className="grid gap-3 md:grid-cols-4 mb-4">
                   <div>
                     <label className="block text-xs text-slate-400 uppercase mb-2">Search Employee</label>
                     <input
@@ -2867,9 +2969,14 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
 
           {activeTab === "ticket-attendance" && <TicketAttendanceTab />}
 
-          {activeTab === "ticket-dispute" && <TicketTimeDisputesTab />}
+          {activeTab === "ticket-dispute" && (
+            <div data-tour="am-ticket-dispute">
+              <TicketTimeDisputesTab />
+            </div>
+          )}
 
           {activeTab === "trainee-attendance" && (
+            <div data-tour="am-trainee">
             <TraineeAttendanceTab
               profiles={profiles}
               teamScopedIds={teamScopedIds}
@@ -2877,6 +2984,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
               role={role}
               extraRoles={extraRoles}
             />
+            </div>
           )}
 
 
@@ -3215,6 +3323,30 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
             }}
           />
         )}
+        {tourSampleSign === "manager" && (
+          <PtoManagerSignModal
+            preview
+            request={TOUR_SAMPLE_PTO}
+            companyId={companyId}
+            profiles={profiles}
+            reviewerId={myProfileId}
+            reviewerName={displayName || "Manager"}
+            onClose={() => setTourSampleSign(null)}
+            onSigned={() => setTourSampleSign(null)}
+          />
+        )}
+        {tourSampleSign === "hr" && (
+          <PtoHrSignModal
+            preview
+            request={TOUR_SAMPLE_PTO}
+            companyId={companyId}
+            profiles={profiles}
+            reviewerId={myProfileId}
+            reviewerName={displayName || "HR"}
+            onClose={() => setTourSampleSign(null)}
+            onSigned={() => setTourSampleSign(null)}
+          />
+        )}
         {signingPtoHrFor && (
           <PtoHrSignModal
             request={signingPtoHrFor}
@@ -3233,7 +3365,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
         {/* Alert Details Modal */}
         {alertModalOpen && selectedAlertType && (
           <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={() => setAlertModalOpen(false)}>
-            <div className="bg-slate-900 border border-white/10 rounded-lg max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div data-tour="am-alert-modal" className="bg-slate-900 border border-white/10 rounded-lg max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
               {/* Modal Header */}
               <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
                 <h2 className="text-lg font-bold text-white">
@@ -3317,7 +3449,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
                             <button
                               type="button"
                               disabled={clockingInIds.has(record.profileId)}
-                              onClick={() => handleProxyClockIn(record)}
+                              onClick={() => setCodeFor(record)}
                               className="inline-flex items-center px-2 py-0.5 rounded-md bg-green-500/20 hover:bg-green-500/30 disabled:opacity-50 text-green-300 text-xs font-semibold transition"
                             >
                               {clockingInIds.has(record.profileId) ? "Clocking in…" : "Clock In"}

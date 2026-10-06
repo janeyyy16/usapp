@@ -328,6 +328,17 @@ const accountingMod: ModuleDef = {
       count: 0,
       seed: () => ({}),
     },
+    {
+      // Same Flash Tech page as HR Dashboard → Flash Tech (and /m/hr/flash-tech) —
+      // Finance schedules trips and fills in the hotel/rental/receipt Tracker.
+      slug: "flash-tech",
+      title: "Flash Tech",
+      description: "Technician travel trips — schedule (Calendar) or fill in hotel/rental/receipt tracking detail (Tracker).",
+      custom: "flash-tech" as any,
+      fields: [],
+      count: 0,
+      seed: () => ({}),
+    },
     // Same submodule (slug "absent-list") also lives under the HR module's
     // own tile grid — carried over here too so it's reachable from either
     // module, same AbsentListPage either way (dispatch in
@@ -1141,14 +1152,6 @@ const ticketsMod: ModuleDef = {
       title: "Receiving Status",
       description: "Incoming tickets by Branch and 3rd-party Ticket Provider, with sync status.",
       custom: "receiving-status" as any,
-      fields: [],
-      seed: () => ({}),
-    },
-    {
-      slug: "operation",
-      title: "Operation",
-      description: "Live ticket counts per status, company-wide — includes backorder & cancel tracking.",
-      custom: "ticket-operation-report" as any,
       fields: [],
       seed: () => ({}),
     },
@@ -2109,6 +2112,14 @@ const bizOpsMod: ModuleDef = {
   accent: "#94a3b8",
   submodules: [
     {
+      slug: "operation",
+      title: "Operation",
+      description: "Live ticket counts per status, company-wide — includes backorder & cancel tracking.",
+      custom: "ticket-operation-report" as any,
+      fields: [],
+      seed: () => ({}),
+    },
+    {
       slug: "operations-dashboard",
       title: "Operations Dashboard",
       description: "Company-wide ticket overview — region breakdown, status funnel, and BizOps staff.",
@@ -2155,7 +2166,54 @@ const bizOpsMod: ModuleDef = {
   ],
 };
 
-export const MODULES: ModuleDef[] = [dashboardMod, csrMod, ticketsMod, partsMod, reportMod, claimsMod, accountingMod, hrMod, branchTechMod, triageMod, bizOpsMod, adminMod];
+// Guided tours (TicketGuidesPage). Each tour highlights the real page step by
+// step; nothing is changed while it runs. More guide tiles can join later.
+const guidesMod: ModuleDef = {
+  slug: "guides",
+  label: "Guides",
+  tagline: "Step-by-step tours of AHS for each department",
+  accent: "#38bdf8",
+  submodules: [
+    {
+      slug: "getting-started",
+      title: "Getting Started",
+      description: "Finding your way: the header, modules, notifications, messages, your account and the home page.",
+      custom: "getting-started-guide" as any,
+      fields: [],
+      count: 0,
+      seed: () => ({}),
+    },
+    {
+      slug: "tickets",
+      title: "Ticket Guides",
+      description: "Tours of the ticket page for CSR, Triage, Parts and Claims.",
+      custom: "ticket-guides" as any,
+      fields: [],
+      count: 0,
+      seed: () => ({}),
+    },
+    {
+      slug: "approving-requests",
+      title: "Approving Requests",
+      description: "Managers and above: clocking in from Missing Clock In, and approving PTO, leave, sick leave, time corrections, ticket disputes and trainee days.",
+      custom: "approver-guide" as any,
+      fields: [],
+      count: 0,
+      seed: () => ({}),
+    },
+    {
+      slug: "self-service",
+      title: "Self-Service Guide",
+      description: "For everyone: your time clock, payslips, attendance, and requesting PTO, sick leave, time corrections or unpaid leave.",
+      custom: "self-service-guide" as any,
+      fields: [],
+      count: 0,
+      seed: () => ({}),
+    },
+  ],
+};
+
+export const MODULES: ModuleDef[] = [dashboardMod, csrMod, ticketsMod, partsMod, reportMod, claimsMod, accountingMod, hrMod, branchTechMod, triageMod, bizOpsMod, adminMod, guidesMod];
 
 export function getModule(slug: string) {
   return MODULES.find((m) => m.slug === slug);
