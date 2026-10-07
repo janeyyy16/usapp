@@ -33,11 +33,11 @@ import {
 import {
   getCompanyTimecardCorrections,
   createTimecardCorrection,
-  validateTimecardCorrectionDate,
   validateCorrectionTimes,
   correctionShiftMinutes,
   formatShift,
   CORRECTION_MEAL_REQUIRED_AFTER_MINUTES,
+  validateTimecardCorrectionDate,
   type TimecardCorrectionRow,
 } from "@/lib/supabase/timecardCorrections";
 import { zonedDateKey } from "@/lib/serverTime";
@@ -759,6 +759,7 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
             setSubmitting(false);
             return;
           }
+          // No future dates (same check createTimecardCorrection runs, here so it fails before anything else).
           await validateTimecardCorrectionDate(myProfileId, formData.correctionDate);
           // Re-read the day's real punches at submit time for the "original"
           // times saved with the request (the 30-day attendance list misses
