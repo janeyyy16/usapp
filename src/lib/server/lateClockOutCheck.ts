@@ -15,8 +15,11 @@
  *   2. otherwise their home address (profiles.employee_info),
  *   3. otherwise their assigned branch's address.
  *
- * A Time Out later than that -> one notification to every HR user in the
- * company. Days closed by the system's automatic clock-out are skipped (the
+ * A Time Out more than 30 minutes later than that -> HR is notified (one
+ * batched notification per HR user per run, reminding them to check the
+ * tickets first). Smaller overruns are recorded as ok. A home more than
+ * 2 hours from the last customer isn't where they end the day, so their
+ * branch is used. Days closed by the system's automatic clock-out are skipped (the
  * system already picked that time), as are days with no finished ticket.
  *
  * Each technician-day is recorded once in technician_clock_out_checks
@@ -30,6 +33,9 @@ import { timezoneForBranch, nowInTimezone, DEFAULT_ATTENDANCE_TIMEZONE } from ".
 import { TECHNICIAN_PAY_ROLES, normalizeRole } from "../roleLabels";
 
 const EXTENSION_MINUTES = 10;
+// HR is only alerted past this many minutes over the expected Time Out
+// (smaller overruns are recorded as ok, with their minutes).
+const ALERT_AFTER_MINUTES = 30;
 const MAX_PER_RUN = 25;
 const LOOKBACK_DAYS = 2;
 // First day checked — the rule starts the day after it ships, so the first
@@ -274,7 +280,7 @@ export async function runLateClockOutCheck(env: Record<string, string | undefine
       const expectedMs = Date.parse(last.onsite_done_at) + (driveMin + EXTENSION_MINUTES) * 60_000;
       const actualMs = zonedToUtcMs(date, checkOut, tz);
       const minutesLate = Math.round((actualMs - expectedMs) / 60_000);
-      const isLate = minutesLate > 0;
+      const isLate = minutesLate > ALERT_AFTER_MINUTES;
       const expectedOut = zonedHms(expectedMs, tz);
 
       const id = await record({
@@ -282,7 +288,7 @@ export async function runLateClockOutCheck(env: Record<string, string | undefine
         status: isLate ? "late" : "ok",
         drive_minutes: driveMin,
         expected_out: expectedOut,
-        minutes_late: isLate ? minutesLate : 0,
+        minutes_late: Math.max(0, minutesLate),
       });
       summary.checked++;
       if (!isLate || !id) continue;
@@ -302,7 +308,8 @@ export async function runLateClockOutCheck(env: Record<string, string | undefine
   // 4. Tell HR — one notification per HR user per run, listing everyone.
   for (const [companyId, items] of lateByCompany) {
     const body =
-      `Late clock-out — ${items.length} technician${items.length === 1 ? "" : "s"} clocked out later than their last ticket + drive time + ${EXTENSION_MINUTES} min:\n` +
+      `Late clock-out — ${items.length} technician${items.length === 1 ? "" : "s"} clocked out more than ${ALERT_AFTER_MINUTES} min after their last ticket + drive time + ${EXTENSION_MINUTES} min. ` +
+      `Please check their tickets first: a job finished without tapping Work Done makes the day look shorter than it was.\n` +
       items.map((i) => `• ${i.line}`).join("\n");
     let sent = 0;
     for (const hrId of hrFor(companyId)) {
