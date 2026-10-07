@@ -1,10 +1,11 @@
-import { useMemo, useState, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { useSearch, useNavigate } from "@tanstack/react-router";
 import { ChevronLeft, Loader2 } from "lucide-react";
 import { useSmartBack } from "@/hooks/useSmartBack";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 import { type Ticket } from "@/lib/ticketData";
 import { createTicket as createSupabaseTicket } from "@/lib/supabase/tickets";
+import { ImportBulkTicketsButton } from "@/components/ImportBulkTickets";
 import { getCompanyDefaultTechnician } from "@/lib/supabase/companySettings";
 import { getLocations } from "@/lib/supabase/locationManagement";
 import { normalizeLocationForRegionMatch } from "@/lib/locations";
@@ -224,7 +225,6 @@ export function NewTicketPage({ mod, sub }: Props) {
     }
   }, [copyToken]);
 
-  const ticketNoPreview = useMemo(() => form.ticketNo.trim().toUpperCase() || "NEW-TICKET", [form.ticketNo]);
 
   const update = <K extends keyof typeof DEFAULT_FORM>(key: K, value: (typeof DEFAULT_FORM)[K]) => {
     setForm((current) => ({ ...current, [key]: value }));
@@ -382,7 +382,7 @@ export function NewTicketPage({ mod, sub }: Props) {
             <p className="ticket-form-kicker">Create New Ticket</p>
             <h2>Create New Ticket</h2>
           </div>
-          <div className="ticket-form-badge">{ticketNoPreview}</div>
+          <ImportBulkTicketsButton />
         </div>
 
         {invalidFields.size > 0 && (
