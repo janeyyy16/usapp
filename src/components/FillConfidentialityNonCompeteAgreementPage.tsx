@@ -1,7 +1,7 @@
 /**
  * Fill Master Confidentiality, Non-Solicitation, Non-Compete, and
  * Affirmative Duty Agreement — opened from the deep link ReportHRDaily.tsx's
- * "Confidentiality & Non-Compete Agreement" tab sends. HTML/CSS document
+ * "Master Confidentiality & Non-Compete Agreement" tab sends. HTML/CSS document
  * (confidentialityNonCompeteAgreementFormTemplate.ts), rendered live as a
  * preview of exactly what gets captured to PDF on submit — same pattern as
  * FillMasterW2ExecutiveAgreementPage.tsx.

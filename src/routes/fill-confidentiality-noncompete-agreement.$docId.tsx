@@ -4,7 +4,7 @@ import { FillConfidentialityNonCompeteAgreementPage } from "@/components/FillCon
 export const Route = createFileRoute("/fill-confidentiality-noncompete-agreement/$docId")({
   ssr: false,
   head: () => ({
-    meta: [{ title: `Confidentiality & Non-Compete Agreement — Admin Hub Solutions` }],
+    meta: [{ title: `Master Confidentiality & Non-Compete Agreement — Admin Hub Solutions` }],
   }),
   component: RouteComponent,
 });

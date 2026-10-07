@@ -84,7 +84,7 @@ export async function regenerateMasterAgreementPdf<TFormData>(
   styles: string,
   uploadFn: (companyId: string, name: string, blob: Blob) => Promise<string>,
   employeeName: string,
-  /** For a document whose PDF is several real pages (e.g. the Confidentiality & Non-Compete Agreement) — replaces the single-page capture. */
+  /** For a document whose PDF is several real pages (e.g. the Master Confidentiality & Non-Compete Agreement) — replaces the single-page capture. */
   capturePdf?: (data: TFormData, logo: string) => Promise<Blob>
 ): Promise<string> {
   const formData = doc.formData as TFormData;

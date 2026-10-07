@@ -60,7 +60,7 @@ export const SIGNABLE_DOCUMENT_REGISTRY: Record<SignableDocumentType, SignableDo
   master_w2_executive_agreement: { label: "W-2 Executive Exempt Management Agreement", internalPath: "/fill-master-w2-executive-agreement", externalPath: "/fill-master-w2-executive-agreement" },
   // Sent to everyone (every checklist tier). Login-only like the Master
   // agreements — recipients are existing AHS staff.
-  confidentiality_noncompete_agreement: { label: "Confidentiality & Non-Compete Agreement", internalPath: "/fill-confidentiality-noncompete-agreement", externalPath: "/fill-confidentiality-noncompete-agreement" },
+  confidentiality_noncompete_agreement: { label: "Master Confidentiality & Non-Compete Agreement", internalPath: "/fill-confidentiality-noncompete-agreement", externalPath: "/fill-confidentiality-noncompete-agreement" },
   // Signer is always an AHS teammate (a manager/HR staffer countersigning a
   // company-generated certificate) — same "internal recipients only"
   // reasoning as master_w2_agreement above, no external/no-login variant.

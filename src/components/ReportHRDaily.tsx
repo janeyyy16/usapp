@@ -6039,7 +6039,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     try {
       setSentConfidentialityNonCompeteAgreementForms(await getSignableDocuments("confidentiality_noncompete_agreement"));
     } catch (err) {
-      console.error("Failed to load sent Confidentiality & Non-Compete Agreement forms:", err);
+      console.error("Failed to load sent Master Confidentiality & Non-Compete Agreement forms:", err);
     }
   };
   useEffect(() => {
@@ -6158,7 +6158,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       if (!recipient) throw new Error("Select a recipient first.");
 
       const alreadySent = await getExistingActiveDocumentTypes(recipient.id, ["confidentiality_noncompete_agreement"]);
-      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Confidentiality & Non-Compete Agreement on file. Send another one anyway?`)) {
+      if (alreadySent.length > 0 && !window.confirm(`${recipient.name} already has a Master Confidentiality & Non-Compete Agreement on file. Send another one anyway?`)) {
         return;
       }
 
@@ -6204,7 +6204,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   const handleDownloadConfidentialityNonCompeteAgreementPdf = async (doc: SignableDocument) => {
     if (!doc.pdfUrl) return;
     const name = (doc.formData as Partial<ConfidentialityNonCompeteAgreementFormData>).employeeName || doc.recipientName || "confidentiality-noncompete-agreement";
-    await downloadSignableDocumentPdf(doc.pdfUrl, `Confidentiality & Non-Compete Agreement - ${name}.pdf`);
+    await downloadSignableDocumentPdf(doc.pdfUrl, `Master Confidentiality & Non-Compete Agreement - ${name}.pdf`);
   };
 
   /** Re-renders this document's PDF from its already-stored data (employee/employer signatures are inline data: URLs in form_data, no CORS resolution needed) — see regenerateSignableDocumentPdf.ts's header comment. */
@@ -6239,7 +6239,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   };
 
   const handleDeleteConfidentialityNonCompeteAgreement = async (doc: SignableDocument) => {
-    if (!window.confirm("Permanently delete this Confidentiality & Non-Compete Agreement request?")) return;
+    if (!window.confirm("Permanently delete this Master Confidentiality & Non-Compete Agreement request?")) return;
     setConfidentialityNonCompeteAgreementActionBusyId(doc.id);
     setConfidentialityNonCompeteAgreementActionError(null);
     try {
@@ -12823,7 +12823,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   // and a pre-rendered PDF before they can be created, so they can't be
   // blank-generated from a checkbox the way these can.
   const GENERAL_FORM_TYPES: { type: SignableDocumentType; label: string }[] = [
-    { type: "confidentiality_noncompete_agreement", label: "Confidentiality & Non-Compete Agreement" },
+    { type: "confidentiality_noncompete_agreement", label: "Master Confidentiality & Non-Compete Agreement" },
     { type: "w8ben", label: "Form W-8BEN" },
     { type: "w4", label: "Form W-4" },
   ];
@@ -12870,7 +12870,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     { type: "direct_deposit", label: "Direct Deposit Authorization" },
     { type: "ssn_card_form", label: "SSN Card" },
     { type: "drivers_license_form", label: "Driver's License" },
-    { type: "confidentiality_noncompete_agreement", label: "Confidentiality & Non-Compete Agreement" },
+    { type: "confidentiality_noncompete_agreement", label: "Master Confidentiality & Non-Compete Agreement" },
   ];
   const NEW_OFFICE_BULK_FORM_TYPES: { type: SignableDocumentType; label: string }[] = [
     { type: "master_w2_office_agreement", label: "Master W-2 Office Agreement" },
@@ -12879,20 +12879,20 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     { type: "direct_deposit", label: "Direct Deposit Authorization" },
     { type: "ssn_card_form", label: "SSN Card" },
     { type: "drivers_license_form", label: "Driver's License" },
-    { type: "confidentiality_noncompete_agreement", label: "Confidentiality & Non-Compete Agreement" },
+    { type: "confidentiality_noncompete_agreement", label: "Master Confidentiality & Non-Compete Agreement" },
   ];
   const NEW_PH_BULK_FORM_TYPES: { type: SignableDocumentType; label: string }[] = [
     { type: "master_ph_contractor_agreement", label: "Master PH Contractor Agreement" },
     { type: "w8ben", label: "Form W-8BEN" },
     { type: "direct_deposit", label: "Direct Deposit Authorization" },
-    { type: "confidentiality_noncompete_agreement", label: "Confidentiality & Non-Compete Agreement" },
+    { type: "confidentiality_noncompete_agreement", label: "Master Confidentiality & Non-Compete Agreement" },
   ];
   // Matches newAutomationFormsManagementTabs (BM, SBS, Tech Director, Tech
   // Assistant Director Forms).
   const NEW_MANAGEMENT_BULK_FORM_TYPES: { type: SignableDocumentType; label: string }[] = [
     { type: "master_w2_executive_agreement", label: "W-2 Executive Exempt Management Agreement" },
     { type: "direct_deposit", label: "Direct Deposit Authorization" },
-    { type: "confidentiality_noncompete_agreement", label: "Confidentiality & Non-Compete Agreement" },
+    { type: "confidentiality_noncompete_agreement", label: "Master Confidentiality & Non-Compete Agreement" },
   ];
 
   const [combineFormsRecipientId, setCombineFormsRecipientId] = useState("");
@@ -17733,7 +17733,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     { key: "combineForms", label: "Bulk Form Send", count: 0, icon: Link2 },
     { key: "employerQueue", label: "Bulk Sign", count: employerAwaitingRows.length, icon: CheckCircle },
     { key: "coe", label: "Certificate of Employment", count: 0, icon: CheckCircle },
-    { key: "confidentialityNonCompeteAgreement", label: "Confidentiality & Non-Compete Agreement", count: sentConfidentialityNonCompeteAgreementAwaitingEmployerCount, icon: FileText },
+    { key: "confidentialityNonCompeteAgreement", label: "Master Confidentiality & Non-Compete Agreement", count: sentConfidentialityNonCompeteAgreementAwaitingEmployerCount, icon: FileText },
     { key: "customForms", label: "Custom Forms", count: newCustomFormSubmissionsCount, icon: FileText },
     { key: "promotionForm", label: "Employee Promotion / Role Change", count: 0, icon: FileText },
     { key: "compensationUpdate", label: "Promotion Paper and Wage Increase", count: 0, icon: FileText },
@@ -29844,7 +29844,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       <>
       <div className="panel p-0 overflow-visible mt-4 relative z-20">
         <div className="px-4 py-4 border-b border-white/10">
-          <h2 className="font-semibold text-sm">Send Confidentiality & Non-Compete Agreement Request</h2>
+          <h2 className="font-semibold text-sm">Send Master Confidentiality & Non-Compete Agreement Request</h2>
           <p className="text-[10px] text-muted-foreground mt-0.5">Pick a teammate — they'll get a link to fill in their legal name and address and sign. Once they submit, it lands back here for an employer representative to countersign. For everyone (all Staff Form Checklist groups).</p>
         </div>
         <div className="p-4 flex flex-col md:flex-row gap-6">
@@ -29911,7 +29911,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                 {confidentialityNonCompeteAgreementPreviewLoading || !confidentialityNonCompeteAgreementPreviewPdfUrl ? (
                   <div className="h-full flex items-center justify-center text-sm text-muted-foreground" style={{ minHeight: 560 }}>Loading preview…</div>
                 ) : (
-                  <iframe src={confidentialityNonCompeteAgreementPreviewPdfUrl} title="Confidentiality & Non-Compete Agreement Preview" className="w-full border-0" style={{ height: 560 }} />
+                  <iframe src={confidentialityNonCompeteAgreementPreviewPdfUrl} title="Master Confidentiality & Non-Compete Agreement Preview" className="w-full border-0" style={{ height: 560 }} />
                 )}
               </div>
             ) : (
@@ -29925,7 +29925,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
 
       <div className="panel p-0 overflow-hidden mt-4">
         <div className="px-4 py-4 border-b border-white/10">
-          <h2 className="font-semibold text-sm">Sent Confidentiality & Non-Compete Agreement Forms</h2>
+          <h2 className="font-semibold text-sm">Sent Master Confidentiality & Non-Compete Agreement Forms</h2>
           <p className="text-[10px] text-muted-foreground mt-0.5">Track completion status. "Awaiting Employer Signature" means the employee finished — add your signature to finalize.</p>
         </div>
         <div className="px-4 py-3 border-b border-white/10 bg-white/5 flex flex-wrap items-end gap-3">
@@ -30139,7 +30139,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
               </div>
             </div>
             <div className="flex-1 overflow-hidden bg-slate-950">
-              {confidentialityNonCompeteAgreementDocPreview.pdfUrl && <iframe src={confidentialityNonCompeteAgreementDocPreview.pdfUrl} title="Confidentiality & Non-Compete Agreement" className="w-full h-full min-h-[70vh] border-0" />}
+              {confidentialityNonCompeteAgreementDocPreview.pdfUrl && <iframe src={confidentialityNonCompeteAgreementDocPreview.pdfUrl} title="Master Confidentiality & Non-Compete Agreement" className="w-full h-full min-h-[70vh] border-0" />}
             </div>
           </div>
         </div>
