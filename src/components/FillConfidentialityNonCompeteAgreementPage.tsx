@@ -19,10 +19,11 @@ import { FillFormSignInRequired } from "@/components/FillFormSignInRequired";
 import { getMyProfileId } from "@/lib/supabase/users";
 import { getSignableDocument, signDocument, type SignableDocument } from "@/lib/supabase/signableDocuments";
 import { uploadSignableDocumentSignature, uploadConfidentialityNonCompeteAgreementForm, refreshStorageAuthToken } from "@/lib/firebase/storage";
-import { captureHtmlToPdfBlob, loadAssetDataUrl } from "@/lib/pdfCapture";
+import { loadAssetDataUrl } from "@/lib/pdfCapture";
 import {
   confidentialityNonCompeteAgreementStyles,
   buildConfidentialityNonCompeteAgreementBodyMarkup,
+  captureConfidentialityNonCompeteAgreementPdf,
   type ConfidentialityNonCompeteAgreementFormData,
 } from "@/lib/confidentialityNonCompeteAgreementFormTemplate";
 import { getOrCreateDmThread, sendMessage } from "@/lib/supabase/messaging";
@@ -140,7 +141,7 @@ export function FillConfidentialityNonCompeteAgreementPage({ docId }: Props) {
       };
       const entry = { name: displayName || finalData.employeeName || "Signed", url: signatureUrl, signedAt };
 
-      const pdfBlob = await captureHtmlToPdfBlob(buildConfidentialityNonCompeteAgreementBodyMarkup(finalData, logoDataUrl), confidentialityNonCompeteAgreementStyles);
+      const pdfBlob = await captureConfidentialityNonCompeteAgreementPdf(finalData, logoDataUrl);
       const pdfUrl = await uploadConfidentialityNonCompeteAgreementForm(companyId, finalData.employeeName, pdfBlob);
 
       await signDocument(doc.id, "employee", entry, pdfUrl, finalData as unknown as Record<string, any>);

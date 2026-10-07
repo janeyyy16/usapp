@@ -101,7 +101,7 @@ import { masterW2AgreementStyles, buildMasterW2AgreementBodyMarkup, type MasterW
 import { masterW2OfficeAgreementStyles, buildMasterW2OfficeAgreementBodyMarkup, type MasterW2OfficeAgreementFormData } from "@/lib/masterW2OfficeAgreementFormTemplate";
 import { masterPhContractorAgreementStyles, buildMasterPhContractorAgreementBodyMarkup, type MasterPhContractorAgreementFormData } from "@/lib/masterPhContractorAgreementFormTemplate";
 import { masterW2ExecutiveAgreementStyles, buildMasterW2ExecutiveAgreementBodyMarkup, type MasterW2ExecutiveAgreementFormData } from "@/lib/masterW2ExecutiveAgreementFormTemplate";
-import { confidentialityNonCompeteAgreementStyles, buildConfidentialityNonCompeteAgreementBodyMarkup, type ConfidentialityNonCompeteAgreementFormData } from "@/lib/confidentialityNonCompeteAgreementFormTemplate";
+import { confidentialityNonCompeteAgreementStyles, buildConfidentialityNonCompeteAgreementBodyMarkup, captureConfidentialityNonCompeteAgreementPdf, type ConfidentialityNonCompeteAgreementFormData } from "@/lib/confidentialityNonCompeteAgreementFormTemplate";
 import { getTechnicianIdDocumentUrl } from "@/lib/supabase/technicianIdDocuments";
 import {
   createSignableDocument,
@@ -6139,7 +6139,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     try {
       const recipientName = employees.find((e) => e.id === confidentialityNonCompeteAgreementRecipientId)?.name || "";
       const logo = confidentialityNonCompeteAgreementLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
-      const pdfBlob = await captureHtmlToPdfBlob(buildConfidentialityNonCompeteAgreementBodyMarkup(buildConfidentialityNonCompeteAgreementPreviewData(recipientName), logo), confidentialityNonCompeteAgreementStyles);
+      const pdfBlob = await captureConfidentialityNonCompeteAgreementPdf(buildConfidentialityNonCompeteAgreementPreviewData(recipientName), logo);
       const url = URL.createObjectURL(pdfBlob);
       setConfidentialityNonCompeteAgreementPreviewPdfUrl(url);
     } catch (err) {
@@ -6215,7 +6215,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
     try {
       const logo = confidentialityNonCompeteAgreementLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
       if (!confidentialityNonCompeteAgreementLogoDataUrl) setConfidentialityNonCompeteAgreementLogoDataUrl(logo);
-      await regenerateMasterAgreementPdf(doc, logo, buildConfidentialityNonCompeteAgreementBodyMarkup, confidentialityNonCompeteAgreementStyles, uploadConfidentialityNonCompeteAgreementForm, name);
+      await regenerateMasterAgreementPdf(doc, logo, buildConfidentialityNonCompeteAgreementBodyMarkup, confidentialityNonCompeteAgreementStyles, uploadConfidentialityNonCompeteAgreementForm, name, captureConfidentialityNonCompeteAgreementPdf);
       await loadSentConfidentialityNonCompeteAgreementForms();
     } catch (err) {
       setConfidentialityNonCompeteAgreementActionError(err instanceof Error ? err.message : "Failed to regenerate PDF.");
@@ -6310,7 +6310,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
       };
 
       const logo = confidentialityNonCompeteAgreementLogoDataUrl || (await loadImageDataUrl(() => import("@/assets/us-in-home-services-logo.png")));
-      const pdfBlob = await captureHtmlToPdfBlob(buildConfidentialityNonCompeteAgreementBodyMarkup(merged, logo), confidentialityNonCompeteAgreementStyles);
+      const pdfBlob = await captureConfidentialityNonCompeteAgreementPdf(merged, logo);
       const pdfUrl = await uploadConfidentialityNonCompeteAgreementForm(confidentialityNonCompeteAgreementEmployerDialog.companyId, existing.employeeName || "confidentiality-noncompete-agreement", pdfBlob);
 
       const entry = { name: displayName || "HR", url: signatureUrl, signedAt };

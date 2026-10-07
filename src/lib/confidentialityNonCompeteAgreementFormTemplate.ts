@@ -12,6 +12,8 @@
  * employee signs.
  */
 
+import { captureHtmlPagesToPdfBlob } from "./pdfCapture";
+
 export interface ConfidentialityNonCompeteAgreementFormData {
   /** The employee's profile id — not shown on the document, carried along for lookups. */
   employeeId: string;
@@ -49,7 +51,9 @@ function dateParts(iso: string): { day: string; month: string; year: string; ful
 
 export const confidentialityNonCompeteAgreementStyles = `
   .cnc-container * { margin: 0; padding: 0; box-sizing: border-box; }
-  .cnc-container { width: 816px; background: #fff; padding: 56px 64px; position: relative; font-family: Arial, Helvetica, sans-serif; color: #111827; font-size: 11px; line-height: 1.5; }
+  /* border-box: the PDF capture renders into an 816px-wide frame, so the
+     page — margins included — must fit inside 816px or its right edge is cut. */
+  .cnc-container { box-sizing: border-box; width: 816px; background: #fff; padding: 56px 64px; position: relative; font-family: Arial, Helvetica, sans-serif; color: #111827; font-size: 11px; line-height: 1.5; }
   .cnc-header { text-align: center; margin-bottom: 10px; }
   .cnc-header h1 { font-size: 14px; letter-spacing: 0.2px; line-height: 1.35; }
   .cnc-p { margin: 6px 0; text-align: justify; }
@@ -58,7 +62,9 @@ export const confidentialityNonCompeteAgreementStyles = `
   .cnc-center { text-align: center; font-weight: 700; margin: 12px 0 4px; }
   .cnc-bullet { padding: 2px 0 2px 14px; position: relative; text-align: justify; }
   .cnc-bullet::before { content: "•"; position: absolute; left: 0; }
-  .cnc-fill { font-weight: 700; border-bottom: 1px solid #111827; padding: 0 3px; }
+  /* text-decoration (not border-bottom): a wrapped fill-in (a long address)
+     keeps its underline under the words only in the PDF capture. */
+  .cnc-fill { font-weight: 700; text-decoration: underline; padding: 0 3px; }
   .cnc-line { display: inline-block; border-bottom: 1px solid #111827; }
   .cnc-sign-block { margin-top: 14px; }
   .cnc-sign-title { font-weight: 700; margin-bottom: 6px; }
@@ -66,7 +72,13 @@ export const confidentialityNonCompeteAgreementStyles = `
   .cnc-sign-field { display: flex; align-items: flex-end; gap: 6px; }
   .cnc-sign-field .cnc-val { display: inline-flex; align-items: flex-end; min-width: 150px; min-height: 30px; border-bottom: 1px solid #111827; padding: 0 3px; font-weight: 700; }
   .cnc-sig-img { max-height: 34px; max-width: 160px; object-fit: contain; }
+  /* PDF pages: exactly one US Letter page each (816 x 1056 at 96dpi). */
+  .cnc-page { height: 1056px; overflow: hidden; }
+  .cnc-page-footer { position: absolute; left: 0; right: 0; bottom: 28px; text-align: center; font-size: 9.5px; color: #6b7280; }
 `;
+
+// Where the PDF splits into page 2 (an HTML comment — invisible on screen).
+const PAGE_BREAK = "<!--cnc-page-break-->";
 
 function signField(label: string, inner: string, minWidth = 150) {
   return `<div class="cnc-sign-field">${escapeHtml(label)}: <span class="cnc-val" style="min-width:${minWidth}px">${inner || "&nbsp;"}</span></div>`;
@@ -107,6 +119,7 @@ export function buildConfidentialityNonCompeteAgreementBodyMarkup(data: Confiden
       <p class="cnc-bullet">Any conflict of interest or dual employment involving active Company personnel.</p>
       <p class="cnc-p">2.2. Ban on Concealment &amp; Complicity: Silence, failure to disclose, or concealment of any competing activities, poaching efforts, or internal sabotage shall constitute a material breach of this Agreement, breach of fiduciary duty, and gross misconduct, subjecting Employee to immediate termination for cause and civil liability for damages.</p>
 
+      ${PAGE_BREAK}
       <p class="cnc-section-title">SECTION 3. RESTRICTIVE COVENANTS (NON-SOLICITATION &amp; NON-COMPETE)</p>
       <p class="cnc-p">3.1. Non-Solicitation of Personnel (Broad Scope): During employment and for a period of two (2) years following the termination of employment for any reason (the "Restricted Period"), Employee shall not, directly or indirectly, solicit, induce, recruit, hire, attempt to hire, or encourage to leave the Company:</p>
       <p class="cnc-bullet">Any field technician, branch manager, administrative officer, or employee of the Company.</p>
@@ -123,6 +136,7 @@ export function buildConfidentialityNonCompeteAgreementBodyMarkup(data: Confiden
       <p class="cnc-p">5.2. Liquidated &amp; Compensatory Damages: In addition to injunctive relief, the Company shall be entitled to recover full monetary damages, disgorgement of any profits or compensation earned by Employee as a result of the breach, and financial restitution for lost business or diverted personnel.</p>
       <p class="cnc-p">5.3. Full Recovery of Attorney’s Fees &amp; Legal Costs: In the event of any legal action, arbitration, or litigation arising out of or related to the enforcement of this Agreement, the prevailing party (and specifically the Company if enforcing its rights) shall be entitled to recover from the breaching party all attorneys' fees, court costs, expert witness fees, and litigation expenses incurred.</p>
 
+      ${PAGE_BREAK}
       <p class="cnc-section-title">SECTION 6. GOVERNING LAW, JURISDICTION &amp; SEVERABILITY</p>
       <p class="cnc-p">6.1. Governing Law &amp; Venue: This Agreement shall be governed by, construed, and enforced in accordance with the laws of the State of Tennessee, without regard to its conflict of law principles. Any legal action arising hereunder shall be brought exclusively in the state or federal courts located in Shelby County, Tennessee, and Employee consents to personal jurisdiction therein.</p>
       <p class="cnc-p">6.2. Severability &amp; Blue-Penciling: If any provision, clause, or restriction of this Agreement is held by a court to be invalid, illegal, or unenforceable, such provision shall be deemed modified ("blue-penciled") to the minimum extent necessary to make it valid and enforceable, and the remaining provisions of this Agreement shall remain in full force and effect.</p>
@@ -150,4 +164,25 @@ export function buildConfidentialityNonCompeteAgreementBodyMarkup(data: Confiden
       </div>
     </div>
   `;
+}
+
+/**
+ * The same document as three separate US Letter pages (1: through Section
+ * 2; 2: Sections 3–5; 3: Section 6 and the signatures), each with "Page X of 3" —
+ * for the PDF. buildConfidentialityNonCompeteAgreementBodyMarkup stays one
+ * continuous document for the on-screen preview.
+ */
+export function buildConfidentialityNonCompeteAgreementPages(data: ConfidentialityNonCompeteAgreementFormData, logoDataUrl: string): string[] {
+  const full = buildConfidentialityNonCompeteAgreementBodyMarkup(data, logoDataUrl);
+  const open = full.indexOf(`<div class="cnc-container">`) + `<div class="cnc-container">`.length;
+  const close = full.lastIndexOf("</div>");
+  const parts = full.slice(open, close).split(PAGE_BREAK);
+  return parts.map(
+    (inner, i) => `<div class="cnc-container cnc-page">${inner}<div class="cnc-page-footer">Page ${i + 1} of ${parts.length}</div></div>`,
+  );
+}
+
+/** The finished PDF — real Letter pages (three). */
+export function captureConfidentialityNonCompeteAgreementPdf(data: ConfidentialityNonCompeteAgreementFormData, logoDataUrl: string): Promise<Blob> {
+  return captureHtmlPagesToPdfBlob(buildConfidentialityNonCompeteAgreementPages(data, logoDataUrl), confidentialityNonCompeteAgreementStyles);
 }
