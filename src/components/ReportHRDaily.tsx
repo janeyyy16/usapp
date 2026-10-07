@@ -16905,6 +16905,12 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
   // Parts Manager and Parts — no longer split by branch (was earlier),
   // now one merged group sorted by this hierarchy instead, same shape as
   // Current Technicians/Tech Support.
+  // "BizOps and IT" splits into two blocks: BizOps staff (by their primary
+  // role, however their department is spelled — "Biz Ops" / "BizOps" /
+  // "BizOps and IT") and everyone else there, i.e. people pulled in by an IT
+  // role (see resolveMasterListDepartment).
+  const BIZOPS_IT_ORDER = ["BizOps", "IT"];
+  const bizOpsItLabel = (e: Employee): string => (normalizeRole(e.position).includes("BIZOPS") ? "BizOps" : "IT");
   const PARTS_ORDER = ["Senior Manager", "Assistant Manager", "Parts Manager", "Team Leader Parts", "Parts"];
   const partsLabel = (e: Employee): string | null => {
     if (resolveMasterListDepartment(e) !== "Parts Manager and Parts") return null;
@@ -19881,12 +19887,14 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                       ? (techSupportLabel(e) ?? masterDept)
                       : masterDept === "Parts Manager and Parts"
                       ? (partsLabel(e) ?? masterDept)
+                      : masterDept === "BizOps and IT"
+                      ? bizOpsItLabel(e)
                       : resolveSpecificDepartment(e);
                     if (!byDept.has(dept)) byDept.set(dept, []);
                     byDept.get(dept)!.push(e);
                   }
                   const tierGroupIndex = (name: string): number => {
-                    for (const order of [HR_ACCOUNTING_CSR_ORDER, CURRENT_TECHNICIANS_ORDER, TECH_SUPPORT_ORDER, PARTS_ORDER]) {
+                    for (const order of [HR_ACCOUNTING_CSR_ORDER, CURRENT_TECHNICIANS_ORDER, TECH_SUPPORT_ORDER, PARTS_ORDER, BIZOPS_IT_ORDER]) {
                       const idx = order.indexOf(name);
                       if (idx !== -1) return idx;
                     }
