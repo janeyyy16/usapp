@@ -58,6 +58,9 @@ export const SIGNABLE_DOCUMENT_REGISTRY: Record<SignableDocumentType, SignableDo
   // Same reasoning as master_w2_agreement above — BM/SBS/Director recipients
   // are all existing AHS employees, not outside candidates.
   master_w2_executive_agreement: { label: "W-2 Executive Exempt Management Agreement", internalPath: "/fill-master-w2-executive-agreement", externalPath: "/fill-master-w2-executive-agreement" },
+  // Sent to everyone (every checklist tier). Login-only like the Master
+  // agreements — recipients are existing AHS staff.
+  confidentiality_noncompete_agreement: { label: "Confidentiality & Non-Compete Agreement", internalPath: "/fill-confidentiality-noncompete-agreement", externalPath: "/fill-confidentiality-noncompete-agreement" },
   // Signer is always an AHS teammate (a manager/HR staffer countersigning a
   // company-generated certificate) — same "internal recipients only"
   // reasoning as master_w2_agreement above, no external/no-login variant.
@@ -110,6 +113,7 @@ export const TECHNICIAN_FORM_TYPES: SignableDocumentType[] = [
   "substance_screening",
   "w4",
   "i9",
+  "confidentiality_noncompete_agreement",
 ];
 
 /**
@@ -121,10 +125,10 @@ export const TECHNICIAN_FORM_TYPES: SignableDocumentType[] = [
  * below) to let HR quick-select a candidate's forms by role/tier instead of
  * checking each one by hand.
  */
-export const NEW_TECHNICIAN_FORM_TYPES: SignableDocumentType[] = ["master_w2_agreement", "w4", "i9", "direct_deposit", "ssn_card_form", "drivers_license_form"];
-export const OFFICE_STAFF_US_FORM_TYPES: SignableDocumentType[] = ["master_w2_office_agreement", "w4", "i9", "direct_deposit", "ssn_card_form", "drivers_license_form"];
-export const PH_STAFF_FORM_TYPES: SignableDocumentType[] = ["master_ph_contractor_agreement", "w8ben", "direct_deposit", "valid_id_form"];
-export const BM_AND_UP_FORM_TYPES: SignableDocumentType[] = ["master_w2_executive_agreement", "direct_deposit"];
+export const NEW_TECHNICIAN_FORM_TYPES: SignableDocumentType[] = ["master_w2_agreement", "w4", "i9", "direct_deposit", "ssn_card_form", "drivers_license_form", "confidentiality_noncompete_agreement"];
+export const OFFICE_STAFF_US_FORM_TYPES: SignableDocumentType[] = ["master_w2_office_agreement", "w4", "i9", "direct_deposit", "ssn_card_form", "drivers_license_form", "confidentiality_noncompete_agreement"];
+export const PH_STAFF_FORM_TYPES: SignableDocumentType[] = ["master_ph_contractor_agreement", "w8ben", "direct_deposit", "valid_id_form", "confidentiality_noncompete_agreement"];
+export const BM_AND_UP_FORM_TYPES: SignableDocumentType[] = ["master_w2_executive_agreement", "direct_deposit", "confidentiality_noncompete_agreement"];
 
 export type StaffFormTier = "newTechnician" | "officeStaffUs" | "phStaff" | "bmAndUp";
 

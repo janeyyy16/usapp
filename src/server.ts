@@ -21,6 +21,7 @@ import { handleGmailRequest } from "./lib/server/gmailBridge";
 import { handleRunAttendanceAlertsRequest } from "./lib/server/attendanceAlerts";
 import { handleRunFlashTechOpenAlertsRequest } from "./lib/server/flashTechOpenAlerts";
 import { handleAdminPasswordRequest } from "./lib/server/adminPasswordBridge";
+import { handleDefaultPasswordRequest } from "./lib/server/defaultPasswordBridge";
 import { handleLoginLockoutRequest } from "./lib/server/loginLockoutBridge";
 import { handlePasswordResetRequest } from "./lib/server/passwordResetRequestBridge";
 import { handleItBypassLoginRequest } from "./lib/server/itBypassLoginBridge";
@@ -220,6 +221,10 @@ export default {
       const merged = await resolveServerEnv(env);
       return await handleAdminPasswordRequest(request, merged);
     }
+    if (url.pathname === "/api/default-password") {
+      const merged = await resolveServerEnv(env);
+      return await handleDefaultPasswordRequest(request, merged);
+    }
     if (url.pathname === "/api/it-bypass-login") {
       const merged = await resolveServerEnv(env);
       return await handleItBypassLoginRequest(request, merged);
@@ -249,6 +254,16 @@ export default {
         ).then(
           (result) => console.log("attendanceAlerts:", JSON.stringify(result)),
           (error) => console.error("attendanceAlerts failed:", error),
+        ),
+      );
+      // Late clock-out check: Time Out later than last Work Done + drive
+      // home/branch + 10 min -> HR is notified (lateClockOutCheck.ts, 0362).
+      ctx.waitUntil(
+        import("./lib/server/lateClockOutCheck").then(
+          ({ runLateClockOutCheck }) => runLateClockOutCheck(merged),
+        ).then(
+          (result) => { if (result.checked || result.errors.length) console.log("lateClockOutCheck:", JSON.stringify(result)); },
+          (error) => console.error("lateClockOutCheck failed:", error),
         ),
       );
       // Force-clock-out technicians who never clocked out — resolved per

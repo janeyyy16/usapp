@@ -42,12 +42,20 @@ function Landing() {
   // Below lg, the sign-in card lives behind a "Login" button instead of
   // always inline — this is that bottom sheet's open state.
   const [mobileSignInOpen, setMobileSignInOpen] = useState(false);
-  // "Forgot password?" — there's no self-service email reset in this app;
-  // this just queues a request for IT/HR to see and follow up on directly
-  // (see LoginSecurityPage.tsx's "Password Reset Requests" tab).
+  // "Forgot password?" — username + Unique ID, then a code emailed to the
+  // address on file; the code resets the password (passwordResetRequestBridge.ts).
   const [forgotOpen, setForgotOpen] = useState(false);
-  const [forgotForm, setForgotForm] = useState({ fullName: "", username: "", email: "" });
+  const [forgotForm, setForgotForm] = useState({ username: "", company: "" });
+  // The username is checked as it's typed: does it exist, and which (masked) email the password goes to.
+  const [forgotLookup, setForgotLookup] = useState<{ status: "idle" | "checking" | "missing" | "found" | "error"; maskedEmail?: string | null; badCompany?: boolean }>({ status: "idle" });
+  // After a reset request: the email it went to, for the "check your inbox" screen.
+  const [forgotSentTo, setForgotSentTo] = useState<string | null>(null);
   const [forgotSubmitting, setForgotSubmitting] = useState(false);
+  // Set once the confirmation code is emailed: where it went (masked). The code typed back.
+  const [forgotCodeSentTo, setForgotCodeSentTo] = useState<string | null>(null);
+  const [forgotCode, setForgotCode] = useState("");
+  // The server refused another code (hourly limit) — offer to type the one they already have.
+  const [forgotCodeLimit, setForgotCodeLimit] = useState(false);
 
   // The landing page always shows the light theme, regardless of whatever
   // dark/light preference the visitor has stored (lib/theme.tsx persists
@@ -235,10 +243,62 @@ function Landing() {
     }
   };
 
+  // Opening Forgot Password carries over the Unique ID already typed on the sign-in form.
+  useEffect(() => {
+    if (forgotOpen && form.company.trim()) setForgotForm((f) => (f.company.trim() ? f : { ...f, company: form.company.trim() }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [forgotOpen]);
+
+  // Check the username + Unique ID ~0.4s after typing stops. The Unique ID
+  // matters: the same username can exist in more than one company.
+  useEffect(() => {
+    const u = forgotForm.username.trim();
+    const c = forgotForm.company.trim();
+    if (!forgotOpen || !u || !c) {
+      setForgotLookup({ status: "idle" });
+      return;
+    }
+    setForgotLookup({ status: "checking" });
+    let cancelled = false;
+    const t = window.setTimeout(async () => {
+      try {
+        const res = await fetch("/api/password-reset-request", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "lookup", username: u, companyCode: c }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!res.ok || typeof data.exists !== "boolean") setForgotLookup({ status: "error" });
+        else setForgotLookup(data.exists ? { status: "found", maskedEmail: data.maskedEmail ?? null } : { status: "missing", badCompany: !!data.badCompany });
+      } catch {
+        if (!cancelled) setForgotLookup({ status: "error" });
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [forgotForm.username, forgotForm.company, forgotOpen]);
+
   const submitForgotPassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!forgotForm.fullName.trim() || !forgotForm.username.trim()) {
-      setForgotMsg({ text: "Full name and username are required.", error: true });
+    if (!forgotForm.username.trim()) {
+      setForgotMsg({ text: "Enter your username.", error: true });
+      return;
+    }
+    if (!forgotForm.company.trim()) {
+      setForgotMsg({ text: "Enter your Unique ID.", error: true });
+      return;
+    }
+    if (forgotLookup.status === "missing") {
+      setForgotMsg({ text: forgotLookup.badCompany ? "Unique ID is incorrect." : "Username doesn't exist.", error: true });
+      return;
+    }
+    // Before the code is sent, this button sends it; after, it resets with it.
+    if (!forgotCodeSentTo) return sendForgotCode();
+    if (!/^\d{6}$/.test(forgotCode.trim())) {
+      setForgotMsg({ text: "Enter the 6-digit code from your email.", error: true });
       return;
     }
     setForgotSubmitting(true);
@@ -247,20 +307,68 @@ function Landing() {
       const res = await fetch("/api/password-reset-request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(forgotForm),
+        body: JSON.stringify({ username: forgotForm.username.trim(), companyCode: forgotForm.company.trim(), code: forgotCode.trim() }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setForgotMsg({ text: data.error || "Failed to submit request.", error: true });
+      // Only show "check your email" when the server really handled it.
+      if (!res.ok || data.ok !== true) {
+        setForgotMsg({ text: data.error || "Couldn't reset your password right now — try again, or contact IT on Discord.", error: true });
+        if (data.codeExpired) setForgotCode("");
         return;
       }
-      setForgotMsg({ text: "Request submitted — IT has been notified and will reach out to you shortly." });
-      setForgotForm({ fullName: "", username: "", email: "" });
+      if (data.queued) {
+        // No IT email connected — IT will handle it by hand.
+        setForgotMsg({ text: data.message || "IT has been notified and will reset your password for you." });
+        return;
+      }
+      setForgotSentTo(data.sentTo || "your email");
+      setForgotForm({ username: "", company: forgotForm.company });
+      setForgotCodeSentTo(null);
+      setForgotCode("");
     } catch (error: any) {
       setForgotMsg({ text: error.message || "Failed to submit request.", error: true });
     } finally {
       setForgotSubmitting(false);
     }
+  };
+
+  // Step 1 of the reset: email a 6-digit code to the address on file. Also "Resend code".
+  const sendForgotCode = async () => {
+    setForgotSubmitting(true);
+    setForgotMsg(null);
+    try {
+      const res = await fetch("/api/password-reset-request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "send-code", username: forgotForm.username.trim(), companyCode: forgotForm.company.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok !== true) {
+        setForgotMsg({ text: data.error || "Couldn't send the code right now — try again, or contact IT on Discord.", error: true });
+        setForgotCodeLimit(!!data.codeLimit);
+        return;
+      }
+      setForgotCodeLimit(false);
+      if (data.queued) {
+        setForgotMsg({ text: data.message || "IT has been notified and will reset your password for you." });
+        return;
+      }
+      setForgotCodeSentTo(data.sentTo || "your email");
+      setForgotCode("");
+      setForgotMsg({ text: `Code sent to ${data.sentTo || "your email"}. Check Spam / Junk if you don't see it.` });
+    } catch (error: any) {
+      setForgotMsg({ text: error.message || "Couldn't send the code.", error: true });
+    } finally {
+      setForgotSubmitting(false);
+    }
+  };
+
+  // "I already have a code" — skip sending and go straight to the code box.
+  const useExistingForgotCode = () => {
+    setForgotCodeSentTo(forgotLookup.maskedEmail || "your email");
+    setForgotCode("");
+    setForgotCodeLimit(false);
+    setForgotMsg(null);
   };
 
   // Restore the error message stashed right before the reload above, so it
@@ -512,54 +620,123 @@ function Landing() {
 
       <LiveChatWidget />
 
-      {/* Forgot Password Modal — no self-service email reset in this app;
-          this just queues a request for IT/HR to see and follow up on
-          directly, see LoginSecurityPage.tsx's "Password Reset Requests" tab. */}
-      <Dialog open={forgotOpen} onOpenChange={(v) => { setForgotOpen(v); if (!v) setForgotMsg(null); }}>
+      {/* Forgot Password — username + Unique ID, a code emailed to the address
+          on file, then the server resets to the default password and emails it
+          from IT's Gmail (passwordResetRequestBridge.ts). */}
+      <Dialog open={forgotOpen} onOpenChange={(v) => { setForgotOpen(v); if (!v) { setForgotMsg(null); setForgotSentTo(null); setForgotCodeSentTo(null); setForgotCode(""); setForgotCodeLimit(false); } }}>
         <DialogContent className="bg-card border-white/10">
           <DialogHeader>
             <DialogTitle className="font-display">Forgot Password</DialogTitle>
             <DialogDescription>
-              Submit your details and IT will reach out to help reset your password.
+              {forgotSentTo
+                ? "Check your email for your new password."
+                : forgotCodeSentTo
+                  ? "Enter the code we emailed you to reset your password."
+                  : "Enter your username and Unique ID. We'll email a code to the address on your account to confirm it's you."}
             </DialogDescription>
           </DialogHeader>
-          <form onSubmit={submitForgotPassword} className="space-y-4">
-            <div className="text-xs text-blue-300 bg-blue-500/10 border border-blue-500/30 rounded p-3">
-              This creates an IT support ticket under your name — IT will be notified immediately and will contact you to reset your password.
+          {forgotSentTo ? (
+            <div className="space-y-4">
+              <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-4 text-sm text-emerald-200">
+                Your password has been reset and sent to <strong className="text-white">{forgotSentTo}</strong>.
+              </div>
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p className="font-semibold text-foreground">Where to find your new password</p>
+                <ol className="list-decimal space-y-1 pl-5">
+                  <li>
+                    Open the inbox for <strong className="text-foreground">{forgotSentTo}</strong>.
+                  </li>
+                  <li>
+                    Look for an email titled <strong className="text-foreground">"Password Reset AHS"</strong> from the IT Team. It can take a minute or two — check <strong className="text-foreground">Spam / Junk</strong> too.
+                  </li>
+                  <li>Log in with your username and the password in that email.</li>
+                  <li>You'll be asked to choose your own new password right away.</li>
+                </ol>
+                <p className="text-xs">No email after a few minutes? Contact IT on Discord.</p>
+              </div>
+              <button type="button" className="btn btn-primary w-full justify-center" onClick={() => { setForgotOpen(false); setForgotSentTo(null); }}>
+                Back to sign in
+              </button>
             </div>
-            <label className="block text-sm">
-              <span className="text-muted-foreground text-xs font-semibold uppercase">Full Name</span>
-              <input
-                className="glass-input mt-1 w-full"
-                type="text"
-                value={forgotForm.fullName}
-                onChange={(e) => setForgotForm({ ...forgotForm, fullName: e.target.value })}
-                placeholder="Your full name"
-                disabled={forgotSubmitting}
-              />
-            </label>
+          ) : (
+          <form onSubmit={submitForgotPassword} className="space-y-4">
             <label className="block text-sm">
               <span className="text-muted-foreground text-xs font-semibold uppercase">Account Username</span>
               <input
                 className="glass-input mt-1 w-full"
                 type="text"
+                autoComplete="username"
                 value={forgotForm.username}
-                onChange={(e) => setForgotForm({ ...forgotForm, username: e.target.value })}
+                onChange={(e) => { setForgotForm({ ...forgotForm, username: e.target.value }); setForgotMsg(null); setForgotCodeLimit(false); }}
                 placeholder="Your login username"
-                disabled={forgotSubmitting}
+                disabled={forgotSubmitting || !!forgotCodeSentTo}
+                aria-invalid={forgotLookup.status === "missing" && !forgotLookup.badCompany}
               />
+              {forgotLookup.status === "checking" && <span className="mt-1 block text-xs text-muted-foreground">Checking…</span>}
+              {forgotLookup.status === "missing" && !forgotLookup.badCompany && <span className="mt-1 block text-xs font-semibold text-red-400">Username doesn't exist.</span>}
+              {forgotLookup.status === "error" && (
+                <span className="mt-1 block text-xs font-semibold text-red-400">Couldn't check the username right now — try again in a moment, or contact IT on Discord.</span>
+              )}
             </label>
             <label className="block text-sm">
-              <span className="text-muted-foreground text-xs font-semibold uppercase">Email</span>
+              <span className="text-muted-foreground text-xs font-semibold uppercase">Unique ID</span>
               <input
                 className="glass-input mt-1 w-full"
-                type="email"
-                value={forgotForm.email}
-                onChange={(e) => setForgotForm({ ...forgotForm, email: e.target.value })}
-                placeholder="you@example.com"
-                disabled={forgotSubmitting}
+                type="text"
+                value={forgotForm.company}
+                onChange={(e) => { setForgotForm({ ...forgotForm, company: e.target.value }); setForgotMsg(null); setForgotCodeLimit(false); }}
+                placeholder="Same Unique ID you sign in with"
+                disabled={forgotSubmitting || !!forgotCodeSentTo}
+                aria-invalid={!!forgotLookup.badCompany}
               />
+              {forgotLookup.status === "missing" && forgotLookup.badCompany && <span className="mt-1 block text-xs font-semibold text-red-400">Unique ID is incorrect.</span>}
             </label>
+            <div className="block text-sm">
+              <span className="text-muted-foreground text-xs font-semibold uppercase">Email</span>
+              <div className="glass-input mt-1 w-full select-none opacity-80" aria-live="polite">
+                {forgotLookup.status === "found"
+                  ? forgotLookup.maskedEmail || "No email on your account — IT will help you"
+                  : forgotLookup.status === "checking"
+                    ? "Looking up your account…"
+                    : "Filled in from your account"}
+              </div>
+              <span className="mt-1 block text-xs text-muted-foreground">The code and your new password are sent to the email on your account.</span>
+            </div>
+            {forgotCodeSentTo && (
+              <label className="block text-sm">
+                <span className="text-muted-foreground text-xs font-semibold uppercase">Code from your email</span>
+                <input
+                  className="glass-input mt-1 w-full text-center font-mono text-lg tracking-[0.5em]"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  value={forgotCode}
+                  onChange={(e) => { setForgotCode(e.target.value.replace(/\D/g, "").slice(0, 6)); setForgotMsg(null); }}
+                  placeholder="000000"
+                  disabled={forgotSubmitting}
+                  autoFocus
+                />
+                <span className="mt-1 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span>
+                    Look for <strong className="text-foreground">"Password Reset Code AHS"</strong>. It expires in 24 hours.
+                  </span>
+                  <span className="flex gap-3">
+                    <button type="button" className="underline hover:text-foreground disabled:opacity-50" onClick={sendForgotCode} disabled={forgotSubmitting}>
+                      Resend code
+                    </button>
+                    <button
+                      type="button"
+                      className="underline hover:text-foreground disabled:opacity-50"
+                      onClick={() => { setForgotCodeSentTo(null); setForgotCode(""); setForgotMsg(null); }}
+                      disabled={forgotSubmitting}
+                    >
+                      Use a different account
+                    </button>
+                  </span>
+                </span>
+              </label>
+            )}
             {forgotMsg && (
               <div
                 className={`text-sm rounded p-3 border ${
@@ -569,16 +746,32 @@ function Landing() {
                 }`}
               >
                 {forgotMsg.text}
+                {forgotCodeLimit && !forgotCodeSentTo && (
+                  <button type="button" className="mt-2 block font-semibold underline" onClick={useExistingForgotCode}>
+                    Enter the code I already have
+                  </button>
+                )}
               </div>
             )}
             <button
               type="submit"
               className="btn btn-primary w-full justify-center disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={forgotSubmitting}
+              disabled={forgotSubmitting || forgotLookup.status !== "found" || (!!forgotCodeSentTo && forgotCode.length !== 6)}
             >
-              {forgotSubmitting ? "Submitting..." : "Submit Request"}
+              {forgotCodeSentTo ? (forgotSubmitting ? "Resetting…" : "Reset password") : forgotSubmitting ? "Sending code…" : "Send code"}
             </button>
+            {!forgotCodeSentTo && forgotLookup.status === "found" && (
+              <button
+                type="button"
+                className="block w-full text-center text-xs text-muted-foreground underline hover:text-foreground disabled:opacity-50"
+                onClick={useExistingForgotCode}
+                disabled={forgotSubmitting}
+              >
+                Already have a code? Enter it
+              </button>
+            )}
           </form>
+          )}
         </DialogContent>
       </Dialog>
 
