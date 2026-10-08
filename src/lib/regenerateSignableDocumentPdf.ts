@@ -87,6 +87,9 @@ export async function regenerateMasterAgreementPdf<TFormData>(
   /** For a document whose PDF is several real pages (e.g. the Master Confidentiality & Non-Compete Agreement) — replaces the single-page capture. */
   capturePdf?: (data: TFormData, logo: string) => Promise<Blob>
 ): Promise<string> {
+  // A signed paper copy HR scanned in (form_data.paperCopy) has no stored
+  // signatures to re-render from — regenerating would replace the scan.
+  if (doc.formData?.paperCopy) throw new Error("This is a scanned paper copy — there's nothing to regenerate.");
   const formData = doc.formData as TFormData;
   const pdfBlob = capturePdf ? await capturePdf(formData, logoDataUrl) : await captureHtmlToPdfBlob(buildMarkup(formData, logoDataUrl), styles);
   const pdfUrl = await uploadFn(doc.companyId, employeeName, pdfBlob);

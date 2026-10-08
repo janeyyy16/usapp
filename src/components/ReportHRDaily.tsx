@@ -29994,6 +29994,8 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                   const recipient = employees.find((e) => e.id === doc.recipientId);
                   const busy = confidentialityNonCompeteAgreementActionBusyId === doc.id;
                   const awaitingEmployer = isAwaitingEmployerStep(doc);
+                  // Signed on paper and scanned in by HR — the PDF is the scan, nothing to re-render or re-sign.
+                  const paperCopy = !!(doc.formData as { paperCopy?: boolean }).paperCopy;
                   return (
                     <tr key={doc.id} className="border-b border-white/5 hover:bg-white/5">
                       <td className="px-4 py-3 font-medium">
@@ -30016,6 +30018,7 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                         }`}>
                           {confidentialityNonCompeteAgreementStatusLabel(doc)}
                         </span>
+                        {paperCopy && <span className="ml-1.5 px-2 py-1 rounded text-xs font-semibold bg-sky-500/15 text-sky-300" title="Signed on paper and scanned in">Paper copy</span>}
                       </td>
                       <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{new Date(doc.createdAt).toLocaleDateString()}</td>
                       <td className="px-4 py-3">
@@ -30045,12 +30048,12 @@ export function ReportHRDaily({ mod, sub }: { mod: ModuleDef; sub: SubModuleDef 
                               Download PDF
                             </button>
                           )}
-                          {doc.pdfUrl && (
+                          {doc.pdfUrl && !paperCopy && (
                             <button type="button" disabled={busy} onClick={() => void handleRegenerateConfidentialityNonCompeteAgreementPdf(doc)} title="Re-render this PDF from its saved data — fixes a date that was rendered a day early before the timezone bug fix" className="text-amber-300 hover:text-amber-200 underline text-xs disabled:opacity-40">
                               {busy ? "Regenerating…" : "Regenerate PDF"}
                             </button>
                           )}
-                          {doc.status === "confirmed" && (
+                          {doc.status === "confirmed" && !paperCopy && (
                             <button type="button" onClick={() => handleReopenConfidentialityNonCompeteAgreementEmployer(doc)} className="btn text-[10px] px-2 py-1" title="Redo the employer signature — keeps the employee's original signature">
                               Re-sign
                             </button>
