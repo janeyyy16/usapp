@@ -115,7 +115,7 @@ import { LocationSharingBadge } from "@/components/LocationSharingBadge";
 import { OfflineQueueBadge } from "@/components/OfflineQueueBadge";
 import { uploadTicketSignature, uploadPayrollDisputeAttachment, uploadTicketTimeDisputeAttachment } from "@/lib/firebase/storage";
 import { getTechnicianTodayRoute, type TechnicianRouteStop } from "@/lib/supabase/technicianWhereabouts";
-import { getCompanyUsers, type ProfileRow } from "@/lib/supabase/users";
+import { getCompanyUsers, getProfileEmployeeInfo, type ProfileRow } from "@/lib/supabase/users";
 import {
   getBranchDailyReports,
   getBranchDailyReportNotes,
@@ -134,7 +134,7 @@ import { getModelResources, saveModelResources, type ModelResources } from "@/li
 import { getUndismissedMobilePopupAlerts, dismissTicketAlert, type TicketAlert } from "@/lib/supabase/ticketAlerts";
 import { createItTicket, getItTickets, type ItTicketRow, type ItTicketPriority } from "@/lib/supabase/itTickets";
 import { createEmployeeRequest, getCompanyEmployeeRequests, updateEmployeeRequestStatus, canReviewTicketDispute, notifyRequestReviewers, type EmployeeRequestRow } from "@/lib/supabase/employeeRequests";
-import { createPtoRequest, getCompanyPtoRequests, canReviewPtoStage, reviewPtoStage, type PtoType, type PtoRequestRow } from "@/lib/supabase/pto";
+import { createPtoRequest, getCompanyPtoRequests, canReviewPtoStage, reviewPtoStage, isEligibleForPto, ptoEligibleDate, type PtoType, type PtoRequestRow } from "@/lib/supabase/pto";
 import {
   createTimecardCorrection,
   getCompanyTimecardCorrections,
@@ -8812,8 +8812,10 @@ const PTO_TYPE_LABELS: Record<PtoType, string> = {
 // Submit a PTO/Sick/Personal/Unpaid request and track your own — same
 // "submit form + My Requests list" shape as Payroll Dispute above, backed
 // by pto.ts's two-stage manager-then-(HR OR Accounting) approval instead of
-// employee_requests. Unlike EmployeeSelfServicePage.tsx's desktop version,
-// this deliberately skips the tenure-eligibility gate and remaining-balance
+// employee_requests. Paid leave (Vacation / Personal) follows the same
+// 1-year PTO eligibility rule as desktop (isEligibleForPto in pto.ts — the
+// shared function, so the two can't drift). Unlike EmployeeSelfServicePage.tsx's
+// desktop version, this still skips the remaining-balance
 // math (ptoYearWindow/ptoAllowanceForTenureYear, sickYearWindow) — that
 // logic lives only in the desktop page today, and duplicating the
 // anniversary-anchored tenure-year calculation here risks it drifting out
@@ -8841,6 +8843,26 @@ function MobileTimeOffView({ userName, profileId, companyId, role }: { userName:
   const [employeeIdOverride, setEmployeeIdOverride] = useState("");
   const sigPad = useSignaturePad({ width: 400, height: 110, defaultName: userName || "" });
   const needsReport = leaveType !== "Vacation";
+
+  // 1 year with the company before paid leave (Vacation / Personal) — same
+  // rule and dates as desktop. Sick and Unpaid stay available from day one.
+  const [hireDate, setHireDate] = useState<string | null>(null);
+  const [hireDateLoaded, setHireDateLoaded] = useState(false);
+  useEffect(() => {
+    if (!profileId) return;
+    let cancelled = false;
+    getProfileEmployeeInfo(profileId)
+      .then((info) => { if (!cancelled) setHireDate(info?.hireDate || null); })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setHireDateLoaded(true); });
+    return () => { cancelled = true; };
+  }, [profileId]);
+  const myCreatedAt = companyProfiles.find((p) => p.id === profileId)?.created_at ?? null;
+  const ptoEligibilityKnown = hireDateLoaded && !!(hireDate || myCreatedAt);
+  const ptoEligible = ptoEligibilityKnown && isEligibleForPto(hireDate, myCreatedAt);
+  const ptoEligibleOn = ptoEligibleDate(hireDate, myCreatedAt);
+  const isPaidLeave = leaveType === "Vacation" || leaveType === "Personal";
+  const paidLeaveBlocked = isPaidLeave && !ptoEligible;
 
   useEffect(() => {
     getCompanyUsers().then(setCompanyProfiles).catch((e) => console.error("time off: load users failed", e));
@@ -8874,6 +8896,12 @@ function MobileTimeOffView({ userName, profileId, companyId, role }: { userName:
   const submit = async () => {
     if (!profileId) {
       setMsg("Your profile hasn't loaded yet — try again in a moment.");
+      return;
+    }
+    if (paidLeaveBlocked) {
+      setMsg(ptoEligibilityKnown
+        ? `${leaveType} leave needs 1 year with the company — you'll be eligible starting ${ptoEligibleOn}. Sick and Unpaid leave are available now.`
+        : "Checking your PTO eligibility — try again in a moment.");
       return;
     }
     if (!startDate || !endDate) {
@@ -9004,9 +9032,14 @@ function MobileTimeOffView({ userName, profileId, companyId, role }: { userName:
         <div className="mtech-section-title" style={{ marginTop: 0 }}>Leave Type</div>
         <select className="mtech-bill-input full" value={leaveType} onChange={(e) => setLeaveType(e.target.value)}>
           {LEAVE_TYPES.map((t) => (
-            <option key={t} value={t}>{t}</option>
+            <option key={t} value={t}>{t}{(t === "Vacation" || t === "Personal") && ptoEligibilityKnown && !ptoEligible ? " (after 1 year)" : ""}</option>
           ))}
         </select>
+        {paidLeaveBlocked && ptoEligibilityKnown && (
+          <p style={{ marginTop: 6, fontSize: 12, color: "#fbbf24" }}>
+            {leaveType} leave needs 1 year with the company — you'll be eligible starting {ptoEligibleOn}. Sick and Unpaid leave are available now.
+          </p>
+        )}
 
         <div className="mtech-section-title">Position</div>
         <select className="mtech-bill-input full" value={position} onChange={(e) => setPosition(e.target.value)}>
