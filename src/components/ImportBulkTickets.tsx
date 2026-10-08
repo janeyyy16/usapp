@@ -5,7 +5,7 @@
  * src/lib/supabase/ticketBulkImport.ts for the mapping and skip rules.
  */
 import { useRef, useState, type ReactNode } from "react";
-import { CheckCircle2, FileSpreadsheet, Loader2, Upload, XCircle, SkipForward } from "lucide-react";
+import { CheckCircle2, FileSpreadsheet, Loader2, Upload, XCircle, SkipForward, RefreshCw, Minus } from "lucide-react";
 import { AppModal } from "@/components/ui-kit/AppModal";
 import { importTickets, looksLikeTicketExport, readImportFile, type ImportRow, type ImportSummary } from "@/lib/supabase/ticketBulkImport";
 
@@ -32,6 +32,7 @@ function ImportBulkTicketsModal({ onClose }: { onClose: () => void }) {
   const [reading, setReading] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [summary, setSummary] = useState<ImportSummary | null>(null);
+  const [updateTechnicians, setUpdateTechnicians] = useState(false);
 
   const pickFile = async (file: File | undefined) => {
     if (!file) return;
@@ -58,7 +59,7 @@ function ImportBulkTicketsModal({ onClose }: { onClose: () => void }) {
     setStage("importing");
     setError(null);
     try {
-      const result = await importTickets(rows, (done, total) => setProgress({ done, total }));
+      const result = await importTickets(rows, (done, total) => setProgress({ done, total }), { updateTechnicians });
       setSummary(result);
       setStage("done");
     } catch (err) {
@@ -82,7 +83,7 @@ function ImportBulkTicketsModal({ onClose }: { onClose: () => void }) {
   return (
     <AppModal
       title="Import Bulk Tickets"
-      description="Upload a ticket file (.csv, .xlsx or .xls). Ticket numbers already in the system are skipped."
+      description="Upload a ticket file (.csv, .xlsx or .xls). New ticket numbers are added; ones already in the system get their status and schedule updated."
       icon={<FileSpreadsheet className="h-5 w-5" />}
       size="lg"
       busy={busy}
@@ -152,11 +153,23 @@ function ImportBulkTicketsModal({ onClose }: { onClose: () => void }) {
         </button>
       )}
 
+      {stage === "ready" && (
+        <label className="mt-3 flex items-start gap-2 text-sm cursor-pointer">
+          <input type="checkbox" className="mt-0.5" checked={updateTechnicians} onChange={(e) => setUpdateTechnicians(e.target.checked)} />
+          <span>
+            Also update technician assignments
+            <span className="block text-xs text-muted-foreground">
+              Off: a ticket already assigned keeps its technician (only unassigned tickets get the file&apos;s). On: the file&apos;s technician replaces the current one.
+            </span>
+          </span>
+        </label>
+      )}
+
       {stage === "importing" && (
         <div className="py-6">
           <p className="mb-2 text-sm">
             Importing… <span className="font-semibold tabular-nums">{progress.done}</span> of{" "}
-            <span className="tabular-nums">{progress.total}</span> new tickets
+            <span className="tabular-nums">{progress.total}</span> tickets
           </p>
           <div className="h-2 w-full overflow-hidden rounded-full bg-[color-mix(in_oklab,var(--color-foreground)_10%,transparent)]">
             <div
@@ -170,8 +183,10 @@ function ImportBulkTicketsModal({ onClose }: { onClose: () => void }) {
 
       {stage === "done" && summary && (
         <div className="space-y-4">
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
             <Stat icon={<CheckCircle2 className="h-4 w-4" />} label="Added" value={summary.added.length} tone="text-emerald-500" />
+            <Stat icon={<RefreshCw className="h-4 w-4" />} label="Updated" value={summary.updated.length} tone="text-sky-500" />
+            <Stat icon={<Minus className="h-4 w-4" />} label="Unchanged" value={summary.unchanged.length} tone="text-muted-foreground" />
             <Stat icon={<SkipForward className="h-4 w-4" />} label="Skipped" value={skippedCount} tone="text-amber-500" />
             <Stat icon={<XCircle className="h-4 w-4" />} label="Failed" value={summary.failed.length} tone={summary.failed.length ? "text-red-500" : "text-muted-foreground"} />
           </div>
@@ -180,7 +195,9 @@ function ImportBulkTicketsModal({ onClose }: { onClose: () => void }) {
           </p>
 
           <div className="space-y-2 text-sm">
-            <Detail title="Already in the system" items={summary.skippedExisting} />
+            <Detail title="Updated" items={summary.updated.map((u) => `${u.ticketNo} — ${u.changes.join("; ")}`)} />
+            <Detail title="Already in the system, nothing new" items={summary.unchanged} />
+            <Detail title="Already in the system (added by someone else during the import)" items={summary.skippedExisting} />
             <Detail title="Repeated in the file (only the first one was used)" items={summary.skippedDuplicate} />
             <Detail title="No ticket number (spreadsheet rows)" items={summary.skippedMissing.map((n) => `Row ${n}`)} />
             <Detail title="Failed" items={summary.failed.map((f) => `${f.ticketNo} — ${f.error}`)} danger />

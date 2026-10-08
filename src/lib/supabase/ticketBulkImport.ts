@@ -18,14 +18,31 @@
  *   customer_pref <- CxPreferredDate present
  *   customer <- CxUserName / CxAddress1/2 / CxCity / CxState / CxZipCode / CxEmail / phones
  *
- * Skipped (never inserted): no TicketNo, a ticket number already in the
- * system, or a ticket number repeated later in the same file.
+ * A ticket number already in the system is UPDATED, not duplicated — only:
+ *   status         when the file has one and it differs
+ *   schedule_date  when the file has one and it differs
+ *   technician     when the ticket has none yet; replacing an existing
+ *                  assignment only with `updateTechnicians` (off by default —
+ *                  the file is a snapshot and may be older than a dispatch
+ *                  reassignment made in the app)
+ * Blank file values never overwrite anything, and customer details / notes /
+ * visits / parts are never touched. Updates go through import_ticket_updates
+ * (migration 0365) so they're recorded as system changes, not credited to the
+ * person importing.
+ *
+ * Skipped (never inserted): no TicketNo, or a ticket number repeated later in
+ * the same file.
  */
 import * as XLSX from "xlsx";
 import { supabase } from "./client";
 import { invalidateCompanyTicketsCache } from "./tickets";
 
 export type ImportRow = Record<string, string>;
+
+export interface ImportOptions {
+  /** Replace a technician already assigned in the system with the file's. Off by default. */
+  updateTechnicians?: boolean;
+}
 
 export type ImportOutcome =
   | { kind: "added"; ticketNo: string }
@@ -35,6 +52,10 @@ export type ImportOutcome =
 export interface ImportSummary {
   totalRows: number;
   added: string[];
+  /** Existing tickets changed by the file, with what changed ("Status: A → B"). */
+  updated: { ticketNo: string; changes: string[] }[];
+  /** Existing tickets where the file had nothing new. */
+  unchanged: string[];
   skippedExisting: string[];
   skippedDuplicate: string[];
   skippedMissing: number[]; // spreadsheet line numbers
@@ -166,18 +187,63 @@ function toRecords(r: ImportRow) {
     customer_pref: !!get("CxPreferredDate"),
     created_at: callReceived ? new Date(`${callReceived}T12:00:00`).toISOString() : new Date().toISOString(),
   };
-  return { customer, ticket };
+  // rawStatus: the file's own StatusDesc — ticket.status defaults a blank one
+  // for NEW tickets, but only a real value may change an existing ticket.
+  return { customer, ticket, rawStatus: get("StatusDesc") };
 }
 
-/** Ticket numbers (from `ticketNos`) that already exist in the signed-in company. */
-async function existingTicketNos(ticketNos: string[]): Promise<Set<string>> {
-  const found = new Set<string>();
+interface ExistingTicket {
+  status: string;
+  scheduleDate: string;
+  technician: string;
+}
+
+/** The tickets (from `ticketNos`) that already exist in the signed-in company, with the fields an import may update. */
+async function existingTickets(ticketNos: string[]): Promise<Map<string, ExistingTicket>> {
+  const found = new Map<string, ExistingTicket>();
   for (let i = 0; i < ticketNos.length; i += 200) {
-    const { data, error } = await supabase.from("tickets").select("ticket_no").in("ticket_no", ticketNos.slice(i, i + 200));
+    const { data, error } = await supabase
+      .from("tickets")
+      .select("ticket_no, status, schedule_date, technician")
+      .in("ticket_no", ticketNos.slice(i, i + 200));
     if (error) throw new Error(`Couldn't check existing tickets: ${error.message}`);
-    for (const r of data ?? []) found.add(r.ticket_no);
+    for (const r of data ?? []) {
+      found.set(r.ticket_no, {
+        status: (r.status ?? "").trim(),
+        scheduleDate: r.schedule_date ? String(r.schedule_date).slice(0, 10) : "",
+        technician: (r.technician ?? "").trim(),
+      });
+    }
   }
   return found;
+}
+
+type UpdatePayload = { ticket_no: string; status?: string; schedule_date?: string; technician?: string };
+
+/** What the file would change on an existing ticket (no changes = nothing new). */
+function diffExisting(rec: ReturnType<typeof toRecords>, cur: ExistingTicket, opts: ImportOptions): { payload: UpdatePayload; changes: string[] } {
+  const payload: UpdatePayload = { ticket_no: rec.ticket.ticket_no };
+  const changes: string[] = [];
+  const fileStatus = rec.rawStatus;
+  if (fileStatus && fileStatus !== cur.status) {
+    payload.status = fileStatus;
+    changes.push(`Status: ${cur.status || "—"} → ${fileStatus}`);
+  }
+  const fileSched = rec.ticket.schedule_date ?? "";
+  if (fileSched && fileSched !== cur.scheduleDate) {
+    payload.schedule_date = fileSched;
+    changes.push(`Schedule: ${cur.scheduleDate || "—"} → ${fileSched}`);
+  }
+  const fileTech = (rec.ticket.technician ?? "").trim();
+  if (fileTech && fileTech.toLowerCase() !== cur.technician.toLowerCase() && (!cur.technician || opts.updateTechnicians)) {
+    payload.technician = fileTech;
+    changes.push(`Technician: ${cur.technician || "—"} → ${fileTech}`);
+  }
+  return { payload, changes };
+}
+
+function isMissingFunction(err: { code?: string; message?: string }): boolean {
+  return err.code === "PGRST202" || err.code === "42883" || /import_ticket_updates/i.test(err.message ?? "");
 }
 
 async function insertOne(rec: ReturnType<typeof toRecords>): Promise<ImportOutcome> {
@@ -199,8 +265,21 @@ async function insertOne(rec: ReturnType<typeof toRecords>): Promise<ImportOutco
  * Rows are written a few at a time (not one giant insert) so one bad row only
  * fails itself.
  */
-export async function importTickets(rows: ImportRow[], onProgress?: (done: number, total: number) => void): Promise<ImportSummary> {
-  const summary: ImportSummary = { totalRows: rows.length, added: [], skippedExisting: [], skippedDuplicate: [], skippedMissing: [], failed: [] };
+export async function importTickets(
+  rows: ImportRow[],
+  onProgress?: (done: number, total: number) => void,
+  opts: ImportOptions = {}
+): Promise<ImportSummary> {
+  const summary: ImportSummary = {
+    totalRows: rows.length,
+    added: [],
+    updated: [],
+    unchanged: [],
+    skippedExisting: [],
+    skippedDuplicate: [],
+    skippedMissing: [],
+    failed: [],
+  };
 
   const seen = new Set<string>();
   const toInsert: ReturnType<typeof toRecords>[] = [];
@@ -219,17 +298,21 @@ export async function importTickets(rows: ImportRow[], onProgress?: (done: numbe
     toInsert.push(rec);
   });
 
-  const existing = await existingTicketNos(toInsert.map((r) => r.ticket.ticket_no));
+  const existing = await existingTickets(toInsert.map((r) => r.ticket.ticket_no));
+  const updates: { payload: UpdatePayload; changes: string[] }[] = [];
   const fresh = toInsert.filter((r) => {
-    if (existing.has(r.ticket.ticket_no)) {
-      summary.skippedExisting.push(r.ticket.ticket_no);
-      return false;
-    }
-    return true;
+    const cur = existing.get(r.ticket.ticket_no);
+    if (!cur) return true;
+    const d = diffExisting(r, cur, opts);
+    if (d.changes.length === 0) summary.unchanged.push(r.ticket.ticket_no);
+    else updates.push(d);
+    return false;
   });
 
+  const UPDATE_BATCH = 100;
+  const total = fresh.length + updates.length;
   let done = 0;
-  onProgress?.(0, fresh.length);
+  onProgress?.(0, total);
   const POOL = 4;
   for (let i = 0; i < fresh.length; i += POOL) {
     const results = await Promise.all(fresh.slice(i, i + POOL).map(insertOne));
@@ -239,9 +322,29 @@ export async function importTickets(rows: ImportRow[], onProgress?: (done: numbe
       else if (res.kind === "failed") summary.failed.push({ ticketNo: res.ticketNo, error: res.error });
     }
     done += results.length;
-    onProgress?.(done, fresh.length);
+    onProgress?.(done, total);
   }
 
-  if (summary.added.length > 0) invalidateCompanyTicketsCache();
+  // Existing tickets — written as system changes (migration 0365), in batches.
+  for (let i = 0; i < updates.length; i += UPDATE_BATCH) {
+    const batch = updates.slice(i, i + UPDATE_BATCH);
+    const { data, error } = await supabase.rpc("import_ticket_updates", { p_updates: batch.map((u) => u.payload) });
+    if (error) {
+      const msg = isMissingFunction(error)
+        ? "Updating existing tickets needs migration 0365 in Supabase — run it, then import the file again (new tickets were still added)."
+        : error.message;
+      for (const u of updates.slice(i)) summary.failed.push({ ticketNo: u.payload.ticket_no, error: msg });
+      break;
+    }
+    const ok = new Set<string>((data as string[] | null) ?? []);
+    for (const u of batch) {
+      if (ok.has(u.payload.ticket_no)) summary.updated.push({ ticketNo: u.payload.ticket_no, changes: u.changes });
+      else summary.failed.push({ ticketNo: u.payload.ticket_no, error: "Not updated (no access to this ticket)" });
+    }
+    done += batch.length;
+    onProgress?.(done, total);
+  }
+
+  if (summary.added.length > 0 || summary.updated.length > 0) invalidateCompanyTicketsCache();
   return summary;
 }
