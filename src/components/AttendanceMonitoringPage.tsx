@@ -47,6 +47,7 @@ import { getServerNow } from "@/lib/serverTime";
 import { formatClockTime } from "@/lib/payslipTemplate";
 import {
   getCompanyPtoRequests,
+  HR_STATUS_TO_PTO_TYPE,
   createPtoRequest,
   reviewPtoStage,
   canReviewPtoStage,
@@ -484,6 +485,8 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
   // reasoning (this page mirrors that same split).
   const [correctionEraFilter, setCorrectionEraFilter] = useState<"new" | "old">("new");
   const [correctionTimecardData, setCorrectionTimecardData] = useState<{ checkIn: string; checkOut: string; mealStart: string; mealEnd: string }>({ checkIn: "", checkOut: "", mealStart: "", mealEnd: "" });
+  // "profileId|YYYY-MM-DD" days HR plotted as leave (attendance_notes.hr_note = Vacation/Sick/Unpaid/…) — see isOnLeaveFor.
+  const [hrLeaveKeys, setHrLeaveKeys] = useState<Set<string>>(new Set());
   const [notesData, setNotesData] = useState<Record<string, { content: string; notifyIndividual: boolean; notifyTeamLead: boolean; createdBy: string | null }>>({});
   const [branchRoles, setBranchRoles] = useState<BranchRoles[]>([]);
   const [newNote, setNewNote] = useState("");
@@ -566,6 +569,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
         noteMap[n.profileId] = { content: n.content, notifyIndividual: n.notifyIndividual, notifyTeamLead: n.notifyTeamLead, createdBy: n.createdBy };
       });
       setNotesData(noteMap);
+      setHrLeaveKeys(new Set(noteRows.filter((n) => HR_STATUS_TO_PTO_TYPE[n.hrNote]).map((n) => `${n.profileId}|${n.noteDate}`)));
       setPtoRequests(ptoRows);
       setCorrections(correctionRows);
       setCorrectionHistory(historyRows);
@@ -924,6 +928,23 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
     [hireDateByProfileId]
   );
 
+  // Approved leave (any PTO type, paid or unpaid) or HR-plotted leave on the
+  // calendar — the day is excused, so it never shows as Missing Clock In /
+  // absent. Same sources payroll uses to read a no-punch day as Paid/Unpaid
+  // Leave instead of Absent (EmployeePayrollDetailModal.tsx).
+  const approvedLeaveKeys = useMemo(() => {
+    const keys = new Set<string>(hrLeaveKeys);
+    for (const pto of ptoRequests) {
+      if (pto.status !== "approved" || !pto.startDate) continue;
+      const end = new Date(`${pto.endDate || pto.startDate}T00:00:00`);
+      for (let d = new Date(`${pto.startDate}T00:00:00`); d <= end; d.setDate(d.getDate() + 1)) {
+        keys.add(`${pto.profileId}|${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
+      }
+    }
+    return keys;
+  }, [ptoRequests, hrLeaveKeys]);
+  const isOnLeaveFor = useCallback((profileId: string, dateISO: string): boolean => approvedLeaveKeys.has(`${profileId}|${dateISO}`), [approvedLeaveKeys]);
+
   // Pending Timecard Corrections — `corrections` (above) is already the full
   // company list for the Corrections tab, so just filter it down instead of
   // firing a second query. A "pending" correction hasn't cleared every
@@ -949,7 +970,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
       const offDays = new Set<number>(p.off_days ?? []);
       // A company holiday suppresses "missing clock-in"/etc. alerts exactly
       // like a scheduled rest day — see isCompanyHolidayFor above.
-      const isOffDay = offDays.has(dow) || isCompanyHolidayFor(dateISO) || isBeforeHireFor(p.id, dateISO);
+      const isOffDay = offDays.has(dow) || isCompanyHolidayFor(dateISO) || isBeforeHireFor(p.id, dateISO) || isOnLeaveFor(p.id, dateISO);
       const checkIn = entry?.checkIn || "";
       const checkOut = entry?.checkOut || "";
       const mealIn = entry?.mealStart || "";
@@ -988,7 +1009,7 @@ export function AttendanceMonitoringPage({ mod, sub }: { mod: ModuleDef; sub: Su
         tickets: ticketsByNameAndDate.get(`${(p.display_name || p.email || "").trim().toLowerCase()}|${dateISO}`) ?? [],
       };
     },
-    [nowByTimezone, allProfileById, checkoutProposalsByKey, lastTicketUpdateByProfile, ticketsByNameAndDate, isCompanyHolidayFor, hasPendingCorrectionFor, isBeforeHireFor]
+    [nowByTimezone, allProfileById, checkoutProposalsByKey, lastTicketUpdateByProfile, ticketsByNameAndDate, isCompanyHolidayFor, hasPendingCorrectionFor, isBeforeHireFor, isOnLeaveFor]
   );
 
   const dailyRecords: DailyRecord[] = useMemo(
