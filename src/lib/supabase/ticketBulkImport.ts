@@ -27,7 +27,7 @@
  *                  reassignment made in the app)
  * Blank file values never overwrite anything, and customer details / notes /
  * visits / parts are never touched. Updates go through import_ticket_updates
- * (migration 0365) so they're recorded as system changes, not credited to the
+ * (migration 0367) so they're recorded as system changes, not credited to the
  * person importing.
  *
  * Skipped (never inserted): no TicketNo, or a ticket number repeated later in
@@ -325,13 +325,13 @@ export async function importTickets(
     onProgress?.(done, total);
   }
 
-  // Existing tickets — written as system changes (migration 0365), in batches.
+  // Existing tickets — written as system changes (migration 0367), in batches.
   for (let i = 0; i < updates.length; i += UPDATE_BATCH) {
     const batch = updates.slice(i, i + UPDATE_BATCH);
     const { data, error } = await supabase.rpc("import_ticket_updates", { p_updates: batch.map((u) => u.payload) });
     if (error) {
       const msg = isMissingFunction(error)
-        ? "Updating existing tickets needs migration 0365 in Supabase — run it, then import the file again (new tickets were still added)."
+        ? "Updating existing tickets needs migration 0367 in Supabase — run it, then import the file again (new tickets were still added)."
         : error.message;
       for (const u of updates.slice(i)) summary.failed.push({ ticketNo: u.payload.ticket_no, error: msg });
       break;

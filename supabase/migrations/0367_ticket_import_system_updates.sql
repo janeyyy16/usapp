@@ -1,5 +1,5 @@
 -- =====================================================================
--- 0365 — Bulk ticket import: update existing tickets as a SYSTEM change.
+-- 0367 — Bulk ticket import: update existing tickets as a SYSTEM change.
 --
 -- Tickets → Create New Ticket → Import Bulk Tickets now also updates
 -- tickets that already exist (status, schedule date, and the technician
@@ -23,7 +23,7 @@
 --    clears the on-site check-in (same as updateTicketAssignment, 0202).
 --    Returns the ticket numbers actually updated.
 --
--- Run once in the Supabase SQL Editor, after 0364.
+-- Run once in the Supabase SQL Editor, after 0366.
 -- =====================================================================
 
 create or replace function log_ticket_change()

@@ -34,8 +34,18 @@ export interface ConfidentialityNonCompeteAgreementFormData {
 const escapeHtml = (s: string) =>
   String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
+/**
+ * A filled-in value, underlined word by word (each word its own span, so a
+ * long address that wraps keeps its underline under the words in the PDF —
+ * one wrapped span gets a line across its whole bounding box there).
+ */
+const fillWords = (v: string) => {
+  const words = escapeHtml(v.trim()).split(/\s+/);
+  return words.map((w, i) => `<span class="cnc-fill">${w}${i < words.length - 1 ? " " : ""}</span>`).join("");
+};
+
 const blank = (v: string, width = 220) =>
-  v && v.trim() ? `<span class="cnc-fill">${escapeHtml(v)}</span>` : `<span class="cnc-line" style="min-width:${width}px">&nbsp;</span>`;
+  v && v.trim() ? fillWords(v) : `<span class="cnc-line" style="min-width:${width}px">&nbsp;</span>`;
 
 /** "2026-10-07" (or a full timestamp) -> { day: "7th", month: "October", year: "26", full: "October 7, 2026" }. */
 function dateParts(iso: string): { day: string; month: string; year: string; full: string } | null {
@@ -48,6 +58,9 @@ function dateParts(iso: string): { day: string; month: string; year: string; ful
   const month = d.toLocaleDateString("en-US", { month: "long" });
   return { day: `${n}${suffix}`, month, year: String(d.getFullYear()).slice(2), full: d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }) };
 }
+
+// How far typed text is raised above its line in the PDF (see .cnc-pdf below).
+const PDF_TEXT_LIFT = 6;
 
 export const confidentialityNonCompeteAgreementStyles = `
   .cnc-container * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -62,9 +75,7 @@ export const confidentialityNonCompeteAgreementStyles = `
   .cnc-center { text-align: center; font-weight: 700; margin: 12px 0 4px; }
   .cnc-bullet { padding: 2px 0 2px 14px; position: relative; text-align: justify; }
   .cnc-bullet::before { content: "•"; position: absolute; left: 0; }
-  /* text-decoration (not border-bottom): a wrapped fill-in (a long address)
-     keeps its underline under the words only in the PDF capture. */
-  .cnc-fill { font-weight: 700; text-decoration: underline; padding: 0 3px; }
+  .cnc-fill { font-weight: 700; border-bottom: 1px solid #111827; padding-bottom: 1px; }
   .cnc-line { display: inline-block; border-bottom: 1px solid #111827; }
   .cnc-sign-block { margin-top: 14px; }
   .cnc-sign-title { font-weight: 700; margin-bottom: 6px; }
@@ -75,13 +86,18 @@ export const confidentialityNonCompeteAgreementStyles = `
   /* PDF pages: exactly one US Letter page each (816 x 1056 at 96dpi). */
   .cnc-page { height: 1056px; overflow: hidden; }
   .cnc-page-footer { position: absolute; left: 0; right: 0; bottom: 28px; text-align: center; font-size: 9.5px; color: #6b7280; }
+  /* PDF only: the capture (html2canvas) draws text a few px lower than the
+     browser lays it out, so typed values would sit on their lines. Lift the
+     text — never the signature images, which already sit right. */
+  .cnc-pdf .cnc-fill { padding-bottom: ${PDF_TEXT_LIFT}px; }
+  .cnc-pdf .cnc-val-text { padding-bottom: ${PDF_TEXT_LIFT}px; }
 `;
 
 // Where the PDF splits into page 2 (an HTML comment — invisible on screen).
 const PAGE_BREAK = "<!--cnc-page-break-->";
 
-function signField(label: string, inner: string, minWidth = 150) {
-  return `<div class="cnc-sign-field">${escapeHtml(label)}: <span class="cnc-val" style="min-width:${minWidth}px">${inner || "&nbsp;"}</span></div>`;
+function signField(label: string, inner: string, minWidth = 150, isText = false) {
+  return `<div class="cnc-sign-field">${escapeHtml(label)}: <span class="cnc-val${isText ? " cnc-val-text" : ""}" style="min-width:${minWidth}px">${inner || "&nbsp;"}</span></div>`;
 }
 
 export function buildConfidentialityNonCompeteAgreementBodyMarkup(data: ConfidentialityNonCompeteAgreementFormData, logoDataUrl: string): string {
@@ -149,18 +165,18 @@ export function buildConfidentialityNonCompeteAgreementBodyMarkup(data: Confiden
         <div class="cnc-sign-title">EMPLOYEE:</div>
         <div class="cnc-sign-row">
           ${signField("Signature", sig(data.employeeSignatureDataUrl), 190)}
-          ${signField("Date", empDate ? escapeHtml(empDate.full) : "", 120)}
+          ${signField("Date", empDate ? escapeHtml(empDate.full) : "", 120, true)}
         </div>
-        <div class="cnc-sign-row">${signField("Printed Full Legal Name", data.employeeName ? escapeHtml(data.employeeName) : "", 300)}</div>
+        <div class="cnc-sign-row">${signField("Printed Full Legal Name", data.employeeName ? escapeHtml(data.employeeName) : "", 300, true)}</div>
       </div>
 
       <div class="cnc-sign-block">
         <div class="cnc-sign-title">EMPLOYER REPRESENTATIVE (US IN HOME SERVICES):</div>
         <div class="cnc-sign-row">
           ${signField("Authorized Representative Signature", sig(data.employerSignatureDataUrl), 170)}
-          ${signField("Date", erDate ? escapeHtml(erDate.full) : "", 120)}
+          ${signField("Date", erDate ? escapeHtml(erDate.full) : "", 120, true)}
         </div>
-        <div class="cnc-sign-row">${signField("Name / Title", data.employerPrintedNameTitle ? escapeHtml(data.employerPrintedNameTitle) : "", 300)}</div>
+        <div class="cnc-sign-row">${signField("Name / Title", data.employerPrintedNameTitle ? escapeHtml(data.employerPrintedNameTitle) : "", 300, true)}</div>
       </div>
     </div>
   `;
@@ -178,7 +194,7 @@ export function buildConfidentialityNonCompeteAgreementPages(data: Confidentiali
   const close = full.lastIndexOf("</div>");
   const parts = full.slice(open, close).split(PAGE_BREAK);
   return parts.map(
-    (inner, i) => `<div class="cnc-container cnc-page">${inner}<div class="cnc-page-footer">Page ${i + 1} of ${parts.length}</div></div>`,
+    (inner, i) => `<div class="cnc-container cnc-page cnc-pdf">${inner}<div class="cnc-page-footer">Page ${i + 1} of ${parts.length}</div></div>`,
   );
 }
 
