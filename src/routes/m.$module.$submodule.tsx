@@ -26,7 +26,8 @@ import { ADMIN_MODULE_ROLES, USER_MANAGEMENT_DEFAULT_ROLES, ACTIVITY_LOG_DEFAULT
 import { ROLE_LABELS } from "@/lib/roleLabels";
 import { guideDepartmentFor } from "@/lib/tours/guideDepartments";
 import { canSeeTicketTour } from "@/lib/tours/ticketTours";
-import { ExpensesModulePage } from "@/components/ExpensesModulePage";import { StaffListPage } from "@/components/StaffListPage";
+import { ExpensesModulePage } from "@/components/ExpensesModulePage";
+import { PaystubsPage } from "@/components/PaystubsPage";import { StaffListPage } from "@/components/StaffListPage";
 import { ItTicketsPage } from "@/components/ItTicketsPage";
 
 // Each page below is loaded only when it is opened (2026-10-26). They were
@@ -666,6 +667,8 @@ function SubModule() {
         ? <FlashTechCalendarPage mod={mod} sub={sub} />
         : (sub as any).custom === "expenses"
         ? <ExpensesModulePage mod={mod} sub={sub} />
+        : (sub as any).custom === "paystubs"
+        ? <PaystubsPage mod={mod} sub={sub} />
         : sub.custom === "staff-list"
         ? <StaffListPage mod={mod} sub={sub} />
         : sub.custom === "work-map"
