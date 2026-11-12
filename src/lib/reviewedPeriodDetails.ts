@@ -1,4 +1,4 @@
-import { cents, isBonusPayLine } from "./payRounding";
+import { cents, isBonusPayLine, isPretaxInsurancePayLine } from "./payRounding";
 import type { PayrollReviewAmounts } from "./supabase/payrollReviewBreakdowns";
 
 export interface ReviewedPeriodDetailSource {
@@ -38,7 +38,7 @@ export function reviewedPeriodDetails(saved: PayrollReviewAmounts, source?: Revi
         }
         continue;
       }
-      const group = amount < 0 ? (/insur|pre-?tax/i.test(item.label) ? "pretaxInsurance" : "deduction") : "mileageOtherReimb";
+      const group = amount < 0 ? (isPretaxInsurancePayLine(item.label) ? "pretaxInsurance" : "deduction") : "mileageOtherReimb";
       add(group, item.label || (amount < 0 ? "Deduction" : "Reimbursement"), Math.abs(amount));
     }
   }
