@@ -3745,13 +3745,13 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
         8,
         flatThreshold ? CSR_WEEKLY_OVERTIME_THRESHOLD : undefined
       );
-      const rate = row.hourlyRateUSD;
       const stateByDate = new Map<string, string>();
       for (const e of timecardEntries) if (e.profile_id === emp.id && e.state) stateByDate.set(e.work_date, e.state);
       return attendanceRows
         .filter((r) => r.hoursWorked > 0)
         .map((r) => {
           const { regular, overtime } = split.get(r.date) ?? { regular: r.hoursWorked, overtime: 0 };
+          const rate = hourlyRateOnDate(emp.id, r.date, row.hourlyRateUSD);
           return {
             date: r.date,
             clockIn: r.clockIn,
