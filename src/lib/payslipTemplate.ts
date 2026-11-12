@@ -318,6 +318,10 @@ export const PAYSLIP_STYLES = `
 export function renderPayslipBodyHtml(employee: EmployeePayslipData): string {
   const currentDate = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
   const isFixedSalary = employee.compensationType === "fixed";
+  const dailyRates = [...new Set(employee.dailyRows.map((row) => row.rate))].sort((a, b) => a - b);
+  const hourlyRateLabel = dailyRates.length > 1
+    ? `Mixed: ${dailyRates.map((rate) => `$${rate.toFixed(2)}`).join(" / ")}`
+    : `$${(dailyRates[0] ?? employee.hourlyRate).toFixed(2)}`;
   const adjustments = employee.adjustments ?? [];
   const adjustmentsNet = adjustments.reduce((s, a) => s + (a.kind === "reimbursement" ? a.amount : -a.amount), 0);
   const grandTotal = employee.grossPay + employee.extraPay + adjustmentsNet;
@@ -389,7 +393,7 @@ export function renderPayslipBodyHtml(employee: EmployeePayslipData): string {
       </thead>
       <tbody>
         <tr>
-          <td class="amount">${employee.compensationType === "fixed" && employee.annualSalary ? `$${employee.annualSalary.toLocaleString()}/yr ($${perCutoffSalary(employee.annualSalary, !employee.isUS).toFixed(2)}/cutoff)` : `$${employee.hourlyRate.toFixed(2)}`}</td>
+          <td class="amount">${employee.compensationType === "fixed" && employee.annualSalary ? `$${employee.annualSalary.toLocaleString()}/yr ($${perCutoffSalary(employee.annualSalary, !employee.isUS).toFixed(2)}/cutoff)` : hourlyRateLabel}</td>
           <td class="amount">${employee.counts}</td>
           <td class="amount">${employee.totalHours.toFixed(3)}</td>
           <td class="amount">${employee.average.toFixed(3)}</td>

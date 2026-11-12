@@ -62,7 +62,8 @@ import { zonedDateKey } from "@/lib/serverTime";
 import { buildCorrectionSubmissionPdf } from "@/lib/timecardCorrectionPdf";
 import { buildPtoSubmissionPdf } from "@/lib/ptoExceptionReportPdf";
 import { EXCEPTION_TYPE_LABELS, CORRECTION_ISSUE_LABELS, isCorrectionIssueType, type ExceptionType, type CorrectionIssueType } from "@/lib/exceptionVisitReportTemplate";
-import { getRoleDepartmentBreakdown, normalizeRole } from "@/lib/roleLabels";
+import { getRoleDepartmentBreakdown, normalizeRole, hasAnyTechnicianPayRole } from "@/lib/roleLabels";
+import { getSalaryHistory, entryEffectiveOn, payRateHistory } from "@/lib/supabase/salary";
 import { useSignaturePad } from "@/hooks/useSignaturePad";
 import { SignaturePadControls } from "@/components/SignaturePad";
 import {
@@ -1256,9 +1257,9 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
   } | null>(null);
 
   // Build the day-by-day duty breakdown shown on the payslip: fetch real
-  // attendance for the selected payslip's exact pay period and apply that
-  // run's stored hourly rate per day (payroll runs use one flat rate per
-  // employee for the whole period, so no per-day rate lookup is needed).
+  // attendance for the selected payslip's exact pay period and apply the
+  // hourly rate effective on each date. The run's stored rate is only a
+  // fallback when no salary-history entry covers that date.
   // Fixed salary still shows attendance; daily amounts are labeled separately
   // by the shared template and never replace the saved salary total.
   useEffect(() => {
@@ -1270,7 +1271,11 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
     (async () => {
       setPayslipDailyLoading(true);
       try {
-        const schedule = uid ? await getMyProfileSchedule(uid) : null;
+        const [schedule, salaryHistory] = await Promise.all([
+          uid ? getMyProfileSchedule(uid) : Promise.resolve(null),
+          getSalaryHistory(myProfileId),
+        ]);
+        const rateHistory = payRateHistory(salaryHistory, hasAnyTechnicianPayRole(role, extraRoles));
         if (!cancelled) setMyScheduleInfo(schedule);
         const holidays = await getCompanyHolidaysInRange(selectedPayslip.periodStart, selectedPayslip.periodEnd).catch(() => []);
         const pendingCorrections = await getPendingCorrectionsInRange(selectedPayslip.periodStart, selectedPayslip.periodEnd).catch(() => []);
@@ -1289,7 +1294,6 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
           }
         );
         if (cancelled) return;
-        const rate = selectedPayslip.hourlyRate;
         // Regular vs OT split per Sunday–Saturday WEEK at 40 hours — the same
         // rule the payslip's gross uses (everyone, PH included, OT at 1.5×,
         // since 2026-10-22). This used to split each DAY at 8 hours, so the
@@ -1305,6 +1309,10 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
           .filter((r) => r.hoursWorked > 0)
           .map((r) => {
             const { regular, overtime } = split.get(r.date) ?? { regular: r.hoursWorked, overtime: 0 };
+            const effective = entryEffectiveOn(rateHistory, r.date);
+            const rate = effective
+              ? effective.compensationType === "hourly" ? effective.hourlyRate : 0
+              : selectedPayslip.hourlyRate;
             return {
               date: r.date,
               clockIn: r.clockIn,
@@ -1325,7 +1333,7 @@ export function EmployeeSelfServicePage({ mod, sub }: { mod: ModuleDef; sub: Sub
       }
     })();
     return () => { cancelled = true; };
-  }, [payslipModalOpen, selectedPayslip, myProfileId, uid]);
+  }, [payslipModalOpen, selectedPayslip, myProfileId, uid, role, extraRoles]);
 
   const payslipData: EmployeePayslipData | null = selectedPayslip ? (() => {
     const counts = payslipDailyRows.length;
