@@ -1,4 +1,6 @@
 import { reviewedPeriodSyncAmounts } from "@/lib/reviewedPeriodSync";
+import { ReviewedWeeklyBreakdown } from "./ReviewedWeeklyBreakdown";
+import type { ReviewedWeeklySource } from "@/lib/reviewedWeeklyBreakdown";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -58,6 +60,8 @@ export function ReviewedPeriodsTab({
   actualTotals,
   actualBreakdowns,
   actualDetails,
+  actualWeeklySources,
+  onOpenEmployee,
   actualTotalsLoading,
   onPeriodChange,
 }: {
@@ -72,6 +76,9 @@ export function ReviewedPeriodsTab({
   actualBreakdowns: Map<string, PayrollReviewAmounts>;
   /** Individual reimbursement/deduction lines for the dashboard period. */
   actualDetails: Map<string, ReviewedPeriodDetailSource>;
+  actualWeeklySources: Map<string, ReviewedWeeklySource>;
+  /** Opens the existing Payroll review wizard, for this exact employee and cutoff. */
+  onOpenEmployee: (profileId: string, start: string, end: string) => void;
   actualTotalsLoading: boolean;
   /** Switches the dashboard's period so actualTotals covers the period picked here. */
   onPeriodChange: (start: string, end: string) => void;
@@ -236,12 +243,6 @@ export function ReviewedPeriodsTab({
     return people.filter((p) => !have.has(p.id)).sort((a, b) => a.name.localeCompare(b.name));
   }, [people, rows]);
 
-  const totals = useMemo(() => {
-    const t: PayrollReviewAmounts = { ...ZERO };
-    for (const r of visible) for (const c of COLUMNS) t[c.key] += r[c.key];
-    return t;
-  }, [visible]);
-
   const saveCell = async (row: PayrollReviewBreakdown, key: keyof PayrollReviewAmounts, raw: string) => {
     if (row.source === "review") return;
     const value = Math.abs(Number(raw.replace(/[$,\s]/g, "")) || 0);
@@ -288,9 +289,9 @@ export function ReviewedPeriodsTab({
     }
   };
 
-  const downloadExcel = async () => {
-    if (!actualReady || loading) return;
-    const detailRows = new Map(visible.map((r) => [r.id, reviewedPeriodDetails(r, actualDetails.get(r.profileId))]));
+  const [fullBreakdown, setFullBreakdown] = useState(true);
+  const [weeklyView, setWeeklyView] = useState(false);
+    const detailRows = new Map(visible.map((r) => [r.id, reviewedPeriodDetails(r, actualReady ? actualDetails.get(r.profileId) : undefined)]));
     const detailColumns = new Map<string, { key: string; label: string; group: "bonus" | "mileageOtherReimb" | "deduction" | "pretaxInsurance" }>();
     for (const lines of detailRows.values()) for (const line of lines) detailColumns.set(line.key, line);
     // Itemize bonuses, reimbursements and deductions without changing saved totals.
@@ -307,6 +308,12 @@ export function ReviewedPeriodsTab({
         .map((d) => ({ key: d.key, label: `${c.subtract ? "(-)" : "(+)"} ${d.label}`, sub: undefined, group: d.group, subtract: !!c.subtract,
           value: (r: PayrollReviewBreakdown) => detailRows.get(r.id)?.find((l) => l.key === d.key)?.amount ?? 0 }));
     });
+  const displayColumns = fullBreakdown ? exportColumns : COLUMNS.map((c) => ({
+    ...c, group: c.key, value: (r: PayrollReviewBreakdown) => r[c.key],
+  }));
+
+  const downloadExcel = async () => {
+    if (!actualReady || loading) return;
     const excelModule = await import("exceljs");
     const ExcelJS = excelModule.default ?? excelModule;
     const wb = new ExcelJS.Workbook();
@@ -439,7 +446,7 @@ export function ReviewedPeriodsTab({
     ro.observe(box);
     if (box.firstElementChild) ro.observe(box.firstElementChild);
     return () => ro.disconnect();
-  }, [visible.length, loading]);
+  }, [visible.length, loading, weeklyView]);
   const syncing = useRef(false);
   const syncScroll = (from: HTMLDivElement | null, to: HTMLDivElement | null) => {
     if (!from || !to || syncing.current) return;
@@ -479,6 +486,14 @@ export function ReviewedPeriodsTab({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <button type="button" onClick={() => setWeeklyView((value) => !value)}
+            className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-semibold text-white">
+            {weeklyView ? "Show Payroll Breakdown" : "Show Weekly Breakdown"}
+          </button>
+          <label className={`${weeklyView ? "hidden" : "flex"} items-center gap-2 text-sm text-slate-300`}>
+            <input type="checkbox" checked={fullBreakdown} onChange={(e) => setFullBreakdown(e.target.checked)} />
+            Full breakdown
+          </label>
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -506,7 +521,7 @@ export function ReviewedPeriodsTab({
             type="button"
             onClick={() => void downloadExcel()}
             disabled={visible.length === 0 || !actualReady || loading || payrollSyncing || rows.some((r) => r.source === "review" && !!reviewedPeriodSyncAmounts(r, actualBreakdowns.get(r.profileId), actualTotals.get(r.profileId)))}
-            className="px-3 py-1.5 rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-sm font-semibold flex items-center gap-1.5"
+            className={`${weeklyView ? "hidden" : "flex"} px-3 py-1.5 rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-sm font-semibold items-center gap-1.5`}
           >
             <Download className="h-4 w-4" /> {payrollSyncing ? "Syncing payroll..." : loading || !actualReady ? "Loading export..." : "Download Excel"}
           </button>
@@ -515,18 +530,24 @@ export function ReviewedPeriodsTab({
 
       {error && <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">{error}</div>}
 
+      {weeklyView && <ReviewedWeeklyBreakdown
+        people={visible.map((r) => ({ id: r.profileId, name: nameOf(r), branch: r.branch ?? "" }))}
+        sources={actualWeeklySources} start={periodStart} end={periodEnd} ready={actualReady && !loading}
+        onOpenEmployee={(id) => onOpenEmployee(id, periodStart, periodEnd)}
+      />}
+      <div className={weeklyView ? "hidden" : ""}>
       <div
         ref={tableBoxRef}
         onScroll={() => syncScroll(tableBoxRef.current, floatBarRef.current)}
-        className="overflow-x-auto rounded-t-lg border border-white/10 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        className="max-h-[70vh] overflow-auto rounded-t-lg border border-white/10 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
         <table className="w-full text-[11px]">
-          <thead className="bg-slate-900 text-slate-300">
+          <thead className="sticky top-0 z-20 bg-slate-900 text-slate-300">
             <tr>
               <th className="sticky left-0 z-10 bg-slate-900 text-left px-2 py-1.5 font-semibold align-top">Technician</th>
               <th className="text-left px-2 py-1.5 font-semibold align-top">Branch</th>
-              {COLUMNS.map((c) => (
-                <th key={c.key} className="text-right px-1 py-1.5 font-semibold align-top leading-tight max-w-[92px]">
+              {displayColumns.map((c) => (
+                <th key={c.key} className="text-right px-2 py-1.5 font-semibold align-top leading-tight min-w-[110px] max-w-[150px]">
                   {c.label}
                   {c.sub?.map((sub) => <div key={sub} className="font-normal text-[9px] text-slate-500">{sub}</div>)}
                 </th>
@@ -552,13 +573,19 @@ export function ReviewedPeriodsTab({
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={COLUMNS.length + 7} className="px-3 py-6 text-center text-slate-400"><Loader2 className="inline h-4 w-4 animate-spin mr-2" />Loading…</td></tr>
+              <tr><td colSpan={displayColumns.length + 7} className="px-3 py-6 text-center text-slate-400"><Loader2 className="inline h-4 w-4 animate-spin mr-2" />Loading…</td></tr>
             ) : visible.length === 0 ? (
-              <tr><td colSpan={COLUMNS.length + 7} className="px-3 py-6 text-center text-slate-400">No technicians reviewed for this period yet. Mark one Done in the Payroll tab, or add one above.</td></tr>
+              <tr><td colSpan={displayColumns.length + 7} className="px-3 py-6 text-center text-slate-400">No technicians reviewed for this period yet. Mark one Done in the Payroll tab, or add one above.</td></tr>
             ) : visible.map((r) => (
               <tr key={r.id} className="border-t border-white/5 hover:bg-white/[0.03]">
                 <td className="sticky left-0 z-10 bg-slate-900 px-2 py-1 text-white whitespace-nowrap">
-                  {nameOf(r)}
+                  <button type="button"
+                    disabled={!actualReady || loading || !actualTotals.has(r.profileId)}
+                    onClick={() => onOpenEmployee(r.profileId, periodStart, periodEnd)}
+                    title="Open attendance and Tech Activity Report for this cutoff"
+                    className="text-blue-400 hover:text-blue-300 hover:underline disabled:opacity-50 disabled:cursor-not-allowed">
+                    {nameOf(r)}
+                  </button>
                   <span
                     title={r.source === "review" ? "Saved when the Tech Activity Report was marked Done" : "Added or imported by hand"}
                     className={`ml-1.5 inline-block px-1 rounded text-[8px] font-bold border align-middle ${r.source === "review" ? "border-emerald-500/40 text-emerald-300" : "border-white/15 text-slate-500"}`}
@@ -567,19 +594,25 @@ export function ReviewedPeriodsTab({
                   </span>
                 </td>
                 <td className="px-2 py-1 text-slate-300 whitespace-nowrap max-w-[110px] truncate" title={r.branch ?? ""}>{r.branch ?? "—"}</td>
-                {COLUMNS.map((c) => (
+                {displayColumns.map((c) => (
                   <td key={c.key} className="px-1 py-1 text-right">
+                    {fullBreakdown ? (
+                      <span className={`block px-1 tabular-nums whitespace-nowrap ${c.subtract ? "text-red-300" : "text-slate-200"}`}>
+                        {c.value(r) ? money(c.value(r)) : "—"}
+                      </span>
+                    ) : (
                     <input
-                      key={`${r.id}:${c.key}:${r[c.key]}`}
+                      key={`${r.id}:${c.key}:${c.value(r)}`}
                       type="number" step={0.01} min={0}
-                      defaultValue={r[c.key] ? r[c.key].toFixed(2) : ""}
+                      defaultValue={c.value(r) ? c.value(r).toFixed(2) : ""}
                       placeholder="0.00"
                       readOnly={r.source === "review"}
                       title={r.source === "review" ? "Automatically synced from payroll. Edit the Timecard or Tech Activity Report to change pay." : undefined}
                       disabled={savingKey === `${r.id}:${c.key}`}
-                      onBlur={(e) => void saveCell(r, c.key, e.target.value)}
+                      onBlur={(e) => void saveCell(r, c.group, e.target.value)}
                       className={`${cellClass} ${c.subtract ? "text-red-300" : ""}`}
                     />
+                    )}
                   </td>
                 ))}
                 {(() => {
@@ -667,7 +700,7 @@ export function ReviewedPeriodsTab({
               <tr>
                 <td className="sticky left-0 z-10 bg-slate-900 px-2 py-1.5">Total ({visible.length})</td>
                 <td className="bg-slate-900" />
-                {COLUMNS.map((c) => <td key={c.key} className="bg-slate-900 px-1 py-1.5 text-right tabular-nums whitespace-nowrap">{money(totals[c.key])}</td>)}
+                {displayColumns.map((c) => <td key={c.key} className="bg-slate-900 px-1 py-1.5 text-right tabular-nums whitespace-nowrap">{money(visible.reduce((sum, r) => sum + c.value(r), 0))}</td>)}
                 <td className="bg-slate-900 px-2 py-1.5 text-right tabular-nums text-amber-300 whitespace-nowrap">{money(visible.reduce((s0, r) => s0 + (notInColumns(r) ?? 0), 0))}</td>
                 <td className="bg-slate-900 px-2 py-1.5 text-right tabular-nums whitespace-nowrap">{money(visible.reduce((s0, r) => s0 + totalOf(r), 0))}</td>
                 <td className="bg-slate-900 px-2 py-1.5 text-right tabular-nums text-red-300 whitespace-nowrap">{money(visible.reduce((s0, r) => s0 + taxesOf(r), 0))}</td>
@@ -686,6 +719,7 @@ export function ReviewedPeriodsTab({
         style={{ height: 16 }}
       >
         <div style={{ width: scrollWidth, height: 1 }} />
+      </div>
       </div>
     </div>
   );

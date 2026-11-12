@@ -8,6 +8,7 @@ import type { PtoType } from "./pto";
 import { localISODate, todayISO } from "@/lib/localDate";
 import { getRestDayHistoryFor } from "./restDayHistory";
 import { offDaysOn, requiredTimesOn, type RestDayHistory } from "@/lib/restDays";
+import { capPtoHours } from "@/lib/ptoHours";
 
 // The flat UI time-entry shape used by the timecard page.
 export interface UITimeEntry {
@@ -751,7 +752,7 @@ export interface AttendanceRow {
    * underlying absent/missing status stands.
    * "paid-leave": no punch on a day covered by an APPROVED, PAID pto
    * request (pto.ts's isPaidPtoType — Sick is always unpaid and never lands
-   * here) — hoursWorked is the day's scheduled net hours (not 0), so it
+   * here) — hoursWorked is the day's scheduled net hours, capped at 8 (not 0), so it
    * pays out at the normal rate instead of reading as a missed shift. See
    * leaveType for which kind (vacation/personal/bereavement/holiday-type
    * PTO). Same crediting rule AccountingDashboard.tsx's computeHoursMap
@@ -799,7 +800,7 @@ export async function getAttendanceForRange(
     holidayDates?: string[];
     /** "YYYY-MM-DD" dates with an unresolved timecard correction for this profile (see timecardCorrections.ts) — an absent/missing day here reads as "pending-correction" instead. */
     pendingCorrectionDates?: string[];
-    /** "YYYY-MM-DD" -> leave type, for this profile's APPROVED, PAID pto requests (pto.ts's isPaidPtoType) overlapping the range — a no-punch day here reads as "paid-leave" (hoursWorked = the day's scheduled net hours) instead of "absent". */
+    /** "YYYY-MM-DD" -> leave type, for this profile's APPROVED, PAID pto requests (pto.ts's isPaidPtoType) overlapping the range — a no-punch day here reads as "paid-leave" (hoursWorked = scheduled net hours, capped at 8) instead of "absent". */
     paidLeaveDates?: Map<string, PtoType>;
     /** "YYYY-MM-DD" -> leave type, for this profile's APPROVED, UNPAID pto requests (Unpaid/Sick — isPaidPtoType false) overlapping the range — a no-punch day here reads as "unpaid-leave" (hoursWorked 0, but excused) instead of "absent". Takes precedence over paidLeaveDates for the same date if a caller somehow passes conflicting maps — an unpaid request is the more specific/recent record whenever both exist for one day (see EmployeePayrollDetailModal.tsx's merge). */
     unpaidLeaveDates?: Map<string, PtoType>;
@@ -868,7 +869,7 @@ export async function getAttendanceForRange(
     const key = `${yyyy}-${mm}-${dd}`;
     const dow = d.getDay();
     const isOffDay = history && scheduled.daysOff !== undefined ? offDaysOn(history, profileId, key, scheduled.daysOff).includes(dow) : daysOff.has(dow);
-    const scheduledNetHours = netHoursOn(key);
+    const scheduledNetHours = capPtoHours(netHoursOn(key));
     const isHoliday = holidayDates.has(key);
     // An unpaid request for this date wins over a paid one — see the
     // unpaidLeaveDates param doc for why a caller might pass both.
@@ -881,7 +882,7 @@ export async function getAttendanceForRange(
       // — status "day-off"/"holiday" instead of "absent" — so it reads as
       // an expected rest day rather than a gap that looks like missing
       // data, or a missed shift. Same for an approved paid-leave day, which
-      // also gets paid its scheduled net hours instead of reading as a
+      // also gets paid its scheduled net hours, capped at 8, instead of reading as a
       // missed shift (0 hours) — see AttendanceRow.status's "paid-leave" doc.
       const isFuture = key > todayISO();
       if (!isFuture) {

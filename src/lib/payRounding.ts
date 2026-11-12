@@ -32,6 +32,11 @@ export function isBonusPayLine(label: string): boolean {
 
 const INSURANCE_LINE = /insur|pre-?tax/i;
 
+/** Company Pd Car Insurance is a regular deduction; weekly prefixes are allowed. */
+export function isPretaxInsurancePayLine(label: string): boolean {
+  return INSURANCE_LINE.test(label) && !/\bcompany\s+pd\s+car\s+insurance\b/i.test(label);
+}
+
 /**
  * A technician's custom pay lines split into the summary columns — same
  * rules as the Tech Activity Report's Reviewed Periods breakdown: includable
@@ -53,7 +58,7 @@ export function groupCustomPayLines(items: { label: string; value: number; rate:
       if (isBonusPayLine(item.label)) out.bonus += amount;
       else out.commission += amount;
     } else if (amount < 0) {
-      if (INSURANCE_LINE.test(item.label)) out.pretaxInsurance += -amount;
+      if (isPretaxInsurancePayLine(item.label)) out.pretaxInsurance += -amount;
       else out.deduction += -amount;
     } else {
       out.reimbursement += amount;

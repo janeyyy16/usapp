@@ -1,4 +1,6 @@
 import { weeklyOtPremium, type TechWeeklyOt } from "@/lib/techWeeklyOvertime";
+import type { ReviewedWeeklySource } from "@/lib/reviewedWeeklyBreakdown";
+import { capPtoHours } from "@/lib/ptoHours";
 export type { TechWeeklyOt } from "@/lib/techWeeklyOvertime";
 import { paidHolidayDates } from "@/lib/holidayPay";
 import { fixedSalaryForPaidDates } from "@/lib/fixedSalaryPaidDays";
@@ -285,6 +287,7 @@ interface PayrollAuditLogRow {
 }
 
 export interface EmployeePayrollRow {
+  techWeeklySource?: ReviewedWeeklySource;
   employee: SupabaseEmployee;
   compensationType: "hourly" | "fixed";
   /** Only meaningful when compensationType is "hourly" — 0 for fixed-salary employees. */
@@ -469,7 +472,7 @@ export interface EmployeePayrollRow {
 // isPaidPtoType in pto.ts) — "unpaid" is unpaid by definition, and Sick
 // Leave is always unpaid too, drawing against its own separate allowance
 // instead of vacation PTO's.
-// It's credited at the employee's scheduled NET hours for that day
+// It's credited at the employee's scheduled NET hours, capped at 8 per day
 // (resolveScheduledNetHours — same working_hours/meal_minutes-aware
 // calculation used for meal-break eligibility), clipped to the payroll
 // period and skipped on the employee's own off days or on any date they
@@ -682,7 +685,7 @@ function computeHoursMap(
     const emp = employeeById.get(pto.profileId);
     if (!emp) continue;
     const offDays = new Set(emp.offDays ?? []);
-    const netHours = resolveScheduledNetHours(emp.requiredCheckIn || "", emp.requiredCheckOut || "", emp.workingHours, emp.mealMinutes);
+    const netHours = capPtoHours(resolveScheduledNetHours(emp.requiredCheckIn || "", emp.requiredCheckOut || "", emp.workingHours, emp.mealMinutes));
     if (netHours <= 0) continue;
     const punched = punchedDates.get(pto.profileId);
     const unpaidDates = unpaidDatesByProfile.get(pto.profileId);
@@ -3119,6 +3122,21 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
               grossPayUSD: techGrossPay,
               isTechPortion: true,
               techSummary,
+              techWeeklySource: {
+                days: techDailyHours.map((day) => {
+                  const state = stateByProfileDate.get(`${emp.id}|${day.date}`) ?? "";
+                  const rate = hourlyRateOnDate(emp.id, day.date, hourlyRate);
+                  const guarantee = guaranteeOnDate(day.date);
+                  return { ...day, rate, state, stateFloor: stateMinWageOn(state, day.date),
+                    ptoPay: day.paidLeave ? (guarantee?.annual_salary ? perCutoffSalary(guarantee.annual_salary) / 10 : (day.regular + day.overtime) * rate) : 0 };
+                }),
+                items: techCustomItemsByProfile.get(emp.id) ?? [],
+                commission: techSummary.commission,
+                bonus: techSummary.bonus,
+                baseMileage: effectiveMileage,
+                baseMileagePay: effectiveMileagePay,
+                weeklyOt: techWeeklyOt,
+              },
             }
           : null;
 
@@ -6294,6 +6312,20 @@ export function AccountingDashboard({ mod, sub }: { mod: ModuleDef; sub: SubModu
               items: techCustomItemsByProfile.get(r.employee.id) ?? [],
             }]))}
             actualTotalsLoading={periodDataLoading > 0 || loading}
+            actualWeeklySources={new Map(payrollRows.filter((r) => r.isTechPortion && r.techWeeklySource).map((r) => [r.employee.id, r.techWeeklySource!]))}
+            onOpenEmployee={(profileId, start, end) => {
+              // Reuse the Payroll table's wizard only after its data matches
+              // the selected Reviewed Period. Never open a different cutoff
+              // or look an employee up outside the current payroll roster.
+              if (periodDataLoading > 0 || loading || start !== genStart || end !== genEnd || !start || !end || start > end) return;
+              const row = payrollRows.find((r) => r.isTechPortion && r.employee.id === profileId);
+              if (!row) {
+                toast.error("This employee's payroll details are unavailable for the selected cutoff.");
+                return;
+              }
+              setDetailEmployee(row.employee);
+              setWizardStep("detail");
+            }}
             onPeriodChange={(start, end) => { setGenStart(start); setGenEnd(end); }}
           />
         )}

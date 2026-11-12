@@ -1,11 +1,31 @@
 import { describe, expect, it } from "vitest";
 import { reviewedPeriodDetails, excelColumnLetter } from "./reviewedPeriodDetails";
+import { centsSummaryTotal, groupCustomPayLines } from "./payRounding";
 
 const saved = { regularPay: 660, otPay: 844.89, bonus: 0, commission: 1035, ptoPay: 0,
   deduction: 75, mileageOtherReimb: 584.24, pretaxInsurance: 20, salaryMatch: 0 };
 const item = (label: string, amount: number, isWageIncludable = false) => ({ label, value: 1, rate: amount, isWageIncludable });
 
 describe("Reviewed Period itemized export", () => {
+  it("routes Rico's car insurance to deduction without changing total pay", () => {
+    const items = [item("Week 2 Company Pd Car Insurance", -72.13)];
+    const grouped = groupCustomPayLines(items);
+    expect(grouped.deduction).toBe(72.13);
+    expect(grouped.pretaxInsurance).toBe(0);
+    const amounts = { ...saved, regularPay: 660, otPay: 456.49, bonus: 0, commission: 625,
+      ptoPay: 0, mileageOtherReimb: 312.50, salaryMatch: 0, deduction: grouped.deduction, pretaxInsurance: grouped.pretaxInsurance };
+    expect(centsSummaryTotal(amounts)).toBe(1981.86);
+    expect(reviewedPeriodDetails(amounts, { mileage: 312.50, items }).filter((l) => l.group === "deduction"))
+      .toEqual([{ key: "deduction:week 2 company pd car insurance", label: "Week 2 Company Pd Car Insurance", group: "deduction", amount: 72.13 }]);
+    expect(reviewedPeriodDetails(amounts, { mileage: 312.50, items }).some((l) => l.key.endsWith(":unitemized"))).toBe(false);
+  });
+  it("keeps other insurance pre-tax and preserves positive and includable handling", () => {
+    const grouped = groupCustomPayLines([
+      item("Week 1 Insurance", -34.65), item("Pre-Tax Insurance", -20),
+      item("WEEK 2 COMPANY PD CAR   INSURANCE", -10), item("Car Insurance", -7), item("Car Insurance", 5), item("Car Insurance", -3, true),
+    ]);
+    expect(grouped).toEqual({ bonus: 0, commission: -3, reimbursement: 5, deduction: 10, pretaxInsurance: 61.65 });
+  });
   it("separates mileage, phone allowance, every deduction and insurance", () => {
     const lines = reviewedPeriodDetails(saved, { mileage: 554.24, items: [
       item("Phone Allowance", 30), item("Lost Part", -50), item("Uniform Deduction", -25), item("Pre-Tax Insurance", -20), item("Piece rate", 100, true),
