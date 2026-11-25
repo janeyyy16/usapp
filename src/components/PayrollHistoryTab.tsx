@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Download, Loader2, MessageSquareWarning } from "lucide-react";
 import { toast } from "sonner";
 import { getPayrollReviewBreakdowns, getPayrollReviewPeriods, reviewBreakdownTotal, type PayrollReviewAmounts, type PayrollReviewBreakdown } from "@/lib/supabase/payrollReviewBreakdowns";
@@ -90,6 +90,55 @@ function isPayPeriod(key: string): boolean {
 }
 
 const money = (n: number) => n.toLocaleString("en-US", { style: "currency", currency: "USD" });
+
+/** Department picker with checkboxes: "All departments", or tick any mix. Nothing ticked = all. */
+function DepartmentChecklist({ departments, selected, onChange }: { departments: string[]; selected: Set<string>; onChange: (next: Set<string>) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [open]);
+  const all = selected.size === 0;
+  const label = all ? "All departments" : selected.size <= 2 ? [...selected].sort().join(", ") : `${selected.size} departments`;
+  const toggle = (d: string) => {
+    const next = new Set(selected);
+    if (next.has(d)) next.delete(d); else next.add(d);
+    // Ticking every department is the same as all.
+    onChange(next.size === departments.length ? new Set() : next);
+  };
+  return (
+    <div ref={ref} className="relative normal-case tracking-normal">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex min-w-[12rem] max-w-[18rem] items-center justify-between gap-2 rounded-lg border border-white/10 bg-slate-800 px-3 py-1.5 text-left text-sm text-white"
+      >
+        <span className="truncate">{label}</span>
+        <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full z-30 mt-1 max-h-80 w-full min-w-[12rem] overflow-y-auto rounded-lg border border-white/10 bg-slate-800 py-1 shadow-xl">
+          <label className="flex cursor-pointer items-center gap-2 border-b border-white/10 px-3 py-1.5 text-sm font-semibold text-white hover:bg-white/5">
+            <input type="checkbox" checked={all} onChange={() => onChange(new Set())} />
+            All departments
+          </label>
+          {departments.map((d) => (
+            <label key={d} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm text-slate-200 hover:bg-white/5">
+              <input type="checkbox" checked={!all && selected.has(d)} onChange={() => toggle(d)} />
+              {d}
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 type HistoryGroup = "all" | "tech" | "us" | "ph";
 const HISTORY_GROUPS: { id: HistoryGroup; label: string }[] = [
@@ -288,7 +337,8 @@ export function PayrollHistoryTab({
   }, [run, lineItems, marks, breakdowns, taxLines, employeeById]);
 
   const [group, setGroup] = useState<HistoryGroup>("all");
-  const [department, setDepartment] = useState("");
+  /** Ticked departments; empty = all departments. */
+  const [selectedDepts, setSelectedDepts] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   useEffect(() => { setExpanded(new Set()); }, [selectedKey]);
@@ -300,10 +350,17 @@ export function PayrollHistoryTab({
   const groupRows = useMemo(() => rows.filter((r) => inGroup(r, group)), [rows, group]);
   // Department list follows the group: only departments that have people in it.
   const departments = useMemo(() => [...new Set(groupRows.map((r) => r.department))].sort(), [groupRows]);
-  useEffect(() => { if (department && !departments.includes(department)) setDepartment(""); }, [departments, department]);
+  // Drop ticks for departments no longer in this group.
+  useEffect(() => {
+    setSelectedDepts((prev) => {
+      const kept = [...prev].filter((d) => departments.includes(d));
+      return kept.length === prev.size ? prev : new Set(kept);
+    });
+  }, [departments]);
+  const deptLabel = selectedDepts.size === 0 ? "" : [...selectedDepts].sort().join(", ");
 
   const q = search.trim().toLowerCase();
-  const visible = groupRows.filter((r) => (!department || r.department === department) && (!q || r.name.toLowerCase().includes(q)));
+  const visible = groupRows.filter((r) => (selectedDepts.size === 0 || selectedDepts.has(r.department)) && (!q || r.name.toLowerCase().includes(q)));
   const visibleTotal = visible.reduce((s, r) => s + (r.totalPay ?? 0), 0);
   const notInRun = visible.filter((r) => !r.li).length;
   // Taxes / deductions / reimbursements per person: the run line's
@@ -348,7 +405,7 @@ export function PayrollHistoryTab({
       const wb = new ExcelJS.Workbook();
       const ws = wb.addWorksheet("Payroll History");
       const groupLabel = HISTORY_GROUPS.find((g) => g.id === group)?.label ?? "All Employees";
-      ws.addRow([`Payroll History · ${fmtDay(periodStart)} – ${fmtDay(periodEnd)} · ${groupLabel}${department ? ` · ${department}` : ""}${q ? ` · "${search.trim()}"` : ""}`]).font = { bold: true, size: 13 };
+      ws.addRow([`Payroll History · ${fmtDay(periodStart)} – ${fmtDay(periodEnd)} · ${groupLabel}${deptLabel ? ` · ${deptLabel}` : ""}${q ? ` · "${search.trim()}"` : ""}`]).font = { bold: true, size: 13 };
       ws.addRow([]);
       const header = ws.addRow(["Name", "Role", "Department", "Branch", "Office", "Reviewed", "Gross Pay", "Taxes", "Deductions", "Reimbursements", "Total Pay", "In saved run"]);
       header.font = { bold: true, color: { argb: "FFFFFFFF" } };
@@ -469,19 +526,10 @@ export function PayrollHistoryTab({
             Show all date ranges ({hiddenRangeCount} more)
           </label>
         )}
-        <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-slate-400">
+        <div className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-slate-400">
           Department
-          <select
-            value={department}
-            onChange={(e) => setDepartment(e.target.value)}
-            className="bg-slate-800 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white normal-case tracking-normal min-w-[12rem]"
-          >
-            <option value="">All departments</option>
-            {departments.map((d) => (
-              <option key={d} value={d}>{d}</option>
-            ))}
-          </select>
-        </label>
+          <DepartmentChecklist departments={departments} selected={selectedDepts} onChange={setSelectedDepts} />
+        </div>
         <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-slate-400">
           Search
           <input
