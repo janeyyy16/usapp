@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { FloatingHorizontalScrollbar } from "@/components/FloatingHorizontalScrollbar";
 import { useNavigate } from "@tanstack/react-router";
 import { useSmartBack } from "@/hooks/useSmartBack";
-import { ChevronLeft, Download, DollarSign, Clock, CheckCircle, Wallet, Pencil, Trash2, XCircle, Paperclip, Loader2, Receipt, TrendingUp, Building2, Plane, BedDouble, Car, Undo2, RotateCcw } from "lucide-react";
+import { ChevronLeft, Download, DollarSign, Clock, CheckCircle, Wallet, Pencil, Trash2, XCircle, Paperclip, Loader2, Receipt, TrendingUp, Building2, Plane, BedDouble, Car, Undo2, RotateCcw, Landmark } from "lucide-react";
 import type { ModuleDef, SubModuleDef } from "@/lib/modules";
 import { useAuth } from "@/lib/auth";
 import { getCompanyUsers, getHireDatesByProfileIds, getMyProfileId, type ProfileRow } from "@/lib/supabase/users";
@@ -26,6 +26,9 @@ import { TicketColumnFilter } from "@/components/TicketColumnFilter";
 import { ReceiptLightbox, isPdfReceipt } from "@/components/ReceiptLightbox";
 import { getFlashTechTripReceipts } from "@/lib/supabase/flashTechTrips";
 import { useRememberedState } from "@/hooks/useRememberedState";
+import { CompanyExpensesPanel } from "@/components/CompanyExpensesPanel";
+import { getCompanyExpenseRows } from "@/lib/supabase/companyExpenses";
+import type { CompanyExpense } from "@/lib/companyExpenses";
 
 function expenseStatusColor(status: ExpenseStatus): string {
   switch (status) {
@@ -61,11 +64,12 @@ const KPI_TONES: Record<string, { chip: string; text: string; bar: string; borde
 };
 
 /** Flash Tech view buttons — each its own color, tinted when off and filled when picked. */
-const FT_VIEW_TONES: Record<"violet" | "sky" | "amber" | "rose" | "emerald", { on: string; off: string; icon: string; countOn: string; countOff: string }> = {
+const FT_VIEW_TONES: Record<"violet" | "sky" | "amber" | "rose" | "emerald" | "slate", { on: string; off: string; icon: string; countOn: string; countOff: string }> = {
   violet: { on: "border-violet-400/70 bg-violet-500/25 text-white shadow-[0_0_0_1px_rgba(167,139,250,0.25)]", off: "border-violet-500/30 bg-violet-500/10 text-violet-200 hover:bg-violet-500/20", icon: "text-violet-300", countOn: "bg-violet-400/40 text-white", countOff: "bg-violet-500/20 text-violet-200" },
   sky: { on: "border-sky-400/70 bg-sky-500/25 text-white shadow-[0_0_0_1px_rgba(56,189,248,0.25)]", off: "border-sky-500/30 bg-sky-500/10 text-sky-200 hover:bg-sky-500/20", icon: "text-sky-300", countOn: "bg-sky-400/40 text-white", countOff: "bg-sky-500/20 text-sky-200" },
   amber: { on: "border-amber-400/70 bg-amber-500/25 text-white shadow-[0_0_0_1px_rgba(251,191,36,0.25)]", off: "border-amber-500/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20", icon: "text-amber-300", countOn: "bg-amber-400/40 text-white", countOff: "bg-amber-500/20 text-amber-200" },
   rose: { on: "border-rose-400/70 bg-rose-500/25 text-white shadow-[0_0_0_1px_rgba(251,113,133,0.25)]", off: "border-rose-500/30 bg-rose-500/10 text-rose-200 hover:bg-rose-500/20", icon: "text-rose-300", countOn: "bg-rose-400/40 text-white", countOff: "bg-rose-500/20 text-rose-200" },
+  slate: { on: "border-slate-300/70 bg-slate-400/25 text-white shadow-[0_0_0_1px_rgba(203,213,225,0.25)]", off: "border-slate-400/30 bg-slate-500/10 text-slate-200 hover:bg-slate-500/20", icon: "text-slate-300", countOn: "bg-slate-300/40 text-white", countOff: "bg-slate-500/20 text-slate-200" },
   emerald: { on: "border-emerald-400/70 bg-emerald-500/25 text-white shadow-[0_0_0_1px_rgba(52,211,153,0.25)]", off: "border-emerald-500/30 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/20", icon: "text-emerald-300", countOn: "bg-emerald-400/40 text-white", countOff: "bg-emerald-500/20 text-emerald-200" },
 };
 
@@ -150,7 +154,25 @@ export function ExpenseTrackingPage({
   /** Spend by branch order: biggest spend first, or A → Z. */
   const [branchSort, setBranchSort] = useState<"amount" | "name">("amount");
   /** Flash Tech only: trip lines, the Flash Tech / Allowance requests employees send, or both. */
-  const [flashTechView, setFlashTechView] = useRememberedState<"all" | "trips" | "hotel" | "carRental" | "allowance">(`${rememberKey}:flash-view`, "all");
+  const [flashTechView, setFlashTechView] = useRememberedState<"all" | "trips" | "hotel" | "carRental" | "allowance" | "other">(`${rememberKey}:flash-view`, "all");
+  /** Flash Tech → Other Expenses: company expenses (migration 0479), not tied to an employee. Finance / Admin only. */
+  const [companyRows, setCompanyRows] = useState<CompanyExpense[]>([]);
+  const [companyLoading, setCompanyLoading] = useState(false);
+  const [companyError, setCompanyError] = useState<string | null>(null);
+  const loadCompany = useCallback(async () => {
+    setCompanyLoading(true);
+    try {
+      setCompanyRows(await getCompanyExpenseRows());
+      setCompanyError(null);
+    } catch (e) {
+      setCompanyError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCompanyLoading(false);
+    }
+  }, []);
+  useEffect(() => { if (flashTechOnly && canReviewExpenses && ready && uid) void loadCompany(); }, [flashTechOnly, canReviewExpenses, ready, uid, loadCompany]);
+  useEffect(() => { if (flashTechView === "other" && !canReviewExpenses) setFlashTechView("all"); }, [flashTechView, canReviewExpenses, setFlashTechView]);
+  const companyCount = companyRows.filter((r) => (!dateFrom || r.expenseDate >= dateFrom) && (!dateTo || r.expenseDate <= dateTo)).length;
   /** Rows whose Description is opened in full (clicked). */
   const [openDescriptions, setOpenDescriptions] = useState<Set<string>>(new Set());
   const toggleDescription = (id: string) =>
@@ -581,6 +603,7 @@ export function ExpenseTrackingPage({
                 ["hotel", "Hotel", BedDouble, flashTechCounts.hotel, "amber"],
                 ["carRental", "Car Rental", Car, flashTechCounts.carRental, "rose"],
                 ["allowance", "Allowance", Wallet, flashTechCounts.allowance, "emerald"],
+                ...(canReviewExpenses ? [["other", "Other Expenses", Landmark, companyCount, "slate"] as const] : []),
               ] as const).map(([key, label, Icon, count, tone]) => {
                 const on = flashTechView === key;
                 const c = FT_VIEW_TONES[tone];
@@ -602,6 +625,18 @@ export function ExpenseTrackingPage({
             </div>
           )}
 
+          {flashTechOnly && flashTechView === "other" ? (
+            <CompanyExpensesPanel
+              rows={companyRows}
+              loading={companyLoading}
+              loadError={companyError}
+              reload={loadCompany}
+              dateFrom={dateFrom}
+              dateTo={dateTo}
+              rangeLabel={rangeLabel}
+              canEdit={canReviewExpenses}
+            />
+          ) : (<>
           {/* KPI Cards */}
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             {(showStatus
@@ -960,6 +995,7 @@ export function ExpenseTrackingPage({
               </div>
             )}
           </div>
+          </>)}
         </div>
       </main>
 
